@@ -49,6 +49,11 @@ that, run the installer without `REDROP_TOKEN`, then
 `redrop login --url https://redrop.example.com` and paste the token at the
 prompt. `redrop guide` explains everything else.
 
+`redrop watch ID|URL PATH` republishes the artifact as a new version
+whenever the file or folder changes (debounced, deduplicated by content
+hash), printing each version as it publishes — useful while iterating on a
+page. Ctrl-C stops it.
+
 ## Develop
 
 Requires Go 1.26 and Node 24.

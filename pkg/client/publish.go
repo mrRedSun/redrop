@@ -156,6 +156,15 @@ func skipEntry(rel string, d fs.DirEntry) bool {
 	return base == ".DS_Store" || base == "Thumbs.db"
 }
 
+// skipEntryName is skipEntry from a base name plus a directory flag, for
+// callers (watch) that only have those.
+func skipEntryName(base string, isDir bool) bool {
+	if isDir {
+		return base == ".git" || base == "node_modules" || base == ".svn" || base == ".hg" || base == "__pycache__" || base == ".DS_Store"
+	}
+	return base == ".DS_Store" || base == "Thumbs.db"
+}
+
 func packDir(dir string, w io.Writer) error {
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)

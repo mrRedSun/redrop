@@ -86,6 +86,7 @@ chunked and resume automatically after network errors.
 ## Update and manage
 
     redrop update ID|URL PATH [--note "what changed"]   # same link, new version
+    redrop watch ID|URL PATH [--debounce 500ms]         # republish on change
     redrop list [--status active|expired|exhausted|revoked] [--search TEXT]
     redrop info ID|URL
     redrop set ID|URL --ttl 30d | --password-generate | --no-password |
@@ -100,6 +101,27 @@ chunked and resume automatically after network errors.
 
 Anywhere an ID is accepted, the artifact link (or just its four-word part,
 e.g. amber-otter-quilt-river) works too.
+
+## Watch
+
+    redrop watch ID|URL PATH [--debounce 500ms] [--json]
+
+Watches PATH (a file or folder, same rules as update) and publishes a new
+version of the same link whenever the content changes: ideal while iterating
+on a page with an agent. Edits settle first (--debounce, default 500ms);
+editor temp/swap files and .git are ignored; identical content publishes
+nothing. Each publish prints the version number and its time, or one JSON
+line per publish with --json:
+
+    {"event":"publish","id":"…","version":3,"url":"https://…","at":"…"}
+
+Never two uploads at once; changes that land during an upload are published
+once more afterwards. Ctrl-C or SIGTERM stops watching and exits 0. Network
+and server errors are retried with backoff; auth or not-found errors stop
+with exit codes 3/4. New subdirectories are picked up automatically. A
+watch session creates many versions; rely on the server's version retention
+(REDROP_KEEP_VERSIONS) or roll back with "redrop rollback" — there is
+deliberately no way to rewrite a published version.
 
 ## Exit codes
 
@@ -123,6 +145,8 @@ With --json, errors are written to stderr as {"error": "...", "exit_code": N}.
 - Give the artifact a clear --title; it is what the owner sees in the
   dashboard.
 - Use "redrop update" for revisions instead of creating new links.
+- Use "redrop watch" while iterating on one artifact so every edit goes to
+  the same link; stop it before polishing by hand.
 - Never print the API token.
 `
 
