@@ -33,6 +33,7 @@ type ArtifactMeta struct {
 	ExpiresAt    *time.Time
 	PurgeAt      *time.Time // when expired or used-up content is deleted
 	TokenName    string     // API token that created it
+	InfoButton   bool       // effective: the artifact's setting or the server default
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
@@ -110,8 +111,48 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		Size: a.Size, TotalSize: a.TotalSize, Files: a.Files, Version: a.CurrentVersion, Versions: a.Versions,
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
-		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName,
+		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a),
 	}
+}
+
+func (s *Service) infoButton(a *store.Artifact) bool {
+	if a.InfoButton != nil {
+		return *a.InfoButton
+	}
+	return s.cfg.InfoButtonDefault
+}
+
+// ViewerInfo is what an artifact's info button tells a visitor. DESIGN.md
+// ("Info button") fixes its contents: only what the visitor can already see
+// or infer from the page they were let into. It has no owner, ID, slug,
+// token name, view count of an unlimited link, or other versions' data.
+type ViewerInfo struct {
+	Title     string
+	Version   int
+	Published time.Time  // when the current version was published
+	ExpiresAt *time.Time // nil = never
+	MaxViews  int        // 0 = unlimited
+	ViewsLeft int        // only meaningful when MaxViews > 0
+	Password  bool
+	Size      int64 // current version
+	Files     int   // current version
+}
+
+// ViewerInfo returns the info button contents for a page of a, or false when
+// the button is off for it. Only HTML pages carry the button: html artifacts
+// and bundles. File artifacts get redrop's own viewer page instead.
+func (s *Service) ViewerInfo(a *store.Artifact) (ViewerInfo, bool) {
+	if (a.Kind != api.KindHTML && a.Kind != api.KindBundle) || !s.infoButton(a) {
+		return ViewerInfo{}, false
+	}
+	info := ViewerInfo{
+		Title: a.Title, Version: a.CurrentVersion, Published: a.Published, ExpiresAt: a.ExpiresAt,
+		Password: a.PasswordHash != "", Size: a.Size, Files: a.Files,
+	}
+	if a.MaxViews > 0 {
+		info.MaxViews, info.ViewsLeft = a.MaxViews, max(a.MaxViews-a.Views, 0)
+	}
+	return info, true
 }
 
 func (s *Service) ownerView(a *store.Artifact) Artifact {

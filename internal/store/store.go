@@ -15,7 +15,11 @@ import (
 //go:embed schema.sql
 var schemaV1 string
 
-var migrations = []string{schemaV1}
+// schemaV2 adds the per-artifact info button setting. NULL follows the
+// server default (REDROP_INFO_BUTTON_DEFAULT), so existing rows keep it.
+const schemaV2 = `ALTER TABLE artifacts ADD COLUMN info_button INTEGER;`
+
+var migrations = []string{schemaV1, schemaV2}
 
 var ErrNotFound = errors.New("not found")
 
@@ -102,6 +106,13 @@ func nullTime(t *time.Time) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: t.Unix(), Valid: true}
+}
+
+func nullBool(b *bool) sql.NullBool {
+	if b == nil {
+		return sql.NullBool{}
+	}
+	return sql.NullBool{Bool: *b, Valid: true}
 }
 
 func notFound(err error) error {

@@ -143,10 +143,11 @@ type PublishRequest struct {
 
 type CreateArtifactRequest struct {
 	PublishRequest
-	Title    string `json:"title,omitempty"`
-	TTL      string `json:"ttl,omitempty" description:"Lifetime like 30m, 12h, 7d, 2w, or never; empty uses the server default"`
-	Password string `json:"password,omitempty"`
-	MaxViews int    `json:"max_views,omitempty" description:"0 for unlimited; 1 for a one-time link"`
+	Title      string `json:"title,omitempty"`
+	TTL        string `json:"ttl,omitempty" description:"Lifetime like 30m, 12h, 7d, 2w, or never; empty uses the server default"`
+	Password   string `json:"password,omitempty"`
+	MaxViews   int    `json:"max_views,omitempty" description:"0 for unlimited; 1 for a one-time link"`
+	InfoButton *bool  `json:"info_button,omitempty" description:"Show the viewer info button on HTML pages; omitted uses the server default"`
 }
 
 type UpdateArtifactRequest struct {
@@ -157,6 +158,7 @@ type UpdateArtifactRequest struct {
 	ResetViews bool    `json:"reset_views,omitempty"`
 	Revoked    *bool   `json:"revoked,omitempty"`
 	SPA        *bool   `json:"spa,omitempty"`
+	InfoButton *bool   `json:"info_button,omitempty" description:"Show the viewer info button on HTML pages"`
 }
 
 type Version struct {
@@ -194,6 +196,7 @@ type Artifact struct {
 	PurgeAt       *time.Time `json:"purge_at" description:"When content is permanently removed"`
 	TokenName     string     `json:"token_name,omitempty" description:"API token that created it"`
 	OwnerUsername string     `json:"owner_username,omitempty" description:"Only in admin listings"`
+	InfoButton    bool       `json:"info_button" description:"Whether HTML pages show the viewer info button (the artifact's setting or the server default)"`
 }
 
 type ArtifactList struct {

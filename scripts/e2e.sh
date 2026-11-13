@@ -143,6 +143,29 @@ n=$(curl -fsS -H 'Range: bytes=0-99' "${FURL}blob.bin" | wc -c)
 curl -fsSI "${FURL}blob.bin?download" | grep -qi 'attachment' || die "download disposition"
 pass "file viewer, range requests, download"
 
+# info button: injected into top-level HTML pages only, never into the stored bytes
+W='__redropInfo'
+curl -fsS -H 'Sec-Fetch-Dest: document' "$URL" -o "$WORK/info.html"
+grep -q "$W" "$WORK/info.html" || die "info widget on html artifact"
+grep -q '"title":"E2E Report"' "$WORK/info.html" || die "info widget data"
+len=$(curl -fsSI -H 'Sec-Fetch-Dest: document' "$URL" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}')
+[ "$len" = "$(stat -c %s "$WORK/info.html")" ] || die "info page content-length $len"
+curl -fsS "${URL}?download" | grep -q "$W" && die "download carries the widget"
+curl -fsS -H 'Sec-Fetch-Dest: iframe' "$URL" | grep -q "$W" && die "widget inside a frame"
+curl -fsS -H 'Range: bytes=0-20000' "$URL" | grep -q "$W" && die "range request carries the widget"
+curl -fsS "${URL}?redrop-info=0" | grep -q "$W" && die "redrop-info=0 ignored"
+curl -fsS "${BURL}" | grep -q "$W" || die "info widget on bundle page"
+curl -fsS "${BURL}assets/app.css" | grep -q "$W" && die "widget in css"
+curl -fsS "$FURL" | grep -q "$W" && die "widget on file viewer"
+curl -fsS "${FURL}blob.bin" | grep -aq "$W" && die "widget in binary file"
+NURL=$($R share "$WORK/page.html" --no-info -q)
+curl -fsS "$NURL" | grep -q "$W" && die "widget despite --no-info"
+$R set "$NURL" --info | grep -q 'info button: *shown' || die "set --info output"
+curl -fsS "$NURL" | grep -q "$W" || die "widget after set --info"
+$R set "$NURL" --no-info >/dev/null
+curl -fsS "$NURL" | grep -q "$W" && die "widget after set --no-info"
+pass "info button: html and bundle pages only; not on downloads, frames, ranges, css, files, --no-info"
+
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)
 SID=$($R info "$SURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')

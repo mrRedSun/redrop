@@ -38,10 +38,11 @@ type Content struct {
 
 // Settings are the access settings of a new artifact.
 type Settings struct {
-	Title    string
-	TTL      string // "" = server default, "never", or a duration
-	Password string
-	MaxViews int
+	Title      string
+	TTL        string // "" = server default, "never", or a duration
+	Password   string
+	MaxViews   int
+	InfoButton *bool // nil = server default
 }
 
 // Patch changes an artifact's settings (nil = unchanged).
@@ -53,6 +54,7 @@ type Patch struct {
 	ResetViews bool
 	Revoked    *bool
 	SPA        *bool
+	InfoButton *bool
 }
 
 // --- validation and policy ---
@@ -235,7 +237,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	}
 	id, err := s.db.CreateArtifact(ctx, &store.NewArtifact{
 		UserID: actor.UserID, TokenID: actor.TokenID, TokenName: actor.TokenName,
-		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp,
+		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp, InfoButton: set.InfoButton,
 	}, v, s.cfg.MaxTotalBytes)
 	if err != nil {
 		return Artifact{}, mapStore(err)
@@ -354,7 +356,7 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 		}
 		u.MaxViews = p.MaxViews
 	}
-	u.ResetViews, u.Revoked, u.SPA = p.ResetViews, p.Revoked, p.SPA
+	u.ResetViews, u.Revoked, u.SPA, u.InfoButton = p.ResetViews, p.Revoked, p.SPA, p.InfoButton
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
 		return Artifact{}, mapStore(err)
 	}

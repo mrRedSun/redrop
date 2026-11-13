@@ -274,6 +274,8 @@ type PublishOptions struct {
 	TTL      string
 	Password string
 	MaxViews int
+	// InfoButton shows or hides the viewer info button; nil uses the server default.
+	InfoButton *bool
 }
 
 // Share prepares, uploads, and publishes a new artifact.
@@ -290,6 +292,7 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
 		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note},
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
+		InfoButton: opts.InfoButton,
 	})
 }
 

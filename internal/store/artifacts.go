@@ -31,9 +31,11 @@ type Artifact struct {
 	ExpiresAt      *time.Time
 	ExhaustedAt    *time.Time
 	LastViewedAt   *time.Time
+	InfoButton     *bool // nil = server default
 
 	// Current version details (joined).
 	Kind      string
+	Published time.Time // when the current version was published
 	Size      int64
 	Files     int
 	Entry     string
@@ -80,8 +82,8 @@ func (v *NewVersion) size() int64 {
 }
 
 const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.token_id,''), a.token_name, a.title, a.current_version, a.password_hash,
-	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at,
-	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0),
+	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button,
+	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0), coalesce(v.created_at,0),
 	(SELECT coalesce(sum(size),0) FROM versions WHERE artifact_id = a.id),
 	(SELECT count(*) FROM versions WHERE artifact_id = a.id)
 	FROM artifacts a JOIN users u ON u.id = a.user_id
@@ -90,14 +92,19 @@ const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.t
 func scanArtifact(r scanner) (*Artifact, error) {
 	var a Artifact
 	var created, updated int64
+	var published int64
 	var exp, exh, last sql.NullInt64
+	var info sql.NullBool
 	err := r.Scan(&a.ID, &a.Slug, &a.UserID, &a.OwnerUsername, &a.TokenID, &a.TokenName, &a.Title, &a.CurrentVersion, &a.PasswordHash,
-		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last,
-		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &a.TotalSize, &a.Versions)
+		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last, &info,
+		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &published, &a.TotalSize, &a.Versions)
 	if err != nil {
 		return nil, notFound(err)
 	}
-	a.CreatedAt, a.UpdatedAt = ts(created), ts(updated)
+	if info.Valid {
+		a.InfoButton = &info.Bool
+	}
+	a.CreatedAt, a.UpdatedAt, a.Published = ts(created), ts(updated), ts(published)
 	a.ExpiresAt, a.ExhaustedAt, a.LastViewedAt = tsp(exp), tsp(exh), tsp(last)
 	return &a, nil
 }
@@ -175,6 +182,7 @@ type NewArtifact struct {
 	PasswordHash string
 	MaxViews     int
 	ExpiresAt    *time.Time
+	InfoButton   *bool // nil = server default
 }
 
 // ErrQuota is returned when a write would exceed a quota.
@@ -212,8 +220,8 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 			tok = sql.NullString{String: na.TokenID, Valid: true}
 		}
 		n := now()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at)
-			VALUES (?,?,?,?,?,?,1,?,?,?,?,?)`, id, ids.Slug(), na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button)
+			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?)`, id, ids.Slug(), na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton)); err != nil {
 			return err
 		}
 		return insertVersion(ctx, tx, id, 1, v)
@@ -270,6 +278,7 @@ type ArtifactUpdate struct {
 	RotateSlug   bool
 	BumpGen      bool
 	SPA          *bool
+	InfoButton   *bool
 }
 
 func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) error {
@@ -297,6 +306,9 @@ func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate)
 		}
 		if u.Revoked != nil {
 			set, args = append(set, "revoked = ?"), append(args, *u.Revoked)
+		}
+		if u.InfoButton != nil {
+			set, args = append(set, "info_button = ?"), append(args, *u.InfoButton)
 		}
 		if u.RotateSlug {
 			set, args = append(set, "slug = ?"), append(args, ids.Slug())

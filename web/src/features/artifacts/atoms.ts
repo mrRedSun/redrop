@@ -31,7 +31,7 @@ export const preview = Atom.family((id: string) => query(['artifacts'], endpoint
 // ---- writes (arguments are form values or plain choices, never request bodies) ----
 
 export const saveSettings = Atom.family((id: string) =>
-  mutation((input: { values: ArtifactSettings; kind: Artifact['kind'] }) => endpoints.update(id, toUpdateRequest(input.values, input.kind)), {
+  mutation((input: { values: ArtifactSettings; artifact: Artifact }) => endpoints.update(id, toUpdateRequest(input.values, input.artifact)), {
     invalidates: ['artifacts'],
     success: 'Settings saved',
     failures: 'form',

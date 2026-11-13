@@ -41,7 +41,7 @@ Flags --url/--token override the environment, which overrides the saved login.
 ## Share
 
     redrop share PATH [--ttl 7d] [--title T] [--once | --max-views N]
-                      [--password-generate | --password-file F] [--json]
+                      [--password-generate | --password-file F] [--no-info] [--json]
 
 PATH decides the kind (override with --as html|file|bundle):
 
@@ -74,6 +74,13 @@ chunked and resume automatically after network errors.
   link-preview bots in chat apps cannot consume views. After the last view the
   link shows "no longer available" and the content is deleted shortly after.
 - Combine freely, e.g. --once --password-generate --ttl 1d.
+- Info button: HTML pages (html artifacts and bundle pages) show a small "i"
+  button in the bottom-right corner. It tells viewers the title, version and
+  publish time, the expiry countdown, remaining views, whether a password is
+  set, and the size. It never shows who shared the page. Hide it with
+  --no-info on share, update, or set (--info turns it back on); the server
+  default is usually on. Append ?redrop-info=0 to a page URL to hide it for one
+  load, e.g. for screenshots. The stored file is never modified.
 - Links are unguessable, not indexed (noindex + robots.txt), and send no
   Referer to third parties.
 
@@ -83,7 +90,8 @@ chunked and resume automatically after network errors.
     redrop list [--status active|expired|exhausted|revoked] [--search TEXT]
     redrop info ID|URL
     redrop set ID|URL --ttl 30d | --password-generate | --no-password |
-                     --max-views 3 | --unlimited | --reset-views | --title T
+                     --max-views 3 | --unlimited | --reset-views | --title T |
+                     --info | --no-info
     redrop revoke ID|URL      # disable now (restore with: redrop restore ID)
     redrop rotate ID|URL      # new link; the old one stops working
     redrop versions ID|URL    # history

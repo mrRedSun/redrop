@@ -9,20 +9,20 @@ import { Switch } from '@/components/ui/switch'
 import { formatDate } from '@/lib/format'
 import { schemaResolver, useFormSubmit } from '@/lib/forms'
 import * as artifacts from '../atoms'
-import { ArtifactSettingsForm, settingsDefaults, type Artifact } from '../schemas'
+import { ArtifactSettingsForm, hasInfoButton, settingsDefaults, type Artifact } from '../schemas'
 
 const ttlLabels = { keep: 'Keep current expiry', '1h': '1 hour from now', '1d': '1 day from now', '7d': '7 days from now', '30d': '30 days from now', '1y': '1 year from now', never: 'Never expire' } as const
 const passwordLabels = { keep: 'Keep current setting', set: 'Set a new password', remove: 'Remove password' } as const
 
 /**
- * Title, expiry, password, view limit, SPA. No request shape here: the atom
+ * Title, expiry, password, view limit, SPA, info button. No request shape here: the atom
  * maps form values to the PATCH body (toUpdateRequest) and declares the toast
  * and refresh; server failures render on the form.
  */
 export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boolean }) {
   const form = useForm({ resolver: schemaResolver(ArtifactSettingsForm), defaultValues: settingsDefaults(artifact, spa) })
   const onSubmit = useFormSubmit(form, artifacts.saveSettings(artifact.id), {
-    toArg: (values) => ({ values, kind: artifact.kind }),
+    toArg: (values) => ({ values, artifact }),
     onSuccess: (saved, values) => form.reset(settingsDefaults(saved, values.spa)),
   })
   const passwordAction = useWatch({ control: form.control, name: 'passwordAction' })
@@ -96,6 +96,17 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
               <div className="space-y-0.5">
                 <FormLabel>Single-page app</FormLabel>
                 <FormDescription>Serve the entry page for unknown paths without a file extension.</FormDescription>
+              </div>
+              <FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl>
+            </FormItem>
+          )} />
+        )}
+        {hasInfoButton(artifact.kind) && (
+          <FormField control={form.control} name="infoButton" render={({ field }) => (
+            <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <FormLabel>Show info button</FormLabel>
+                <FormDescription>A small "i" in the corner of the page shows viewers the title, version, expiry, remaining views, and size. Never who shared it.</FormDescription>
               </div>
               <FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl>
             </FormItem>

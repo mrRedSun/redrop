@@ -16,7 +16,7 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		Size: m.Size, TotalSize: m.TotalSize, Files: m.Files, Version: m.Version, Versions: m.Versions,
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
-		PurgeAt: m.PurgeAt, TokenName: m.TokenName,
+		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
 	}
 }
 
@@ -100,11 +100,11 @@ func contentFromRequest(p api.PublishRequest) sharing.Content {
 }
 
 func settingsFromRequest(r api.CreateArtifactRequest) sharing.Settings {
-	return sharing.Settings{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews}
+	return sharing.Settings{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, InfoButton: r.InfoButton}
 }
 
 func patchFromRequest(r api.UpdateArtifactRequest) sharing.Patch {
-	return sharing.Patch{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, ResetViews: r.ResetViews, Revoked: r.Revoked, SPA: r.SPA}
+	return sharing.Patch{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, ResetViews: r.ResetViews, Revoked: r.Revoked, SPA: r.SPA, InfoButton: r.InfoButton}
 }
 
 func userPatchFromRequest(r api.AdminUpdateUserRequest) accounts.UserPatch {

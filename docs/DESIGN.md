@@ -73,9 +73,60 @@ Paths under `/__redrop/` are reserved for gate pages and cannot be uploaded.
   locked links, they return the redrop icon with
   `Cache-Control: private, max-age=86400`. It is private so a CDN cannot pin
   the default over an icon the visitor unlocks later. These requests never
-  count, consume, or log a view. Artifact HTML is never rewritten. Directory
+  count, consume, or log a view. Icon links are never added to artifact
+  HTML (the info button below is the only serve-time addition). Directory
   listings and file viewers do not link an icon, so the browser's own
   `/favicon.ico` request decides.
+
+### Info button
+
+HTML artifact pages carry a small round "i" button in the bottom-right
+corner. It opens a popover with what the visitor is entitled to know about
+the page they are looking at.
+
+* **Shown:** the title, the current version number and when it was
+  published, the expiry as a live countdown (or "never expires"), the view
+  limit and views left for view-limited links ("one-time link: this was the
+  only view"), "password-protected" when set, the current version's size and
+  file count, and "Shared with redrop" with the redrop mark.
+* **Never shown:** the owner's identity, usernames, emails, artifact or token
+  IDs and names, the slug, other versions' content or sizes, or the view count
+  of an unlimited link. The rule is: nothing a visitor couldn't already see or
+  infer from the page they were let into. `sharing.ViewerInfo` holds exactly
+  these fields, and tests pin both it and the JSON the page receives.
+* **Where:** only top-level page navigations (`Sec-Fetch-Dest: document`, or
+  an HTML `Accept` without Fetch Metadata) of `text/html` files in `html`
+  artifacts and bundles. It is never added to frames (the widget also checks
+  `window.top`), fetches, subresources, non-HTML files, file artifacts
+  (redrop's own viewer page), gates, `?download`, or Range requests.
+* **How:** at serve time, one `<script>` element is inserted before the
+  last `</body>`, or appended when there is none. The rest of the document is
+  not parsed or changed, and stored blobs are never modified. The script
+  carries its data as JSON from `encoding/json`, which escapes `<`, `>`, `&`,
+  U+2028 and U+2029, so a title cannot end the script element. It renders
+  into a closed shadow root with `:host { all: initial !important }` and a
+  maximum z-index. It makes no network requests (the mark is a `data:` URL),
+  adds document listeners only while the popover is open, and defines one
+  global, the non-enumerable `__redropInfo` guard against double injection.
+* **HTTP:** the injected response is its own representation. It has its own
+  strong ETag (blob hash plus a hash of the snippet) and a correct
+  `Content-Length`; HEAD and conditional requests behave normally; and it
+  sends `Vary: Sec-Fetch-Dest, Accept`. `Cache-Control` stays
+  `private, no-cache`. Range requests always get the stored bytes with the
+  blob's ETag. Pages over 8 MiB are served unchanged.
+* **CSP:** redrop's artifact CSP only sets `frame-ancestors`, so the inline
+  script is allowed. If an artifact's own `<meta>` CSP or Trusted Types policy
+  blocks it, the page simply has no button. Styles use a constructed
+  stylesheet where supported (browsers do not currently apply `style-src` to
+  those), with a `<style>` element as the fallback.
+* **Views:** adding the button changes nothing about view counting. It is
+  part of the same response, and the widget never calls the server.
+* **Control:** a per-artifact setting (dashboard "Show info button", CLI
+  `--info` / `--no-info` on `share`, `update`, and `set`, API `info_button`).
+  Artifacts without their own setting, including those created before it
+  existed, follow `REDROP_INFO_BUTTON_DEFAULT` (default `true`). Adding
+  `?redrop-info=0` to a page URL hides it for that load only, e.g. for
+  screenshots.
 
 ### Gates and view counting
 

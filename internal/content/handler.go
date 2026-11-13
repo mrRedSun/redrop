@@ -157,7 +157,11 @@ func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.
 	t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path)
 	switch t.Kind {
 	case sharing.TargetFile:
-		h.sendFile(w, r, t.File, r.URL.Query().Has("download"))
+		download := r.URL.Query().Has("download")
+		if snippet, ok := h.infoFor(w, r, a, t.File, download); ok && h.sendPageWithInfo(w, r, t.File, snippet) {
+			return
+		}
+		h.sendFile(w, r, t.File, download)
 	case sharing.TargetViewer:
 		h.pages.fileViewer(w, h.sharing, t.File)
 	case sharing.TargetListing:
@@ -176,15 +180,19 @@ func (h *Handler) sendFile(w http.ResponseWriter, r *http.Request, f *store.File
 		return
 	}
 	defer fh.Close()
+	h.fileHeaders(w, f, `"`+f.Blob+`"`, download)
+	http.ServeContent(w, r, "", time.Time{}, fh)
+}
+
+func (h *Handler) fileHeaders(w http.ResponseWriter, f *store.File, etag string, download bool) {
 	hd := w.Header()
 	hd.Set("Content-Type", f.ContentType)
-	hd.Set("ETag", `"`+f.Blob+`"`)
+	hd.Set("ETag", etag)
 	disposition := "inline"
 	if download {
 		disposition = "attachment"
 	}
 	hd.Set("Content-Disposition", disposition+"; filename*=UTF-8''"+url.PathEscape(path.Base(f.Path)))
-	http.ServeContent(w, r, "", time.Time{}, fh)
 }
 
 func (h *Handler) preview(w http.ResponseWriter, r *http.Request, a *store.Artifact) {

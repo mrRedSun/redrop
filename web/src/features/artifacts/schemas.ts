@@ -28,6 +28,8 @@ export const Artifact = Schema.Struct({
   expires_at: Schema.NullOr(Timestamp),
   last_viewed_at: Schema.NullOr(Timestamp),
   purge_at: Schema.NullOr(Timestamp),
+  /** Effective: the artifact's own setting, or the server default when it has none. */
+  info_button: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
 export const ArtifactList = ListOf(Artifact)
@@ -40,6 +42,7 @@ export const UpdateArtifactRequest = Schema.Struct({
   max_views: Schema.optionalKey(Schema.Number),
   reset_views: Schema.optionalKey(Schema.Boolean),
   spa: Schema.optionalKey(Schema.Boolean),
+  info_button: Schema.optionalKey(Schema.Boolean),
   revoked: Schema.optionalKey(Schema.Boolean),
 })
 export type UpdateArtifactRequest = typeof UpdateArtifactRequest.Type
@@ -106,6 +109,7 @@ export const ArtifactSettingsForm = Schema.Struct({
   maxViews: ViewLimit,
   resetViews: Schema.Boolean,
   spa: Schema.Boolean,
+  infoButton: Schema.Boolean,
 }).check(
   Schema.makeFilter((v) =>
     v.passwordAction !== 'set' || v.password.length > 0 ? undefined : { path: ['password'], issue: 'Enter the new password' },
@@ -126,19 +130,25 @@ export const settingsDefaults = (a: Artifact, spa: boolean): ArtifactSettingsInp
   maxViews: String(a.max_views),
   resetViews: false,
   spa,
+  infoButton: a.info_button,
 })
+
+/** Only HTML pages carry the viewer info button: html artifacts and bundle pages. */
+export const hasInfoButton = (kind: Artifact['kind']) => kind !== 'file'
 
 /**
  * Form -> PATCH body. Keep omits expiry/password instead of resetting
  * them. Explicit TTL choices are relative to the submission time. `spa`
- * only applies to bundles.
+ * only applies to bundles. The info button is sent only when it changed, so
+ * saving other settings keeps an artifact on the server default.
  */
-export const toUpdateRequest = (v: ArtifactSettings, kind: Artifact['kind']): UpdateArtifactRequest => ({
+export const toUpdateRequest = (v: ArtifactSettings, a: Pick<Artifact, 'kind' | 'info_button'>): UpdateArtifactRequest => ({
   title: v.title,
   max_views: v.maxViews,
   ...(v.ttl !== 'keep' && { ttl: v.ttl }),
   ...(v.passwordAction === 'set' && { password: v.password }),
   ...(v.passwordAction === 'remove' && { password: '' }),
   ...(v.resetViews && { reset_views: true }),
-  ...(kind === 'bundle' && { spa: v.spa }),
+  ...(a.kind === 'bundle' && { spa: v.spa }),
+  ...(hasInfoButton(a.kind) && v.infoButton !== a.info_button && { info_button: v.infoButton }),
 })

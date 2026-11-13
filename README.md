@@ -11,6 +11,10 @@ cross-platform CLI that agents drive.
 - Optional password and view limit. One-time links show an "Open" page first, so
   chat link previews don't use them up. Same-link versions with rollback.
 - Multi-user and invite-only; built-in login with TOTP, plus OIDC single sign-on.
+- HTML pages get a small info button showing viewers the version, expiry
+  countdown, and remaining views, but never who shared the page. Turn it off
+  per artifact (`--no-info`, or in the dashboard settings), or for one load
+  with `?redrop-info=0`.
 
 ## Read first
 
@@ -76,6 +80,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_DATA_DIR` | `/data` |
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
+| `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the viewer info button on artifacts without their own setting |
 
 Status: in development, not yet released.
 

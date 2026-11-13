@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"net/http"
 	"path"
@@ -43,6 +44,12 @@ func load(types map[string]string) map[string]icon {
 		out[name] = icon{data: b, contentType: ct, etag: `"` + hex.EncodeToString(sum[:8]) + `"`}
 	}
 	return out
+}
+
+// SVGDataURL is the redrop mark as a data: URL, for pages that must not
+// fetch it.
+func SVGDataURL() string {
+	return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString(icons["favicon.svg"].data)
 }
 
 // Has reports whether name (e.g. "favicon.ico") is a redrop icon.
