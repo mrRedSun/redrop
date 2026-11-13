@@ -56,6 +56,7 @@ func (h adminAPI) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error)
 | `internal/apperr` | Transport-independent error kinds and user-safe messages, with private causes for logging. |
 | `internal/dashpaths` | Dashboard destinations minted or used by the server. Its test checks the corresponding declarations in `web/src/app/paths.ts`. |
 | `internal/web`, `internal/webui` | SPA/install/download delivery and the embedded Vite output. |
+| `internal/brand` | The redrop icons and their HTTP serving. `iconsrc` describes the mark once and generates the SVG, ICO, and Apple touch icon using only the standard library. |
 | `internal/janitor` | Maintenance scheduling and daily SQLite snapshots. |
 | `pkg/api`, `pkg/client`, `cmd/redrop` | Public JSON DTOs, the Go API client, and CLI behavior. |
 
@@ -260,6 +261,8 @@ npm run gen:api
 # Explicitly targets disposable development state, not production:
 BASE=http://127.0.0.1:8080 npm run check:contract
 ```
+
+`go generate ./internal/brand` regenerates `internal/brand/icons/` from `internal/brand/iconsrc`. A test fails when the committed files differ from the generator output. The Vite dev server reads the same directory as its public directory. The build does not copy it, because the Go server serves the icons at the root.
 
 `npm run gen:api` refreshes `openapi.json`; it no longer emits an unused openapi-fetch declaration file. `check:contract` runs the actual endpoint functions and Schemas against a server. It logs in/out, round-trips settings, and creates/revokes a token and invite. It is not a production health probe. Its defaults match the disposable e2e fixture; override credentials through the documented environment variables when appropriate.
 
