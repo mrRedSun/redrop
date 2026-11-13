@@ -5,6 +5,21 @@ pages, arbitrary files, and multi-file static bundles) through unguessable,
 expiring, optionally password-protected or view-limited links, with a React
 management dashboard and a cross-platform CLI that agents drive.
 
+## Principles
+
+- **An artifact is exactly what its owner uploaded, and nothing in it is specific
+  to redrop.**
+  - redrop never injects, rewrites or appends anything to an artifact's bytes.
+  - An artifact never has to include anything for redrop to work: no scripts,
+    markup, meta tags, messages, branding or naming conventions.
+  - Everything redrop adds (gates, the info panel, revisions, navigation
+    tracking) lives outside the artifact, in redrop's own pages, response
+    headers or the viewer frame. It must work with an artifact that has never
+    heard of redrop.
+  - A feature that would need an artifact's cooperation is out of scope.
+  - Client-side conversions (for example, Markdown to HTML) produce a plain,
+    self-contained document with no redrop-specific code or branding.
+
 ## Decisions
 
 | Topic | Decision |
