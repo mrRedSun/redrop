@@ -69,13 +69,18 @@ highlighting and copy buttons, tables, task lists, blockquotes, and responsive
 light/dark styles. Share a directory with `--render markdown --entry PATH` to
 include images and links relative to the selected Markdown file. A single file
 never uploads its siblings. Directory rendering refuses an existing root
-`index.html`, skips asset symlinks, and does not support `--spa`. Unpack archives
-before rendering.
+`index.html` and does not support `--spa`. Ordinary and Markdown bundles use the
+same packer and follow relative symlinks only within the selected directory.
+Outside-root, absolute, broken, and cyclic symlinks fail explicitly. Unpack
+archives before rendering. Missing local references in a single-file upload
+produce a stderr warning and a directory-publishing suggestion.
 
-Raw HTML, comments, external URLs, `data:` URLs, and unsafe attributes are removed
-from the generated page. Only relative bundle URLs and fragment links remain;
-a restrictive CSP prevents external resource requests. The original download and
-other bundle files remain unmodified and untrusted. Markdown sources are limited
+Raw HTML is displayed as escaped text, so prose such as `List<String>` survives
+without becoming markup. Unsafe attributes and active URL schemes are removed.
+HTTP/HTTPS and mailto links open with no opener or referrer; images stay local-only.
+A restrictive CSP prevents automatic external resource requests. Generated HTML
+has no branding, favicon, hosting-policy meta tags, or special download queries.
+The original download and other bundle files remain unmodified and untrusted. Markdown sources are limited
 to 8 MiB. Code blocks larger than 64 KiB and unknown languages stay plain text.
 Use `--render none` for larger sources.
 

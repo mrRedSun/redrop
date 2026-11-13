@@ -221,13 +221,13 @@ func (f *contentFlags) register(cmd *cobra.Command) {
 }
 
 func (f *contentFlags) source(arg string) (*client.Source, error) {
-	if f.render != "" && f.render != "auto" && f.render != "markdown" && f.render != "none" {
-		return nil, withCode(exitUsage, "unknown render mode %q (use auto, markdown, or none)", f.render)
+	mode, err := client.ParseRenderMode(f.render)
+	if err != nil {
+		return nil, mapErr(err)
 	}
-	if f.render == "markdown" && f.as != "" && f.as != "bundle" {
-		return nil, withCode(exitUsage, "--render markdown requires --as bundle or no --as")
-	}
-	src := &client.Source{Kind: f.as, Render: f.render, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note}
+	src := &client.Source{Kind: f.as, Render: mode, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, Warn: func(warning string) {
+		fmt.Fprintln(os.Stderr, "warning: "+warning)
+	}}
 	if arg == "-" {
 		if f.name == "" {
 			return nil, withCode(exitUsage, "--name is required when reading from stdin (e.g. --name report.html)")
@@ -266,7 +266,10 @@ Use --as bundle with a .zip or .tar.gz to publish an archived site.
 Markdown renders locally before upload. --render markdown forces rendering for
 other extensions; --render none or --as file keeps the raw file. A directory
 with --render markdown --entry docs/notes.md keeps relative images and links.
-Generated pages have no external resources or URLs; raw HTML is omitted.
+Raw HTML is escaped as text. HTTP/HTTPS and mailto links permit deliberate
+navigation with no opener/referrer; images stay local-only. Missing local assets
+in single-file uploads produce a warning. Documents have no hosting-specific
+branding, policy meta tags, or download queries.
 Markdown sources are limited to 8 MiB. Archives are not rendered: unpack first.
 
 Access control (combine freely):

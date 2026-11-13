@@ -73,15 +73,22 @@ relative image/link paths are rebased from that source to the root index.html.
 A single .md file does not upload siblings. Use a directory for local images.
 Archives are not rendered: unpack them into a directory first. Existing
 index.html files are never overwritten. --spa is not supported with rendering.
+Ordinary and Markdown directories share one confined packer. Relative symlinks
+within the directory are followed; outside-root, absolute, broken, and cyclic
+links fail. Missing local references in single-file uploads produce a stderr
+warning suggesting directory publishing. Invalid rendering options exit with 2.
 
 The page has heading anchors, a TOC at four headings, offline syntax highlighting,
 copy buttons, GFM tables/task lists, blockquotes, and responsive light/dark styles.
 Unknown languages and code blocks over 64 KiB stay plain. Sources over 8 MiB must
-use --render none. Rendering strips raw HTML, comments, external URLs, data URIs,
-and unsafe attributes. Only relative bundle links/images and fragments remain;
-a page CSP blocks external resources. There is no raw-HTML opt-in. The original
-is intentionally unmodified, so treat downloaded sources and other bundle files
-as untrusted content, not sanitized documents.
+use --render none. Raw HTML, including tags and comments, is escaped as visible
+text; List<String> stays intact. There is no raw-HTML opt-in. HTTP/HTTPS and mailto
+navigation links use a new tab with no opener/referrer. Images stay local-only;
+active schemes, data URIs and unsafe attributes are rejected. A page CSP blocks
+automatic external requests. The document has no hosting-specific branding, icon,
+policy meta tags, or download-query convention. The original is intentionally
+unmodified, so treat downloaded sources and other bundle files as untrusted
+content, not sanitized documents.
 
 The first line of normal output is "url: <link>". With --quiet, only the URL
 (and a generated password on the next line) is printed. With --json you get
@@ -124,6 +131,9 @@ chunked and resume automatically after network errors.
     redrop files ID|URL       # files in a bundle
     redrop views ID|URL       # opens, link previews, failed passwords
     redrop delete ID|URL --yes
+
+Updating an artifact first shared raw with a .md source now renders the new
+version by default. Add --render none to keep that version raw.
 
 Anywhere an ID is accepted, the artifact link (or just its four-word part,
 e.g. amber-otter-quilt-river) works too.

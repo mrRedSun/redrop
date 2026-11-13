@@ -3,6 +3,7 @@ package client
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -62,7 +63,7 @@ func TestPrepareMarkdownModes(t *testing.T) {
 	} {
 		t.Run(tc.name+tc.render+tc.kind, func(t *testing.T) {
 			const original = "# Hello\r\n\r\nOriginal bytes.\n"
-			p, err := Prepare(&Source{Reader: strings.NewReader(original), Name: tc.name, Render: tc.render, Kind: tc.kind})
+			p, err := Prepare(&Source{Reader: strings.NewReader(original), Name: tc.name, Render: RenderMode(tc.render), Kind: tc.kind})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -119,7 +120,7 @@ func TestPrepareMarkdownFileAndBundle(t *testing.T) {
 	}
 	defer p.Close()
 	files = unpackPrepared(t, p)
-	if len(files) != 4 || files["docs/notes.md"] != original || files["docs/images/sketch.png"] != "image bytes" || !strings.Contains(files["index.html"], `src="./docs/images/sketch.png"`) || !strings.Contains(files["index.html"], `href="docs/notes.md?download"`) {
+	if len(files) != 4 || files["docs/notes.md"] != original || files["docs/images/sketch.png"] != "image bytes" || !strings.Contains(files["index.html"], `src="./docs/images/sketch.png"`) || !strings.Contains(files["index.html"], `href="./docs/notes.md" download`) {
 		t.Fatal("bundle lost source, assets, relative image, or source download")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "index.html")); !os.IsNotExist(err) {
@@ -150,9 +151,13 @@ func TestPrepareMarkdownInvalid(t *testing.T) {
 		{Render: "markdown", Path: dir, Entry: "notes.md"},
 	}
 	for _, src := range cases {
-		if p, err := Prepare(&src); err == nil {
+		p, err := Prepare(&src)
+		var usage *UsageError
+		if err == nil {
 			p.Close()
 			t.Errorf("accepted invalid source %#v", src)
+		} else if !errors.As(err, &usage) {
+			t.Errorf("invalid options did not produce a usage error: %v", err)
 		}
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "index.html"))
@@ -161,7 +166,7 @@ func TestPrepareMarkdownInvalid(t *testing.T) {
 	}
 }
 
-func TestMarkdownBundleSkipsAssetSymlinks(t *testing.T) {
+func TestMarkdownBundleRejectsOutsideAssetSymlinks(t *testing.T) {
 	outside := t.TempDir()
 	private := filepath.Join(outside, "private.txt")
 	if err := os.WriteFile(private, []byte("private bytes"), 0o600); err != nil {
@@ -177,14 +182,9 @@ func TestMarkdownBundleSkipsAssetSymlinks(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "dir-link")); err != nil {
 		t.Fatal(err)
 	}
-	p, err := Prepare(&Source{Path: dir, Render: "markdown", Entry: "notes.md"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer p.Close()
-	files := unpackPrepared(t, p)
-	if len(files) != 2 || files["notes.md"] != "# Notes\n" {
-		t.Fatal("asset symlinks were not skipped")
+	if p, err := Prepare(&Source{Path: dir, Render: "markdown", Entry: "notes.md"}); err == nil {
+		p.Close()
+		t.Fatal("outside-root asset symlinks should fail, not disappear silently")
 	}
 }
 

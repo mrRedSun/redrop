@@ -3,12 +3,9 @@ package client
 import (
 	"archive/tar"
 	"archive/zip"
-	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,7 +26,10 @@ type Source struct {
 	Kind string
 	// Render is auto (the default), markdown, or none. Auto renders .md files
 	// unless Kind is explicitly set. Directories require markdown and Entry.
-	Render string
+	Render RenderMode
+	// Warn receives non-fatal publishing warnings, such as missing local assets.
+	// Nil leaves warnings available only on Prepared.Warnings.
+	Warn func(string)
 	// Entry is the start page inside a bundle (default index.html).
 	// With Render markdown on a directory, it selects the Markdown source.
 	Entry string
@@ -43,6 +43,7 @@ type Prepared struct {
 	Kind     string
 	Filename string
 	Entry    string // effective entry, including generated index.html
+	Warnings []string
 	cleanup  func()
 }
 
@@ -67,8 +68,12 @@ func DetectKind(name string, isDir bool) string {
 
 // Prepare packs a Source into an upload-ready temporary file when needed.
 func Prepare(src *Source) (*Prepared, error) {
-	if src.Render != "" && src.Render != "auto" && src.Render != "markdown" && src.Render != "none" {
-		return nil, fmt.Errorf("unknown render mode %q (use auto, markdown, or none)", src.Render)
+	mode, err := ParseRenderMode(string(src.Render))
+	if err != nil {
+		return nil, err
+	}
+	if mode == RenderMarkdown && src.Kind != "" && src.Kind != api.KindBundle {
+		return nil, usageErrorf("--render markdown conflicts with --as %s; omit --as or use --as bundle", src.Kind)
 	}
 	p := &Prepared{Entry: src.Entry}
 	var tmpFiles []string
@@ -84,7 +89,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	isDir := false
 	if src.Reader != nil {
 		if name == "" {
-			return nil, errors.New("a file name is required when reading from stdin (use --name)")
+			return nil, usageErrorf("a file name is required when reading from stdin (use --name)")
 		}
 		tmp, err := os.CreateTemp("", "redrop-stdin-*")
 		if err != nil {
@@ -108,11 +113,16 @@ func Prepare(src *Source) (*Prepared, error) {
 			name = filepath.Base(abs)
 		}
 	}
-	render := src.Render == "markdown" || ((src.Render == "" || src.Render == "auto") && src.Kind == "" && !isDir && strings.EqualFold(path.Ext(name), ".md"))
-	if render {
+	shouldRender := mode == RenderMarkdown || (mode == RenderAuto && src.Kind == "" && !isDir && strings.EqualFold(path.Ext(name), ".md"))
+	if shouldRender {
 		rendered, err := prepareMarkdown(src, srcPath, name, isDir)
 		if err != nil {
 			return fail(err)
+		}
+		if src.Warn != nil {
+			for _, warning := range rendered.Warnings {
+				src.Warn(warning)
+			}
 		}
 		cleanup := rendered.cleanup
 		rendered.cleanup = func() { cleanup(); p.Close() }
@@ -127,7 +137,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	switch kind {
 	case api.KindHTML, api.KindFile:
 		if isDir {
-			return fail(fmt.Errorf("%s is a directory; share it as a bundle", srcPath))
+			return fail(usageErrorf("%s is a directory; share it as a bundle", srcPath))
 		}
 		p.File = srcPath
 	case api.KindBundle:
@@ -161,82 +171,9 @@ func Prepare(src *Source) (*Prepared, error) {
 		}
 		p.File = tmp.Name()
 	default:
-		return fail(fmt.Errorf("unknown kind %q (use html, file, or bundle)", kind))
+		return fail(usageErrorf("unknown kind %q (use html, file, or bundle)", kind))
 	}
 	return p, nil
-}
-
-func skipEntry(rel string, d fs.DirEntry) bool {
-	base := d.Name()
-	if d.IsDir() {
-		return base == ".git" || base == "node_modules" || base == ".svn" || base == ".hg" || base == "__pycache__" || base == ".DS_Store"
-	}
-	return base == ".DS_Store" || base == "Thumbs.db"
-}
-
-func packDir(dir string, w io.Writer) error {
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil || rel == "." {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if skipEntry(rel, d) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := os.Stat(p) // follow symlinks to their content
-		if err != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		return addFile(tw, p, rel, info.Size())
-	})
-	if err != nil {
-		return err
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
-}
-
-func addFile(tw *tar.Writer, src, name string, size int64) error {
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: size, Typeflag: tar.TypeReg}); err != nil {
-		return err
-	}
-	_, err = io.CopyN(tw, f, size)
-	return err
-}
-
-func packSingle(src, name string, w io.Writer) error {
-	st, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	if err := addFile(tw, src, name, st.Size()); err != nil {
-		return err
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
 }
 
 func zipToTarGz(src string, w io.Writer) error {
@@ -257,33 +194,29 @@ func zipToTarGz(src string, w io.Writer) error {
 			break
 		}
 	}
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || !f.Mode().IsRegular() {
-			continue
+	return writeTarGzip(w, func(tw *tar.Writer) error {
+		for _, f := range zr.File {
+			if f.FileInfo().IsDir() || !f.Mode().IsRegular() {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimPrefix(f.Name, "/"), prefix)
+			if name == "" || strings.HasPrefix(path.Base(name), "._") || strings.HasPrefix(name, "__MACOSX/") {
+				continue
+			}
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			err = addBundleFile(tw, name, rc, int64(f.UncompressedSize64))
+			if closeErr := rc.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				return err
+			}
 		}
-		name := strings.TrimPrefix(strings.TrimPrefix(f.Name, "/"), prefix)
-		if name == "" || strings.HasPrefix(path.Base(name), "._") || strings.HasPrefix(name, "__MACOSX/") {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		err = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(f.UncompressedSize64), Typeflag: tar.TypeReg})
-		if err == nil {
-			_, err = io.CopyN(tw, rc, int64(f.UncompressedSize64))
-		}
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
+		return nil
+	})
 }
 
 // PublishOptions are artifact settings for a new share.

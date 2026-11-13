@@ -21,6 +21,8 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/renderer"
+	"github.com/yuin/goldmark/util"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
@@ -44,20 +46,30 @@ type heading struct {
 	Level    int
 }
 
+// Result contains the portable document and the bundle-relative asset/link paths
+// it references. Callers decide which references exist in their upload.
+type Result struct {
+	HTML            []byte
+	LocalReferences []string
+}
+
 // Render returns a self-contained HTML page. name and base are slash-separated
 // paths inside the bundle. base rebases relative links when the source is nested.
-func Render(source []byte, name, base string) ([]byte, error) {
+func Render(source []byte, name, base string) (Result, error) {
 	if len(source) > MaxSourceBytes {
-		return nil, fmt.Errorf("Markdown exceeds %d MiB; use --render none to share it raw", MaxSourceBytes>>20)
+		return Result{}, fmt.Errorf("Markdown exceeds %d MiB; use --render none to share it raw", MaxSourceBytes>>20)
 	}
 	var raw bytes.Buffer
-	md := goldmark.New(goldmark.WithExtensions(extension.GFM)) // no raw HTML option
+	md := goldmark.New(
+		goldmark.WithExtensions(extension.GFM),
+		goldmark.WithRendererOptions(renderer.WithNodeRenderers(util.Prioritized(rawTextRenderer{}, 100))),
+	) // Raw HTML is always escaped, never enabled.
 	if err := md.Convert(source, &raw); err != nil {
-		return nil, fmt.Errorf("render Markdown: %w", err)
+		return Result{}, fmt.Errorf("render Markdown: %w", err)
 	}
 	nodes, err := html.ParseFragment(&raw, &html.Node{Type: html.ElementNode, Data: "div", DataAtom: atom.Div})
 	if err != nil {
-		return nil, fmt.Errorf("parse Markdown output: %w", err)
+		return Result{}, fmt.Errorf("parse Markdown output: %w", err)
 	}
 	root := &html.Node{Type: html.ElementNode, Data: "div"}
 	for _, n := range nodes {
@@ -65,73 +77,12 @@ func Render(source []byte, name, base string) ([]byte, error) {
 	}
 	highlight(root)
 	sanitize(root, base)
-	var headings []heading
-	used := map[string]bool{"main": true}
-	nextSuffix := map[string]int{}
-	fragments := map[string]string{}
-	title := path.Base(name)
-	foundTitle := false
-	walk(root, func(n *html.Node) {
-		if n.Type != html.ElementNode || len(n.Data) != 2 || n.Data[0] != 'h' || n.Data[1] < '1' || n.Data[1] > '6' {
-			return
-		}
-		text := nodeText(n)
-		if n.Data == "h1" && !foundTitle {
-			title, foundTitle = text, true
-		}
-		slug := "md-" + strings.Map(func(r rune) rune {
-			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' {
-				return unicode.ToLower(r)
-			}
-			if unicode.IsSpace(r) {
-				return '-'
-			}
-			return -1
-		}, text)
-		id := slug
-		if used[id] {
-			i := max(2, nextSuffix[slug])
-			for {
-				id = slug + "-" + strconv.Itoa(i)
-				i++
-				if !used[id] {
-					break
-				}
-			}
-			nextSuffix[slug] = i
-		}
-		used[id] = true
-		fragments[strings.TrimPrefix(id, "md-")] = id
-		n.Attr = append(n.Attr, html.Attribute{Key: "id", Val: id})
-		a := &html.Node{Type: html.ElementNode, Data: "a", Attr: []html.Attribute{
-			{Key: "class", Val: "anchor"}, {Key: "href", Val: "#" + id}, {Key: "aria-label", Val: "Link to " + text},
-		}}
-		a.AppendChild(&html.Node{Type: html.TextNode, Data: "#"})
-		n.AppendChild(a)
-		headings = append(headings, heading{ID: id, Text: text, Level: int(n.Data[1] - '0')})
-	})
-	// Keep conventional authored links such as #setup working with prefixed IDs.
-	// Explicit generated permalinks and template anchors take precedence.
-	walk(root, func(n *html.Node) {
-		if n.Type != html.ElementNode || n.Data != "a" {
-			return
-		}
-		for i, a := range n.Attr {
-			if a.Key != "href" || !strings.HasPrefix(a.Val, "#") {
-				continue
-			}
-			u, err := url.Parse(a.Val)
-			if err == nil && !used[u.Fragment] {
-				if id, ok := fragments[u.Fragment]; ok {
-					n.Attr[i].Val = "#" + id
-				}
-			}
-		}
-	})
+	references := localReferences(root)
+	headings, title := assignHeadingIDs(root, name)
 	var body bytes.Buffer
 	for n := root.FirstChild; n != nil; n = n.NextSibling {
 		if err := html.Render(&body, n); err != nil {
-			return nil, err
+			return Result{}, err
 		}
 	}
 	if len(headings) < 4 {
@@ -142,8 +93,8 @@ func Render(source []byte, name, base string) ([]byte, error) {
 		Title, Name, Download, ScriptHash string
 		Body                              template.HTML
 		Headings                          []heading
-	}{title, name, (&url.URL{Path: name, RawQuery: "download"}).String(), scriptHash, template.HTML(body.String()), headings}) // body passed the allowlist above
-	return out.Bytes(), err
+	}{title, name, (&url.URL{Path: "./" + name}).String(), scriptHash, template.HTML(body.String()), headings}) // body passed the allowlist above
+	return Result{HTML: out.Bytes(), LocalReferences: references}, err
 }
 
 func walk(n *html.Node, fn func(*html.Node)) {
@@ -222,9 +173,16 @@ func sanitize(root *html.Node, base string) {
 				continue
 			}
 			switch {
-			case n.Data == "a" && a.Key == "href", n.Data == "img" && a.Key == "src":
+			case n.Data == "a" && a.Key == "href":
+				if value, external, ok := navigationURL(a.Val, base); ok {
+					n.Attr = append(n.Attr, html.Attribute{Key: "href", Val: value})
+					if external {
+						n.Attr = append(n.Attr, html.Attribute{Key: "rel", Val: "noopener noreferrer nofollow"}, html.Attribute{Key: "target", Val: "_blank"})
+					}
+				}
+			case n.Data == "img" && a.Key == "src":
 				if value, ok := localURL(a.Val, base); ok {
-					n.Attr = append(n.Attr, html.Attribute{Key: a.Key, Val: value})
+					n.Attr = append(n.Attr, html.Attribute{Key: "src", Val: value})
 				}
 			case a.Key == "title" && (n.Data == "a" || n.Data == "img"), a.Key == "alt" && n.Data == "img":
 				n.Attr = append(n.Attr, a)
@@ -241,6 +199,15 @@ func sanitize(root *html.Node, base string) {
 				n.Attr = append(n.Attr, html.Attribute{Key: "checked"})
 			}
 		}
+		if n.Data == "a" {
+			hasHref := false
+			for _, a := range n.Attr {
+				hasHref = hasHref || a.Key == "href"
+			}
+			if !hasHref {
+				n.Data, n.DataAtom = "span", atom.Span
+			}
+		}
 		if n.Data == "input" {
 			n.Attr = append(n.Attr, html.Attribute{Key: "type", Val: "checkbox"}, html.Attribute{Key: "disabled"})
 		}
@@ -251,7 +218,7 @@ func sanitize(root *html.Node, base string) {
 
 func localURL(value, base string) (string, bool) {
 	// Backslashes and controls have browser-specific URL parsing semantics.
-	if strings.ContainsAny(value, "\\") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+	if value == "" || strings.ContainsAny(value, "\\") || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return "", false
 	}
 	u, err := url.Parse(value)
@@ -268,11 +235,15 @@ func localURL(value, base string) (string, bool) {
 		}
 		u.Path = path.Join(base, decoded)
 		u.RawPath = ""
-		if u.Path == ".." || strings.HasPrefix(u.Path, "../") || u.Path == "__redrop" || strings.HasPrefix(u.Path, "__redrop/") {
+		if u.Path == ".." || strings.HasPrefix(u.Path, "../") {
 			return "", false
 		}
 		// Make a colon in the first segment unambiguously a relative path.
 		u.Path = "./" + u.Path
 	}
-	return u.String(), true
+	if u.Path == "" && u.RawQuery != "" {
+		u.Path = "./"
+	}
+	result := u.String()
+	return result, result != ""
 }

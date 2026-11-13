@@ -2,8 +2,10 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/mrRedSun/redrop/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +24,7 @@ func TestRenderFlag(t *testing.T) {
 				if !errors.As(err, &ee) || ee.code != exitUsage {
 					t.Errorf("invalid mode should return a usage error, got %v", err)
 				}
-			} else if err != nil || src.Render != mode {
+			} else if err != nil || src.Render != client.RenderMode(mode) {
 				t.Fatalf("render mode was not passed to the client: %+v, %v", src, err)
 			}
 		})
@@ -34,8 +36,29 @@ func TestRenderFlag(t *testing.T) {
 		}
 	}
 	f := contentFlags{as: "file", render: "markdown"}
-	if _, err := f.source("notes.md"); err == nil {
-		t.Error("conflicting explicit kind accepted")
+	src, err := f.source("notes.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Prepare(src)
+	var ee *exitError
+	if !errors.As(mapErr(err), &ee) || ee.code != exitUsage {
+		t.Errorf("client conflict should map to usage exit code, got %v", err)
+	}
+}
+
+func TestMarkdownUsageExitCodes(t *testing.T) {
+	for _, src := range []client.Source{
+		{Render: client.RenderMarkdown, Path: t.TempDir()},
+		{Render: client.RenderMarkdown, Name: "notes.md", Reader: strings.NewReader("x"), SPA: true},
+		{Render: client.RenderMarkdown, Name: "site.zip", Reader: strings.NewReader("x")},
+		{Render: client.RenderMarkdown, Name: "../notes.md", Reader: strings.NewReader("x")},
+	} {
+		_, err := client.Prepare(&src)
+		var ee *exitError
+		if !errors.As(mapErr(err), &ee) || ee.code != exitUsage {
+			t.Errorf("invalid Markdown options must exit 2: %v", err)
+		}
 	}
 }
 

@@ -147,19 +147,23 @@ curl -fsS "${UNKNOWN}favicon.ico" | cmp -s - "$WORK/default.ico" || die "unknown
 pass "bundle: index, types, SPA fallback, listing, 404, own favicon only after a page view"
 
 # Markdown: local rendering, original download, update, opt-out, and bundled images.
-printf '# Markdown report\n\n## Details\n\nA **styled** document.\n' > "$WORK/notes.md"
-MURL=$($R share "$WORK/notes.md" -q)
+printf '# Markdown report\n\n## Details\n\nA **styled** document. Returns List<String>.\n\n[Docs](https://example.com/docs) ![Missing](pic.png)\n' > "$WORK/notes.md"
+MURL=$($R share "$WORK/notes.md" -q 2> "$WORK/markdown-warnings")
+grep -q 'pic.png is not uploaded; share the directory with --render markdown --entry notes.md' "$WORK/markdown-warnings" || die "Markdown missing-asset warning"
 curl -fsS "$MURL" -o "$WORK/rendered.html"
 grep -q '<h1 id="md-markdown-report">Markdown report' "$WORK/rendered.html" || die "Markdown heading"
 grep -q '<strong>styled</strong>' "$WORK/rendered.html" || die "Markdown formatting"
 curl -fsSI "$MURL" | grep -qi 'content-type: text/html' || die "Markdown entry type"
-curl -fsS "${MURL}notes.md?download" | cmp -s - "$WORK/notes.md" || die "Markdown original bytes"
-curl -fsSI "${MURL}notes.md?download" | grep -qi 'attachment' || die "Markdown original download"
+curl -fsS "${MURL}notes.md" | cmp -s - "$WORK/notes.md" || die "Markdown original bytes"
+grep -q 'href="./notes.md" download' "$WORK/rendered.html" || die "portable Markdown download link"
+grep -q 'List&lt;String&gt;' "$WORK/rendered.html" || die "Markdown generic type preserved"
+grep -q 'href="https://example.com/docs" rel="noopener noreferrer nofollow" target="_blank"' "$WORK/rendered.html" || die "safe Markdown external link"
+if grep -Eq 'rel="icon"|name="robots"|name="referrer"|\?download' "$WORK/rendered.html"; then die "Markdown contains hosting-specific content"; fi
 MID=$($R info "$MURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 printf '# Revised report\n' > "$WORK/notes.md"
 $R update "$MID" "$WORK/notes.md" >/dev/null
 curl -fsS "$MURL" | grep -q '<h1 id="md-revised-report">Revised report' || die "Markdown update"
-curl -fsS "${MURL}notes.md?download" | cmp -s - "$WORK/notes.md" || die "updated Markdown source"
+curl -fsS "${MURL}notes.md" | cmp -s - "$WORK/notes.md" || die "updated Markdown source"
 RAW=$($R share "$WORK/notes.md" --render none -q)
 [ "$($R info "$RAW" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["kind"])')" = file ] || die "Markdown render none kind"
 curl -fsS "${RAW}notes.md" | cmp -s - "$WORK/notes.md" || die "raw Markdown bytes"
@@ -169,11 +173,15 @@ curl -fsS "$FORCED" | grep -q '<h1 id="md-revised-report">Revised report' || die
 mkdir -p "$WORK/md-bundle/docs/images"
 printf '# Bundled report\n\n![Sketch](images/sketch.png)\n' > "$WORK/md-bundle/docs/report.md"
 printf 'image-fixture' > "$WORK/md-bundle/docs/images/sketch.png"
+ln -s images/sketch.png "$WORK/md-bundle/docs/image-link.png"
 MBURL=$($R share "$WORK/md-bundle" --render markdown --entry docs/report.md -q)
 curl -fsS "$MBURL" | grep -q 'src="./docs/images/sketch.png"' || die "Markdown bundle relative image"
 [ "$(curl -fsS "${MBURL}docs/images/sketch.png")" = image-fixture ] || die "Markdown bundle asset"
-curl -fsS "${MBURL}docs/report.md?download" | cmp -s - "$WORK/md-bundle/docs/report.md" || die "Markdown bundle original"
-pass "Markdown: HTML entry, exact source download, update, raw opt-out, forced rendering, relative bundle images"
+curl -fsS "${MBURL}docs/report.md" | cmp -s - "$WORK/md-bundle/docs/report.md" || die "Markdown bundle original"
+[ "$(curl -fsS "${MBURL}docs/image-link.png")" = image-fixture ] || die "Markdown bundle symlink asset"
+ORDINARY=$($R share "$WORK/md-bundle" -q)
+[ "$(curl -fsS "${ORDINARY}docs/image-link.png")" = image-fixture ] || die "ordinary bundle symlink policy"
+pass "Markdown: portable HTML, literal generics, safe links, asset warning, source download, update, raw opt-out, bundle symlinks"
 
 # file kind + range request
 head -c 3000000 /dev/urandom > "$WORK/blob.bin"
@@ -200,6 +208,12 @@ pass "stdin share, revoke/restore, rotate to a four-word link"
 set +e
 $R info doesnotexist00 >/dev/null 2>&1; [ $? = 4 ] || die "exit code 4 for not found"
 $R share "$WORK/page.html" --ttl banana >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for bad ttl"
+$R share "$WORK/notes.md" --render invalid >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for render mode"
+$R share "$WORK/notes.md" --render markdown --as file >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for render-kind conflict"
+$R share "$WORK/notes.md" --spa >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for Markdown SPA"
+$R share "$WORK/md-bundle" --render markdown >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for missing Markdown entry"
+$R share "$WORK/notes.md" --name ../notes.md >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for Markdown name"
+$R share "$WORK/notes.md" --name site.zip --render markdown >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for Markdown archive"
 REDROP_TOKEN=rdp_bad $R list >/dev/null 2>&1; [ $? = 3 ] || die "exit code 3 for bad token"
 set -e
 pass "exit codes 2/3/4"

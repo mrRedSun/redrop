@@ -18,10 +18,11 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/blob"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 // ReservedPrefix is the URL path space used by gate pages on artifact hosts.
-const ReservedPrefix = "__redrop"
+const ReservedPrefix = api.ReservedPrefix
 
 func init() {
 	// Distroless images ship no /etc/mime.types; register what artifacts use.

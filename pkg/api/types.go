@@ -4,6 +4,9 @@ package api
 
 import "time"
 
+// ReservedPrefix is the server-owned URL path segment that uploads cannot use.
+const ReservedPrefix = "__redrop"
+
 // Artifact kinds.
 const (
 	KindHTML   = "html"

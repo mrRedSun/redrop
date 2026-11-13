@@ -213,12 +213,19 @@ network lookups or timestamps in the output.
   Assets and the original source keep their bundle paths; generated relative
   links/images are rebased from the source directory to the root entry. Single
   files never upload siblings. Rendering does not modify the input directory and
-  refuses an existing root `index.html`. Asset symlinks are skipped, source
-  selection, traversal, and asset reads are confined with `os.OpenRoot`. Archive
-  rendering is unsupported.
+  refuses an existing root `index.html`. Ordinary and Markdown bundles share one
+  `fs.FS` packer. Relative file and directory symlinks are followed only within
+  the selected `os.OpenRoot`; outside-root, absolute, broken, or cyclic links fail
+  explicitly. Directory depth is bounded at 64. Archive rendering is unsupported.
 - Sources are limited to 8 MiB. Unknown code languages and blocks over 64 KiB stay
   escaped plain text rather than invoking a lexer. Rendering does not support
-  `--spa`; ordinary bundle publishing is unchanged.
+  `--spa`. Invalid render options return a typed client usage error, mapped to
+  CLI exit code 2. `client.RenderMode` and `ParseRenderMode` define the modes once.
+- Single-file rendering reports local references that are not uploaded. The CLI
+  warns on stderr and suggests directory publishing; it never uploads siblings
+  implicitly. Library users may inspect `Prepared.Warnings` or set `Source.Warn`.
+  Updating a raw Markdown artifact with auto-rendering creates a rendered bundle
+  version; `--render none` keeps the new version raw.
 
 ### Rendering and safety
 
@@ -229,29 +236,45 @@ there are no CDN scripts, web fonts, or runtime highlighting dependencies.
 allowlist, rather than relying on regex-based HTML filtering. These dependencies
 are pinned in the Go module graph and belong to the client build, not the server.
 
-Raw HTML is disabled with no opt-in. The allowlist also strips comments, active
-content, event handlers, arbitrary CSS, and unsafe URLs after highlighting.
-Resource/link URLs must be relative bundle paths or fragments. Schemes, remote
-hosts, root paths, traversal outside the bundle, reserved server paths, controls,
-backslashes, and `data:` URIs are rejected. External links therefore remain text,
-not navigation targets. The trusted template escapes titles, filenames, TOC
-labels, and download URLs separately. Heading IDs use a document-specific prefix
+Raw HTML is never enabled. Custom Goldmark renderers escape inline HTML and HTML
+blocks as visible text, preserving technical prose such as `List<String>`, tags,
+and comments without executing them. The parsed-output allowlist strips active
+elements, event handlers, arbitrary CSS, and unsafe URLs after highlighting.
+Images are local-only. Relative URLs cannot escape the bundle root and cannot
+contain controls or backslashes. `data:`, `javascript:`, and other active schemes
+are rejected. HTTP/HTTPS links with a host and nonempty `mailto:` links are allowed
+only on anchors, with `rel="noopener noreferrer nofollow"` and `target="_blank"`.
+This preserves deliberate navigation without allowing automatic external resource
+requests or exposing the document URL via a referrer or opener. Rejected links
+become plain spans, not dead link-styled anchors. The converter knows nothing
+about server-reserved paths; upload validation alone uses `api.ReservedPrefix`.
+The trusted template escapes titles, filenames, TOC labels, and download URLs
+separately. Heading IDs use a document-specific prefix
 and collision tracking, including collisions with suffixes and Unicode headings.
 Duplicate headings retain the next suffix counter rather than rescanning earlier
 IDs. Conventional authored fragment links such as `#setup` are translated to the
 matching prefixed ID; explicit generated permalinks remain valid.
 
 The generated page adds a CSP with `default-src 'none'`, local images, inline
-styles, and only the hash-pinned copy-button script. It blocks connections,
-external resources, forms, and base URL changes. The fixed inline favicon uses a
-trusted data URI; user data URIs are still rejected. This is defense in depth for
-the generated document, not a replacement for per-artifact origin isolation.
-Original downloads and other bundle files are deliberately not sanitized and
-remain untrusted. No server-side HTML rewriting is introduced.
+styles, and only the hash-pinned document-interaction script. It blocks automatic
+external resource requests, connections, forms, and base URL changes, while
+allowing explicit link navigation. This is defense in depth for the document,
+not a replacement for per-artifact origin isolation. The XSS corpus uses an
+independent URL oracle rather than the converter's validation helpers.
+
+Conversion produces a plain document with no hosting-specific conventions or
+branding. There is no favicon, robots meta tag, or referrer meta tag. Downloads
+use ordinary relative links and the HTML `download` attribute, without a special
+query. Hosting policy remains in the content server's response headers and own
+pages; the standalone document does not depend on them. Its CSP is intrinsic
+resource-safety policy and works on other static hosts too. Original downloads
+and other bundle files are deliberately not sanitized and remain untrusted.
+No server-side HTML rewriting is introduced.
 
 The page follows the existing document template's warm neutral colors, red
 accent, system fonts, rounded code/table surfaces, sticky desktop TOC, and mobile
-TOC disclosure. Four or more headings trigger the TOC. Every heading gets a
+TOC disclosure. An `IntersectionObserver` marks the current section in the desktop
+TOC without polling. Four or more headings trigger the TOC. Every heading gets a
 permalink; code blocks get copy buttons with clipboard fallback and honest failure
 feedback. Light/dark modes use `prefers-color-scheme`; tables and code scroll
 inside their containers on narrow screens. The document is readable without JS.

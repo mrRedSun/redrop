@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -18,7 +19,7 @@ func renderDoc(t *testing.T, source string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(out)
+	return string(out.HTML)
 }
 
 func parseDoc(t *testing.T, source string) *html.Node {
@@ -36,7 +37,7 @@ func TestFeatures(t *testing.T) {
 		"<title>Field notes</title>", `id="md-field-notes"`, `href="#md-setup"`,
 		`<span class="kn">package</span>`, "<table>", `type="checkbox"`, `disabled=""`, `checked=""`,
 		"<blockquote>", "<del>old</del>", "<strong>bold</strong>", "<em>em</em>",
-		`src="./images/sketch.png"`, "prefers-color-scheme:dark", "Copy code", `href="notes.md?download" download`,
+		`src="./images/sketch.png"`, "prefers-color-scheme:dark", "Copy code", `href="./notes.md" download`,
 		`connect-src 'none'`,
 	} {
 		if !strings.Contains(doc, want) {
@@ -50,7 +51,7 @@ func TestFeatures(t *testing.T) {
 
 func TestTOCAndHeadingIDs(t *testing.T) {
 	doc := renderDoc(t, "# Test\n\n## Same\n\n### Same\n\n## Same-2\n\n## 中文 & <unsafe>\n")
-	for _, want := range []string{`class="toc"`, `class="mobile-toc"`, `id="md-same"`, `id="md-same-2"`, `id="md-same-2-2"`, `class="level-3"`, `id="md-中文--"`} {
+	for _, want := range []string{`class="toc"`, `class="mobile-toc"`, `id="md-same"`, `id="md-same-2"`, `id="md-same-2-2"`, `class="level-3"`, `id="md-中文--unsafe"`} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("missing %q", want)
 		}
@@ -114,6 +115,13 @@ func TestXSSCorpus(t *testing.T) {
 		`[x](JaVaScRiPt:alert%281%29)`,
 		`[x](java&#x73;cript:alert%281%29)`,
 		`[x](java&#x09;script:alert%281%29)`,
+		`[x](javascript&colon;alert%281%29)`,
+		`[x](&#106;avascript:alert%281%29)`,
+		`[x](  javascript:alert%281%29)`,
+		`[x](<  javascript:alert%281%29>)`,
+		`[x]()`,
+		`[x](https:example.com)`,
+		`[x](mailto:)`,
 		`[x](data:text/html;base64,PHNjcmlwdD4=)`,
 		`![x](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+)`,
 		`<!-- <img src=x onerror=alert(1)> -->`,
@@ -125,7 +133,6 @@ func TestXSSCorpus(t *testing.T) {
 		`[x](\\example.com/track)`,
 		`![x](%2f%2fexample.com/track)`,
 		`[x](/__redrop/open)`,
-		`[x](__redrop/open)`,
 		`[x](../escape)`,
 		`[x](file:///etc/passwd)`,
 		`[x](vbscript:msgbox%281%29)`,
@@ -156,13 +163,38 @@ func TestXSSCorpus(t *testing.T) {
 						t.Errorf("active attribute %s survived", a.Key)
 					}
 					if a.Key == "href" || a.Key == "src" {
-						if v, ok := localURL(a.Val, ""); !ok || v == "" && a.Val != "" {
-							t.Errorf("unsafe URL %q survived", a.Val)
-						}
+						assertSafeURL(t, n, a)
 					}
 				}
 			})
 		})
+	}
+}
+
+// This oracle deliberately does not call the converter's URL helpers.
+func assertSafeURL(t *testing.T, n *html.Node, a html.Attribute) {
+	t.Helper()
+	u, err := url.Parse(a.Val)
+	decoded, decodeErr := url.PathUnescape(a.Val)
+	if err != nil || decodeErr != nil || a.Val == "" || strings.Contains(decoded, "\\") || strings.IndexFunc(decoded, unicode.IsControl) >= 0 {
+		t.Errorf("unsafe URL %q survived", a.Val)
+		return
+	}
+	if strings.HasPrefix(a.Val, "./") || strings.HasPrefix(a.Val, "#") {
+		if u.Scheme != "" || u.Host != "" || u.User != nil {
+			t.Errorf("local reference changed origin: %q", a.Val)
+		}
+		return
+	}
+	if n.Data != "a" || a.Key != "href" || u.User != nil || !((u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" || u.Scheme == "mailto" && u.Opaque != "" && u.Host == "") {
+		t.Errorf("unexpected external URL %q on %s", a.Val, n.Data)
+	}
+	attrs := map[string]string{}
+	for _, attr := range n.Attr {
+		attrs[attr.Key] = attr.Val
+	}
+	if attrs["rel"] != "noopener noreferrer nofollow" || attrs["target"] != "_blank" {
+		t.Errorf("external link lacks isolation attributes: %+v", n.Attr)
 	}
 }
 
@@ -182,7 +214,7 @@ func TestSanitizerAllowlist(t *testing.T) {
 	if err := html.Render(&out, root); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"script", "onclick", "onerror", "javascript", "https:", "iframe", "submit", "autofocus", "formaction", "style=", "<!--"} {
+	for _, bad := range []string{"script", "onclick", "onerror", "javascript", "background:url", "iframe", "submit", "autofocus", "formaction", "style=", "<!--"} {
 		if strings.Contains(out.String(), bad) {
 			t.Errorf("sanitizer retained %q: %s", bad, out.String())
 		}
@@ -190,12 +222,12 @@ func TestSanitizerAllowlist(t *testing.T) {
 }
 
 func TestLocalURLs(t *testing.T) {
-	for _, bad := range []string{"javascript:x", "data:text/html,x", "https://example.com", "//example.com", `/root`, `%2f%2fexample.com`, `a%5cb`, "a\nb", "a%00b", "../../escape", "../__redrop/open", "../%5cevil"} {
+	for _, bad := range []string{"javascript:x", "data:text/html,x", "https://example.com", "//example.com", `/root`, `%2f%2fexample.com`, `a%5cb`, "a\nb", "a%00b", "../../escape", "../%5cevil"} {
 		if got, ok := localURL(bad, "docs"); ok {
 			t.Errorf("accepted %q as %q", bad, got)
 		}
 	}
-	for input, want := range map[string]string{"images/plot.png": "./docs/images/plot.png", "../assets/plot.png": "./assets/plot.png", "#section": "#section", "notes.md?download#one": "./docs/notes.md?download#one", "my%20image.png": "./docs/my%20image.png"} {
+	for input, want := range map[string]string{"images/plot.png": "./docs/images/plot.png", "../assets/plot.png": "./assets/plot.png", "#section": "#section", "notes.md?download#one": "./docs/notes.md?download#one", "my%20image.png": "./docs/my%20image.png", "../__redrop/open": "./__redrop/open"} {
 		if got, ok := localURL(input, "docs"); !ok || got != want {
 			t.Errorf("localURL(%q) = %q, %v; want %q", input, got, ok, want)
 		}
@@ -211,7 +243,7 @@ func TestCSPAndDeterminism(t *testing.T) {
 	var script, csp string
 	count := 0
 	walk(root, func(n *html.Node) {
-		if n.Data == "script" {
+		if n.Type == html.ElementNode && n.Data == "script" {
 			script = nodeText(n)
 			count++
 		}
