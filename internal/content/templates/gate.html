@@ -1,0 +1,12 @@
+{{template "head" .}}<main class="card">
+{{with .Data}}
+<h1>{{if .Password}}This link is password protected{{else}}Someone shared something with you{{end}}</h1>
+<p>{{if .Remaining}}{{if eq .Remaining 1}}It can be opened only once. After you open it, the link stops working for everyone else.{{else}}It can be opened {{.Remaining}} more times.{{end}}{{else}}Enter the password to continue.{{end}}</p>
+{{if .Error}}<div class="err" role="alert">{{.Error}}</div>{{end}}
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="next" value="{{.Next}}">
+{{if .Password}}<input type="password" name="password" placeholder="Password" aria-label="Password" autocomplete="current-password" autofocus required>{{end}}
+<button type="submit">Open</button>
+</form>
+{{end}}
+{{template "foot" .}}

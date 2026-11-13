@@ -1,5 +1,5 @@
-// Package auth contains password hashing, signed values, and rate limiting.
-package auth
+// Package security contains password hashing, signed values, and rate limiting.
+package security
 
 import (
 	"crypto/hmac"

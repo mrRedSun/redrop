@@ -1,0 +1,10 @@
+{{template "head" .}}<main class="card wide">
+{{with .Data}}
+<h1>/{{.Dir}}</h1>
+<p class="meta">{{len .Items}} items</p>
+<ul class="files">
+{{if .Dir}}<li><a href="../">../</a></li>{{end}}
+{{range .Items}}<li><a href="{{.Href}}">{{.Name}}<span>{{if .IsDir}}folder{{else}}{{bytes .Size}}{{end}}</span></a></li>{{end}}
+</ul>
+{{end}}
+{{template "foot" .}}

@@ -1,0 +1,35 @@
+# redrop CLI installer for Windows. Usage: irm {{.Base}}/install.ps1 | iex
+$ErrorActionPreference = 'Stop'
+$base = '{{.Base}}'
+$arch = 'amd64'
+if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { $arch = 'arm64' }
+$file = "redrop-windows-$arch.exe"
+$dir = if ($env:REDROP_INSTALL_DIR) { $env:REDROP_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'redrop\bin' }
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
+New-Item -ItemType Directory -Path $tmp | Out-Null
+try {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  Invoke-WebRequest -UseBasicParsing -Uri "$base/download/$file" -OutFile (Join-Path $tmp $file)
+  $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$base/download/SHA256SUMS").Content
+  if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+  $line = ($sums -split "\r?\n") | Where-Object { $_ -match "\s$([regex]::Escape($file))$" } | Select-Object -First 1
+  if (-not $line) { throw "no checksum for $file" }
+  $want = ($line -split '\s+')[0].ToLower()
+  $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $file)).Hash.ToLower()
+  if ($want -ne $got) { throw "checksum mismatch for $file" }
+  Move-Item -Force (Join-Path $tmp $file) (Join-Path $dir 'redrop.exe')
+} finally {
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (-not ($userPath -split ';' | Where-Object { $_ -eq $dir })) {
+  [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $dir), 'User')
+  $env:Path = $env:Path + ';' + $dir
+  Write-Host "Added $dir to your user PATH (restart other terminals to pick it up)."
+}
+Write-Host "Installed redrop to $dir\redrop.exe"
+& (Join-Path $dir 'redrop.exe') version
+Write-Host ""
+Write-Host "Next: create an API token in the dashboard ($base/tokens), then run:"
+Write-Host "  redrop login --url $base"

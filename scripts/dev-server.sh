@@ -11,7 +11,7 @@ CLI=${REDROP_DEV_CLI:-/root/redrop-dev/cli}
 mkdir -p "$DATA" "$CLI" /root/redrop-dev/bin
 
 VERSION="dev-$(git rev-parse --short HEAD 2>/dev/null || echo local)"
-LDFLAGS="-s -w -X github.com/mrRedSun/redrop/internal/server.Version=$VERSION"
+LDFLAGS="-s -w -X github.com/mrRedSun/redrop/internal/httpapi.Version=$VERSION"
 go build -trimpath -ldflags "$LDFLAGS" -o /root/redrop-dev/bin/redrop-server ./cmd/redrop-server
 
 # Cross-compile CLI builds served by /install.sh

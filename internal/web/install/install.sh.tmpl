@@ -1,0 +1,59 @@
+#!/bin/sh
+# redrop CLI installer. Usage: curl -fsSL {{.Base}}/install.sh | sh
+# Options (env): REDROP_INSTALL_DIR=/custom/bin
+set -eu
+
+BASE="{{.Base}}"
+
+err() { printf 'redrop install: %s\n' "$*" >&2; exit 1; }
+
+case "$(uname -s)" in
+  Linux) os=linux ;;
+  Darwin) os=darwin ;;
+  *) err "unsupported OS $(uname -s); on Windows run: irm $BASE/install.ps1 | iex" ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *) err "unsupported CPU $(uname -m)" ;;
+esac
+
+if [ -n "${REDROP_INSTALL_DIR:-}" ]; then
+  dir="$REDROP_INSTALL_DIR"
+elif [ "$(id -u)" = 0 ]; then
+  dir=/usr/local/bin
+else
+  dir="$HOME/.local/bin"
+fi
+mkdir -p "$dir"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+file="redrop-$os-$arch"
+
+fetch() {
+  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+  else err "curl or wget is required"; fi
+}
+
+fetch "$BASE/download/$file" "$tmp/$file" || err "download failed"
+fetch "$BASE/download/SHA256SUMS" "$tmp/SHA256SUMS" || err "checksum download failed"
+
+want=$(grep " $file\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+[ -n "$want" ] || err "no checksum for $file"
+if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$file" | cut -d' ' -f1)
+else got=$(shasum -a 256 "$tmp/$file" | cut -d' ' -f1); fi
+[ "$want" = "$got" ] || err "checksum mismatch for $file"
+
+chmod 0755 "$tmp/$file"
+mv "$tmp/$file" "$dir/redrop"
+printf 'Installed redrop to %s/redrop\n' "$dir"
+"$dir/redrop" version || true
+
+case ":$PATH:" in
+  *":$dir:"*) ;;
+  *) printf '\nNote: %s is not on your PATH. Add it, e.g.:\n  echo '\''export PATH="%s:$PATH"'\'' >> ~/.profile\n' "$dir" "$dir" ;;
+esac
+
+printf '\nNext: create an API token in the dashboard (%s/tokens), then run:\n  redrop login --url %s\n' "$BASE" "$BASE"

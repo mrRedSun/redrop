@@ -1,0 +1,14 @@
+{{template "head" .}}<main class="card wide">
+{{with .Data}}
+<div class="row">
+  <div><h1>{{.Name}}</h1><div class="meta">{{bytes .Size}} · {{.Type}}</div></div>
+  <div class="actions"><a class="btn secondary" href="{{.Raw}}" target="_blank" rel="noopener">Open raw</a><a class="btn" href="{{.Raw}}?download">Download</a></div>
+</div>
+{{if .Image}}<div class="preview"><img src="{{.Raw}}" alt="{{.Name}}"></div>
+{{else if .Video}}<div class="preview"><video src="{{.Raw}}" controls preload="metadata"></video></div>
+{{else if .Audio}}<div class="preview pad"><audio src="{{.Raw}}" controls></audio></div>
+{{else if .PDF}}<div class="preview"><iframe src="{{.Raw}}" title="{{.Name}}"></iframe></div>
+{{else if .Text}}<div class="preview"><pre>{{.Text}}</pre></div>{{if .Truncated}}<p class="meta note">Showing the first 1 MB. Download for the full file.</p>{{end}}
+{{end}}
+{{end}}
+{{template "foot" .}}

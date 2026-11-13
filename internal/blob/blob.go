@@ -41,7 +41,8 @@ func (s *Store) path(h string) string { return filepath.Join(s.root, h[:2], h[2:
 // ErrTooLarge is returned when a stream exceeds the given limit.
 var ErrTooLarge = errors.New("content exceeds size limit")
 
-// Put stores r (at most limit bytes when limit > 0) and returns its hash and size.
+// Put stores r and returns its hash and size. A non-negative limit caps the
+// size (0 allows only empty content); a negative limit means unlimited.
 func (s *Store) Put(r io.Reader, limit int64) (string, int64, error) {
 	f, err := os.CreateTemp(s.tmp, "blob-*")
 	if err != nil {
@@ -51,11 +52,11 @@ func (s *Store) Put(r io.Reader, limit int64) (string, int64, error) {
 	defer os.Remove(tmp)
 	h := sha256.New()
 	src := r
-	if limit > 0 {
+	if limit >= 0 {
 		src = io.LimitReader(r, limit+1)
 	}
 	n, err := io.Copy(io.MultiWriter(f, h), src)
-	if err == nil && limit > 0 && n > limit {
+	if err == nil && limit >= 0 && n > limit {
 		err = ErrTooLarge
 	}
 	if cerr := f.Close(); err == nil {

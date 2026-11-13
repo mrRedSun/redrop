@@ -265,5 +265,14 @@ func (c *Config) ArtifactURL(slug string) string {
 	return c.ContentURL.Scheme + "://" + host + "/"
 }
 
+// ContentFrameSource is the CSP source matching every artifact origin.
+func (c *Config) ContentFrameSource() string {
+	host := "*." + c.ContentURL.Hostname()
+	if p := c.ContentURL.Port(); p != "" {
+		host += ":" + p
+	}
+	return c.ContentURL.Scheme + "://" + host
+}
+
 // PublicOrigin returns scheme://host[:port] of the dashboard.
 func (c *Config) PublicOrigin() string { return c.PublicURL.Scheme + "://" + c.PublicURL.Host }
