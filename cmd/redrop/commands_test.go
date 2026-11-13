@@ -3,7 +3,41 @@ package main
 import (
 	"errors"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+func TestRenderFlag(t *testing.T) {
+	for _, mode := range []string{"auto", "markdown", "none", "invalid"} {
+		t.Run(mode, func(t *testing.T) {
+			var f contentFlags
+			cmd := &cobra.Command{}
+			f.register(cmd)
+			if err := cmd.ParseFlags([]string{"--render", mode}); err != nil {
+				t.Fatal(err)
+			}
+			src, err := f.source("notes.md")
+			if mode == "invalid" {
+				var ee *exitError
+				if !errors.As(err, &ee) || ee.code != exitUsage {
+					t.Errorf("invalid mode should return a usage error, got %v", err)
+				}
+			} else if err != nil || src.Render != mode {
+				t.Fatalf("render mode was not passed to the client: %+v, %v", src, err)
+			}
+		})
+	}
+	for _, cmd := range []*cobra.Command{shareCmd(), updateCmd()} {
+		flag := cmd.Flags().Lookup("render")
+		if flag == nil || flag.DefValue != "auto" {
+			t.Errorf("%s must default --render to auto", cmd.Name())
+		}
+	}
+	f := contentFlags{as: "file", render: "markdown"}
+	if _, err := f.source("notes.md"); err == nil {
+		t.Error("conflicting explicit kind accepted")
+	}
+}
 
 func TestArtifactSlug(t *testing.T) {
 	cases := map[string]string{

@@ -3,12 +3,15 @@ module github.com/mrRedSun/redrop
 go 1.26.6
 
 require (
+	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/getkin/kin-openapi v0.149.0
 	github.com/go-fuego/fuego v0.21.0
 	github.com/pquerna/otp v1.5.0
 	github.com/spf13/cobra v1.10.2
+	github.com/yuin/goldmark v1.8.7
 	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.62.0
 	golang.org/x/oauth2 v0.38.0
 	golang.org/x/term v0.48.0
 	modernc.org/sqlite v1.62.0
@@ -16,6 +19,7 @@ require (
 
 require (
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.6 // indirect

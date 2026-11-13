@@ -184,6 +184,78 @@ Bundles are uploaded as `tar.gz`. Extraction rejects absolute paths, `..`,
 links, devices, reserved paths, and enforces file-count and decompressed-size
 limits.
 
+## Markdown documents
+
+Markdown is rendered **in the CLI's publishing client, before upload**, not by
+HTTP handlers or content serving. The CLI is also the agents' interface. Both
+`Share` and `Update` use `pkg/client.Prepare`, which calls the client-only
+`internal/markdown` renderer and creates a normal bundle. No wire fields,
+server dependencies, migrations, or artifact-origin changes are required. Stored
+bytes are served unchanged. A version pins the rendered result, so rollback does
+not depend on the renderer version installed on the server.
+
+This is preferable to server-side publish-time rendering because it keeps parsing
+and highlighting work off the shared server and preserves its existing upload,
+quota, and isolation boundaries. The trade-off is that direct API uploads are
+not automatically rendered and older CLIs keep their previous behavior. Rendering
+is deterministic for a given source, bundle layout, and CLI build. There are no
+network lookups or timestamps in the output.
+
+### Publishing contract
+
+- `--render auto`, the default, renders case-insensitive `.md` file names when
+  no explicit `--as` is set, including stdin with `--name notes.md`.
+- `--render markdown` forces rendering for other extensions. The resulting kind
+  is `bundle`, its entry is `index.html`, and the original source remains at its
+  original name with a download link. An explicit `--as file` or `--as html`
+  conflicts with forced rendering. `--render none` keeps raw publishing.
+- Directories require `--render markdown --entry PATH` to select the source.
+  Assets and the original source keep their bundle paths; generated relative
+  links/images are rebased from the source directory to the root entry. Single
+  files never upload siblings. Rendering does not modify the input directory and
+  refuses an existing root `index.html`. Asset symlinks are skipped, source
+  selection, traversal, and asset reads are confined with `os.OpenRoot`. Archive
+  rendering is unsupported.
+- Sources are limited to 8 MiB. Unknown code languages and blocks over 64 KiB stay
+  escaped plain text rather than invoking a lexer. Rendering does not support
+  `--spa`; ordinary bundle publishing is unchanged.
+
+### Rendering and safety
+
+Goldmark with GFM handles tables, task lists, strikethrough, autolinks, fenced
+code, and ordinary Markdown. Chroma supplies maintained, offline syntax lexers;
+there are no CDN scripts, web fonts, or runtime highlighting dependencies.
+`golang.org/x/net/html` parses the output for an explicit element/attribute
+allowlist, rather than relying on regex-based HTML filtering. These dependencies
+are pinned in the Go module graph and belong to the client build, not the server.
+
+Raw HTML is disabled with no opt-in. The allowlist also strips comments, active
+content, event handlers, arbitrary CSS, and unsafe URLs after highlighting.
+Resource/link URLs must be relative bundle paths or fragments. Schemes, remote
+hosts, root paths, traversal outside the bundle, reserved server paths, controls,
+backslashes, and `data:` URIs are rejected. External links therefore remain text,
+not navigation targets. The trusted template escapes titles, filenames, TOC
+labels, and download URLs separately. Heading IDs use a document-specific prefix
+and collision tracking, including collisions with suffixes and Unicode headings.
+Duplicate headings retain the next suffix counter rather than rescanning earlier
+IDs. Conventional authored fragment links such as `#setup` are translated to the
+matching prefixed ID; explicit generated permalinks remain valid.
+
+The generated page adds a CSP with `default-src 'none'`, local images, inline
+styles, and only the hash-pinned copy-button script. It blocks connections,
+external resources, forms, and base URL changes. The fixed inline favicon uses a
+trusted data URI; user data URIs are still rejected. This is defense in depth for
+the generated document, not a replacement for per-artifact origin isolation.
+Original downloads and other bundle files are deliberately not sanitized and
+remain untrusted. No server-side HTML rewriting is introduced.
+
+The page follows the existing document template's warm neutral colors, red
+accent, system fonts, rounded code/table surfaces, sticky desktop TOC, and mobile
+TOC disclosure. Four or more headings trigger the TOC. Every heading gets a
+permalink; code blocks get copy buttons with clipboard fallback and honest failure
+feedback. Light/dark modes use `prefers-color-scheme`; tables and code scroll
+inside their containers on narrow screens. The document is readable without JS.
+
 ## Auth details
 
 * Sessions: random 32-byte token in a `__Host-` cookie (Secure, HttpOnly,

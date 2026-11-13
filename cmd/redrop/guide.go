@@ -48,6 +48,8 @@ PATH decides the kind (override with --as html|file|bundle):
 - *.html / *.htm  -> "html": rendered as a live web page. Inline <script> and
   CDN libraries (e.g. React/ESM from a CDN) work. Each artifact has its own
   origin, so localStorage etc. are isolated.
+- *.md           -> "bundle": a styled Markdown document, with the exact
+  original kept for download. Rendering happens locally before upload.
 - directory      -> "bundle": a static site. index.html is the start page
   (change with --entry); without one, visitors get a file listing. Use --spa
   for client-side routers. .git and node_modules are skipped.
@@ -55,6 +57,31 @@ PATH decides the kind (override with --as html|file|bundle):
   PDF, text/code) and a Download button.
 - "-"            -> read stdin; --name is required (e.g. --name report.html).
 - site.zip / site.tar.gz with --as bundle -> unpacked as a static site.
+
+Markdown options (also available on update):
+
+    redrop share notes.md                         # auto-render .md
+    redrop share notes.txt --render markdown       # force Markdown
+    redrop share notes.md --render none            # raw file, as before
+    redrop share ./report --render markdown --entry docs/notes.md
+    cat notes.md | redrop share - --name notes.md
+
+--render auto is the default. An explicit --as disables auto-rendering;
+--as file keeps Markdown raw. Forced --render markdown requires no --as or
+--as bundle. Directory rendering requires --entry and preserves bundle assets;
+relative image/link paths are rebased from that source to the root index.html.
+A single .md file does not upload siblings. Use a directory for local images.
+Archives are not rendered: unpack them into a directory first. Existing
+index.html files are never overwritten. --spa is not supported with rendering.
+
+The page has heading anchors, a TOC at four headings, offline syntax highlighting,
+copy buttons, GFM tables/task lists, blockquotes, and responsive light/dark styles.
+Unknown languages and code blocks over 64 KiB stay plain. Sources over 8 MiB must
+use --render none. Rendering strips raw HTML, comments, external URLs, data URIs,
+and unsafe attributes. Only relative bundle links/images and fragments remain;
+a page CSP blocks external resources. There is no raw-HTML opt-in. The original
+is intentionally unmodified, so treat downloaded sources and other bundle files
+as untrusted content, not sanitized documents.
 
 The first line of normal output is "url: <link>". With --quiet, only the URL
 (and a generated password on the next line) is printed. With --json you get
@@ -117,7 +144,8 @@ With --json, errors are written to stderr as {"error": "...", "exit_code": N}.
 
 ## Good practice for agents
 
-- Prefer sharing one self-contained HTML file for reports and visualizations.
+- Share Markdown directly for documents and reports. Use self-contained HTML
+  for custom layouts and visualizations.
 - Pick a TTL that matches the purpose; use --once for secrets or sensitive
   files and pass the password through a different channel than the link.
 - Give the artifact a clear --title; it is what the owner sees in the

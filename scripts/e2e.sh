@@ -146,6 +146,35 @@ UNKNOWN=$(echo "$BURL" | sed -E 's#//[a-z-]+\.#//amber-otter-quilt-river.#')
 curl -fsS "${UNKNOWN}favicon.ico" | cmp -s - "$WORK/default.ico" || die "unknown slug favicon"
 pass "bundle: index, types, SPA fallback, listing, 404, own favicon only after a page view"
 
+# Markdown: local rendering, original download, update, opt-out, and bundled images.
+printf '# Markdown report\n\n## Details\n\nA **styled** document.\n' > "$WORK/notes.md"
+MURL=$($R share "$WORK/notes.md" -q)
+curl -fsS "$MURL" -o "$WORK/rendered.html"
+grep -q '<h1 id="md-markdown-report">Markdown report' "$WORK/rendered.html" || die "Markdown heading"
+grep -q '<strong>styled</strong>' "$WORK/rendered.html" || die "Markdown formatting"
+curl -fsSI "$MURL" | grep -qi 'content-type: text/html' || die "Markdown entry type"
+curl -fsS "${MURL}notes.md?download" | cmp -s - "$WORK/notes.md" || die "Markdown original bytes"
+curl -fsSI "${MURL}notes.md?download" | grep -qi 'attachment' || die "Markdown original download"
+MID=$($R info "$MURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+printf '# Revised report\n' > "$WORK/notes.md"
+$R update "$MID" "$WORK/notes.md" >/dev/null
+curl -fsS "$MURL" | grep -q '<h1 id="md-revised-report">Revised report' || die "Markdown update"
+curl -fsS "${MURL}notes.md?download" | cmp -s - "$WORK/notes.md" || die "updated Markdown source"
+RAW=$($R share "$WORK/notes.md" --render none -q)
+[ "$($R info "$RAW" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["kind"])')" = file ] || die "Markdown render none kind"
+curl -fsS "${RAW}notes.md" | cmp -s - "$WORK/notes.md" || die "raw Markdown bytes"
+if curl -fsSI "${RAW}notes.md" | grep -qi 'content-type: text/html'; then die "raw Markdown became HTML"; fi
+FORCED=$($R share "$WORK/notes.md" --name notes.txt --render markdown -q)
+curl -fsS "$FORCED" | grep -q '<h1 id="md-revised-report">Revised report' || die "forced Markdown"
+mkdir -p "$WORK/md-bundle/docs/images"
+printf '# Bundled report\n\n![Sketch](images/sketch.png)\n' > "$WORK/md-bundle/docs/report.md"
+printf 'image-fixture' > "$WORK/md-bundle/docs/images/sketch.png"
+MBURL=$($R share "$WORK/md-bundle" --render markdown --entry docs/report.md -q)
+curl -fsS "$MBURL" | grep -q 'src="./docs/images/sketch.png"' || die "Markdown bundle relative image"
+[ "$(curl -fsS "${MBURL}docs/images/sketch.png")" = image-fixture ] || die "Markdown bundle asset"
+curl -fsS "${MBURL}docs/report.md?download" | cmp -s - "$WORK/md-bundle/docs/report.md" || die "Markdown bundle original"
+pass "Markdown: HTML entry, exact source download, update, raw opt-out, forced rendering, relative bundle images"
+
 # file kind + range request
 head -c 3000000 /dev/urandom > "$WORK/blob.bin"
 FURL=$($R share "$WORK/blob.bin" --ttl 1h -q)

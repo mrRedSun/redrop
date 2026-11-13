@@ -207,19 +207,27 @@ func plural(n int) string {
 
 type contentFlags struct {
 	as, name, entry, note string
+	render                string
 	spa                   bool
 }
 
 func (f *contentFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.as, "as", "", "force the kind: html (render the page), file (viewer + download), bundle (folder/static site)")
 	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin)")
-	cmd.Flags().StringVar(&f.entry, "entry", "", "start page inside a bundle (default index.html; without one a file listing is shown)")
+	cmd.Flags().StringVar(&f.render, "render", "auto", "render mode: auto (.md files unless --as is set), markdown, or none (raw)")
+	cmd.Flags().StringVar(&f.entry, "entry", "", "bundle start page (default index.html), or Markdown source with --render markdown")
 	cmd.Flags().BoolVar(&f.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
 	cmd.Flags().StringVar(&f.note, "note", "", "short note stored with this version")
 }
 
 func (f *contentFlags) source(arg string) (*client.Source, error) {
-	src := &client.Source{Kind: f.as, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note}
+	if f.render != "" && f.render != "auto" && f.render != "markdown" && f.render != "none" {
+		return nil, withCode(exitUsage, "unknown render mode %q (use auto, markdown, or none)", f.render)
+	}
+	if f.render == "markdown" && f.as != "" && f.as != "bundle" {
+		return nil, withCode(exitUsage, "--render markdown requires --as bundle or no --as")
+	}
+	src := &client.Source{Kind: f.as, Render: f.render, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note}
 	if arg == "-" {
 		if f.name == "" {
 			return nil, withCode(exitUsage, "--name is required when reading from stdin (e.g. --name report.html)")
@@ -246,6 +254,7 @@ func shareCmd() *cobra.Command {
 		Long: `Upload PATH and print a private link.
 
 What gets shared depends on PATH (override with --as):
+  *.md             styled Markdown document plus downloadable original
   *.html / *.htm   rendered as a web page (inline JS/CSS and CDN scripts work)
   a directory      a bundle: a static site served from its index.html, or a
                    browsable file listing when there is no index.html
@@ -254,6 +263,11 @@ What gets shared depends on PATH (override with --as):
   -                read stdin; requires --name to pick the kind and file name
 
 Use --as bundle with a .zip or .tar.gz to publish an archived site.
+Markdown renders locally before upload. --render markdown forces rendering for
+other extensions; --render none or --as file keeps the raw file. A directory
+with --render markdown --entry docs/notes.md keeps relative images and links.
+Generated pages have no external resources or URLs; raw HTML is omitted.
+Markdown sources are limited to 8 MiB. Archives are not rendered: unpack first.
 
 Access control (combine freely):
   --ttl 2d                 expire after 2 days ("never" if the server allows)
@@ -268,6 +282,8 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
   redrop share ./dist --spa --ttl 30d --title "Dashboard prototype"
   redrop share data.csv --once
   redrop share notes.md --password-generate --ttl 12h
+  redrop share notes.md --render none
+  redrop share ./report --render markdown --entry docs/notes.md
   echo '<h1>Hello</h1>' | redrop share - --name hello.html
   redrop share site.zip --as bundle
   redrop share report.html --json | jq -r .url`,

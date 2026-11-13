@@ -27,7 +27,11 @@ type Source struct {
 	Name string
 	// Kind forces html, file, or bundle; empty auto-detects.
 	Kind string
+	// Render is auto (the default), markdown, or none. Auto renders .md files
+	// unless Kind is explicitly set. Directories require markdown and Entry.
+	Render string
 	// Entry is the start page inside a bundle (default index.html).
+	// With Render markdown on a directory, it selects the Markdown source.
 	Entry string
 	SPA   bool
 	Note  string
@@ -38,6 +42,7 @@ type Prepared struct {
 	File     string // path to upload
 	Kind     string
 	Filename string
+	Entry    string // effective entry, including generated index.html
 	cleanup  func()
 }
 
@@ -62,7 +67,10 @@ func DetectKind(name string, isDir bool) string {
 
 // Prepare packs a Source into an upload-ready temporary file when needed.
 func Prepare(src *Source) (*Prepared, error) {
-	p := &Prepared{}
+	if src.Render != "" && src.Render != "auto" && src.Render != "markdown" && src.Render != "none" {
+		return nil, fmt.Errorf("unknown render mode %q (use auto, markdown, or none)", src.Render)
+	}
+	p := &Prepared{Entry: src.Entry}
 	var tmpFiles []string
 	p.cleanup = func() {
 		for _, f := range tmpFiles {
@@ -99,6 +107,16 @@ func Prepare(src *Source) (*Prepared, error) {
 			abs, _ := filepath.Abs(srcPath)
 			name = filepath.Base(abs)
 		}
+	}
+	render := src.Render == "markdown" || ((src.Render == "" || src.Render == "auto") && src.Kind == "" && !isDir && strings.EqualFold(path.Ext(name), ".md"))
+	if render {
+		rendered, err := prepareMarkdown(src, srcPath, name, isDir)
+		if err != nil {
+			return fail(err)
+		}
+		cleanup := rendered.cleanup
+		rendered.cleanup = func() { cleanup(); p.Close() }
+		return rendered, nil
 	}
 	kind := src.Kind
 	if kind == "" {
@@ -288,7 +306,7 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 		return nil, err
 	}
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
-		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note},
+		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: p.Entry, SPA: src.SPA, Note: src.Note},
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
 	})
 }
@@ -304,5 +322,5 @@ func (c *Client) Update(ctx context.Context, artifactID string, src *Source, pro
 	if err != nil {
 		return nil, err
 	}
-	return c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
+	return c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: p.Entry, SPA: src.SPA, Note: src.Note})
 }

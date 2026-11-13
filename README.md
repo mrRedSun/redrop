@@ -49,6 +49,36 @@ that, run the installer without `REDROP_TOKEN`, then
 `redrop login --url https://redrop.example.com` and paste the token at the
 prompt. `redrop guide` explains everything else.
 
+### Share Markdown
+
+```sh
+redrop share notes.md                              # styled document + original download
+redrop share notes.txt --render markdown            # force rendering for another extension
+redrop share notes.md --render none                 # raw file, as before
+redrop share ./report --render markdown --entry docs/notes.md
+cat notes.md | redrop share - --name notes.md
+```
+
+The CLI renders `.md` files locally by default. The version is a bundle with a
+self-contained `index.html` and the byte-for-byte original. `update` accepts the
+same options. `--render auto` respects explicit `--as` choices, so `--as file`
+also keeps Markdown raw. No API or content-server rendering is involved.
+
+Pages have heading links, a table of contents at four headings, offline syntax
+highlighting and copy buttons, tables, task lists, blockquotes, and responsive
+light/dark styles. Share a directory with `--render markdown --entry PATH` to
+include images and links relative to the selected Markdown file. A single file
+never uploads its siblings. Directory rendering refuses an existing root
+`index.html`, skips asset symlinks, and does not support `--spa`. Unpack archives
+before rendering.
+
+Raw HTML, comments, external URLs, `data:` URLs, and unsafe attributes are removed
+from the generated page. Only relative bundle URLs and fragment links remain;
+a restrictive CSP prevents external resource requests. The original download and
+other bundle files remain unmodified and untrusted. Markdown sources are limited
+to 8 MiB. Code blocks larger than 64 KiB and unknown languages stay plain text.
+Use `--render none` for larger sources.
+
 ## Develop
 
 Requires Go 1.26 and Node 24.
