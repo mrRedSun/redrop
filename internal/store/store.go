@@ -20,7 +20,14 @@ var schemaV1 string
 // server default (REDROP_INFO_BUTTON_DEFAULT), so existing rows keep it.
 const schemaV2 = `ALTER TABLE artifacts ADD COLUMN info_button INTEGER;`
 
-var migrations = []string{schemaV1, schemaV2}
+// schemaV3 adds whether viewers may open older versions (off unless the owner
+// enables it) and a version high-water mark: each version number is used once
+// per artifact, so a deleted version's raw origin never serves other bytes.
+const schemaV3 = `ALTER TABLE artifacts ADD COLUMN viewer_old_versions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artifacts ADD COLUMN last_version INTEGER NOT NULL DEFAULT 0;
+UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = artifacts.id), 0));`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3}
 
 var ErrNotFound = errors.New("not found")
 

@@ -11,6 +11,18 @@ H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
 R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
 export REDROP_CONFIG="$WORK/cli.json"
 pass() { printf '  ok  %s\n' "$*"; }
+# framed URL [curl args...]: the artifact bytes behind a viewer page, fetched
+# the way the viewer's frame does: load the viewer page, follow its frame's
+# enter URL on the raw host (which sets the raw cookie), then the page itself.
+framed() {
+  local u=$1; shift
+  local jar src
+  jar=$(mktemp -p "$WORK")
+  src=$(curl -fsS "$@" -H 'Sec-Fetch-Dest: document' "$u" | sed -n 's/.*<iframe id="rd-frame"[^>]* src="\([^"]*\)".*/\1/p' | sed 's/&amp;/\&/g')
+  [ -n "$src" ] || { echo "no viewer frame at $u" >&2; return 1; }
+  curl -fsSL -c "$jar" -b "$jar" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' "$src"
+}
+code_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
 
 USER=${E2E_USER:-admin}
@@ -57,6 +69,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" 
 cat > "$WORK/page.html" <<'EOF'
 <!doctype html><html><head><title>E2E Report</title></head><body><h1>hello</h1><script>localStorage.x=1</script></body></html>
 EOF
+cp "$WORK/page.html" "$WORK/page-v1.html"
 URL=$($R share "$WORK/page.html" -q)
 ID=$($R info "$URL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 pass "share html -> $URL"
@@ -65,7 +78,7 @@ SLUG=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[
 echo "$SLUG" | grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' || die "new link is not four words: $URL"
 [ "$($R info "$SLUG" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')" = "$ID" ] || die "info by bare slug"
 pass "four-word link; CLI resolves it by link and by slug"
-body=$(curl -fsS "$URL"); echo "$body" | grep -q '<h1>hello</h1>' || die "html content"
+framed "$URL" | grep -q '<h1>hello</h1>' || die "html content"
 hdr=$(curl -sSI "$URL")
 echo "$hdr" | grep -qi 'x-robots-tag: noindex' || die "noindex header"
 echo "$hdr" | grep -qi 'referrer-policy: no-referrer' || die "referrer header"
@@ -94,9 +107,9 @@ pass "favicon on dashboard, apex and artifact origin; not counted as a view"
 # update keeps link
 echo '<!doctype html><title>v2</title><p>second</p>' > "$WORK/page.html"
 $R update "$ID" "$WORK/page.html" --note v2 >/dev/null
-curl -fsS "$URL" | grep -q second || die "v2 served"
+framed "$URL" | grep -q second || die "v2 served"
 $R rollback "$ID" 1 >/dev/null
-curl -fsS "$URL" | grep -q hello || die "rollback"
+framed "$URL" | grep -q hello || die "rollback"
 pass "update + rollback keep the same link"
 
 # one-time link with password
@@ -113,8 +126,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: same-origin' -
 C2="$WORK/c2"
 code=$(curl -s -o /dev/null -w '%{http_code}' -c "$C2" -H 'Sec-Fetch-Site: same-origin' --data-urlencode "password=$OPW" "${OURL}__redrop/open")
 [ "$code" = 303 ] || die "open expected 303 got $code"
-curl -fsS -b "$C2" "$OURL" | grep -q second || die "content after unlock"
-curl -fsS -b "$C2" "$OURL" | grep -q second || die "reload within visit window"
+framed "$OURL" -b "$C2" | grep -q second || die "content after unlock"
+framed "$OURL" -b "$C2" | grep -q second || die "reload within visit window"
 curl -fsS -b "$C2" "${OURL}favicon.ico" >/dev/null || die "favicon during visit"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$OURL")
 [ "$code" = 404 ] || die "second visitor expected 404 got $code"
@@ -130,10 +143,10 @@ echo 'body{}' > "$WORK/site/assets/app.css"
 echo 'doc' > "$WORK/site/docs/readme.txt"
 printf 'own-icon' > "$WORK/site/favicon.ico"
 BURL=$($R share "$WORK/site" --spa -q)
-curl -fsS "$BURL" | grep -q spa || die "bundle index"
-curl -fsSI "${BURL}assets/app.css" | grep -qi 'content-type: text/css' || die "css type"
-curl -fsS "${BURL}some/route" | grep -q spa || die "spa fallback"
-curl -fsS "${BURL}docs/" | grep -q readme.txt || die "dir listing"
+framed "$BURL" | grep -q spa || die "bundle index"
+curl -fsSI -H 'Sec-Fetch-Dest: style' "${BURL}assets/app.css" | grep -qi 'content-type: text/css' || die "css type"
+framed "${BURL}some/route" | grep -q spa || die "spa fallback"
+framed "${BURL}docs/" | grep -q readme.txt || die "dir listing"
 code=$(curl -s -o /dev/null -w '%{http_code}' "${BURL}missing.js")
 [ "$code" = 404 ] || die "missing asset expected 404 got $code"
 # A browser fetches the icon after the page, carrying the cookie the page set.
@@ -155,36 +168,65 @@ n=$(curl -fsS -H 'Range: bytes=0-99' "${FURL}blob.bin" | wc -c)
 curl -fsSI "${FURL}blob.bin?download" | grep -qi 'attachment' || die "download disposition"
 pass "file viewer, range requests, download"
 
-# info button: injected into top-level HTML pages only, never into the stored bytes
-W='__redropInfo'
-D=(-H 'Sec-Fetch-Dest: document')
-curl -fsS "${D[@]}" "$URL" -o "$WORK/info.html"
-grep -q "$W" "$WORK/info.html" || die "info widget on html artifact"
-grep -q '"title":"E2E Report"' "$WORK/info.html" || die "info widget data"
-hdr=$(curl -fsSI "${D[@]}" "$URL" | tr -d '\r')
-len=$(echo "$hdr" | awk 'tolower($1)=="content-length:"{print $2}')
-[ "$len" = "$(stat -c %s "$WORK/info.html")" ] || die "info page content-length $len"
-etag=$(echo "$hdr" | awk 'tolower($1)=="etag:"{print $2}')
-SIZE=$(stat -c %s "$WORK/info.html")
-curl -fsS "${D[@]}" -H "Range: bytes=$((SIZE-40))-" "$URL" -o "$WORK/info.tail"
-tail -c 40 "$WORK/info.html" | cmp -s - "$WORK/info.tail" || die "range of the injected page"
-curl -fsSI "${D[@]}" -H 'Range: bytes=0-9' "$URL" | tr -d '\r' | grep -qi "^etag: $etag" || die "range etag"
-curl -fsS -H 'Accept: text/html' "$URL" | grep -q "$W" || die "widget for an HTML Accept without Fetch Metadata"
-curl -fsS "$URL" | grep -q "$W" && die "plain curl (Accept: */*) carries the widget"
-curl -fsS "${D[@]}" "${URL}?download" | grep -q "$W" && die "download carries the widget"
-curl -fsS -H 'Sec-Fetch-Dest: iframe' "$URL" | grep -q "$W" && die "widget inside a frame"
-curl -fsS "${D[@]}" "${URL}?redrop-info=0" | grep -q "$W" && die "redrop-info=0 ignored"
-curl -fsS "${D[@]}" "${BURL}" | grep -q "$W" || die "info widget on bundle page"
-curl -fsS "${D[@]}" "${BURL}assets/app.css" | grep -q "$W" && die "widget in css"
-curl -fsS "${D[@]}" "$FURL" | grep -q "$W" && die "widget on file viewer"
-curl -fsS "${D[@]}" "${FURL}blob.bin" | grep -aq "$W" && die "widget in binary file"
+# viewer frame: the shared link serves redrop's viewer page; the artifact
+# loads, byte for byte as uploaded, from its raw host behind a frame grant.
+RAW=$(echo "$URL" | sed -E 's#^(https?://)([^.]+)\.#\1\2--raw.#')
+vp=$(curl -fsS -H 'Sec-Fetch-Dest: document' "$URL")
+echo "$vp" | grep -q "<iframe id=\"rd-frame\"[^>]* src=\"${RAW}__redrop/enter?t=" || die "viewer frames the raw host"
+echo "$vp" | grep -q 'id="rd-info"' || die "info panel"
+echo "$vp" | grep -q '<h1>hello</h1>' && die "artifact bytes in the viewer page"
+curl -fsSI -H 'Sec-Fetch-Dest: document' "$URL" | grep -qi "frame-ancestors 'none'" || die "viewer CSP"
+framed "$URL" | cmp -s - "$WORK/page-v1.html" || die "raw bytes differ from the upload"
+[ "$(code_of -H 'Sec-Fetch-Dest: iframe' "$RAW")" = 404 ] || die "raw host without a grant"
+[ "$(code_of -H 'Sec-Fetch-Dest: iframe' "${RAW}__redrop/enter?t=forged&next=/")" = 404 ] || die "forged enter token"
+[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Sec-Fetch-Dest: document' "${RAW}a?b=1")" = "303 ${URL}a?b=1" ] || die "top-level raw redirect"
+J5="$WORK/c5"
+src=$(echo "$vp" | sed -n 's/.*<iframe id="rd-frame"[^>]* src="\([^"]*\)".*/\1/p' | sed 's/&amp;/\&/g')
+curl -fsSL -c "$J5" -b "$J5" -D "$WORK/raw.hdr" -o /dev/null -H 'Sec-Fetch-Dest: iframe' "$src"
+grep -qi "frame-ancestors 'self' ${URL%/} $BASE" "$WORK/raw.hdr" || die "raw frame-ancestors"
+[ "$(code_of -H 'Sec-Fetch-Dest: serviceworker' "${URL}sw.js")" = 404 ] || die "service worker served"
+pass "viewer frame: raw bytes identical, grant required, top-level raw redirects, CSPs"
+
+# older versions: listed always, openable only when the owner allows it
+vp=$(curl -fsS -H 'Sec-Fetch-Dest: document' "$URL")
+echo "$vp" | grep -q 'Version 2' && echo "$vp" | grep -q 'v2' || die "versions listed with notes"
+echo "$vp" | grep -q 'redrop-version=2' && die "version 2 offered while closed"
+[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Sec-Fetch-Dest: document' "${URL}?redrop-version=2")" = "303 $URL" ] || die "closed version redirects"
+$R set "$ID" --old-versions | grep -q 'older versions: *viewers can open them' || die "set --old-versions"
+curl -fsS -H 'Sec-Fetch-Dest: document' "${URL}?redrop-version=2" | grep -q 'Viewing version 2 of 2' || die "version bar"
+framed "${URL}?redrop-version=2" | grep -q second || die "version 2 content"
+$R set "$ID" --no-old-versions >/dev/null
+[ "$(code_of -H 'Sec-Fetch-Dest: document' "${URL}?redrop-version=2")" = 303 ] || die "version 2 after closing"
+pass "older versions: metadata only, then openable on its pinned host, then closed"
+
+# address bar: the raw host relays frame navigations to that viewer's stream
+bp=$(curl -fsS -H 'Sec-Fetch-Dest: document' "$BURL")
+stream=$(echo "$bp" | sed -n 's/.*data-stream="\([^"]*\)".*/\1/p' | sed 's/&amp;/\&/g')
+src=$(echo "$bp" | sed -n 's/.*<iframe id="rd-frame"[^>]* src="\([^"]*\)".*/\1/p' | sed 's/&amp;/\&/g')
+curl -sN --max-time 4 "${BURL%/}$stream" > "$WORK/sse.out" &
+SSE=$!
+sleep 0.5
+J4="$WORK/c4"
+curl -fsSL -c "$J4" -b "$J4" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' "$src" >/dev/null
+BRAW=$(echo "$BURL" | sed -E 's#^(https?://)([^.]+)\.#\1\2--raw.#')
+curl -fsS -b "$J4" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' "${BRAW}some/route?x=1" >/dev/null
+curl -fsS -b "$J4" -H 'Sec-Fetch-Dest: style' -H 'Sec-Fetch-Mode: no-cors' "${BRAW}assets/app.css" >/dev/null
+wait $SSE || true
+grep -q '^data: /some/route?x=1$' "$WORK/sse.out" || die "address bar relay: $(cat "$WORK/sse.out")"
+grep -q 'app.css' "$WORK/sse.out" && die "subresource relayed"
+pass "address bar follows frame navigations (not subresources)"
+
+# --no-info: served directly as before; non-HTML files keep the file page
 NURL=$($R share "$WORK/page.html" --no-info -q)
-curl -fsS "${D[@]}" "$NURL" | grep -q "$W" && die "widget despite --no-info"
+curl -fsS "$NURL" | cmp -s - "$WORK/page.html" || die "--no-info is not the direct view"
+[ "$(code_of -H 'Sec-Fetch-Dest: iframe' "$(echo "$NURL" | sed -E 's#^(https?://)([^.]+)\.#\1\2--raw.#')")" = 404 ] || die "raw host with --no-info"
 $R set "$NURL" --info | grep -q 'info button: *shown' || die "set --info output"
-curl -fsS "${D[@]}" "$NURL" | grep -q "$W" || die "widget after set --info"
-$R update "$NURL" "$WORK/page.html" --no-info | grep -q 'info button: *hidden' || die "update --no-info"
-curl -fsS "${D[@]}" "$NURL" | grep -q "$W" && die "widget after update --no-info"
-pass "info button: html and bundle navigations only, ranges of the same page; not for curl */*, downloads, frames, css, files, --no-info"
+curl -fsS -H 'Sec-Fetch-Dest: document' "$NURL" | grep -q 'rd-frame' || die "frame after set --info"
+curl -fsS "${URL}?redrop-info=0" | cmp -s - "$WORK/page-v1.html" || die "redrop-info=0 direct view"
+fp=$(curl -fsS "$FURL")
+echo "$fp" | grep -q 'id="rd-info"' && echo "$fp" | grep -q 'Download' || die "file page with the info panel"
+echo "$fp" | grep -q 'rd-frame' && die "file page framed"
+pass "--no-info and ?redrop-info=0 are direct; file page has the panel natively"
 
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)

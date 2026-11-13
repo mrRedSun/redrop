@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
@@ -282,13 +283,18 @@ func Load() (*Config, error) {
 // ContentHost returns the bare content domain (no port).
 func (c *Config) ContentHost() string { return c.ContentURL.Hostname() }
 
-// ArtifactURL builds https://<slug>.<content-domain>[:port]/.
+// ArtifactURL builds https://<slug>.<content-domain>[:port]/, the shared link.
 func (c *Config) ArtifactURL(slug string) string {
-	host := slug + "." + c.ContentURL.Hostname()
+	return c.ContentOrigin(ids.ViewerHost(slug)) + "/"
+}
+
+// ContentOrigin is scheme://<label>.<content-domain>[:port] for an artifact host.
+func (c *Config) ContentOrigin(h ids.Host) string {
+	host := h.Label() + "." + c.ContentURL.Hostname()
 	if p := c.ContentURL.Port(); p != "" {
 		host += ":" + p
 	}
-	return c.ContentURL.Scheme + "://" + host + "/"
+	return c.ContentURL.Scheme + "://" + host
 }
 
 // ContentFrameSource is the CSP source matching every artifact origin.

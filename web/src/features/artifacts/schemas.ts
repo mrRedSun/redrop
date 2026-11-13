@@ -30,8 +30,8 @@ export const Artifact = Schema.Struct({
   purge_at: Schema.NullOr(Timestamp),
   /** Effective: the artifact's own setting, or the server default when it has none. */
   info_button: Schema.Boolean,
-  /** The server decides which kinds have pages that can carry the button. */
-  info_button_supported: Schema.Boolean,
+  /** Viewers can open older versions from the info panel. */
+  viewer_old_versions: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
 export const ArtifactList = ListOf(Artifact)
@@ -45,6 +45,7 @@ export const UpdateArtifactRequest = Schema.Struct({
   reset_views: Schema.optionalKey(Schema.Boolean),
   spa: Schema.optionalKey(Schema.Boolean),
   info_button: Schema.optionalKey(Schema.Boolean),
+  viewer_old_versions: Schema.optionalKey(Schema.Boolean),
   revoked: Schema.optionalKey(Schema.Boolean),
 })
 export type UpdateArtifactRequest = typeof UpdateArtifactRequest.Type
@@ -112,6 +113,7 @@ export const ArtifactSettingsForm = Schema.Struct({
   resetViews: Schema.Boolean,
   spa: Schema.Boolean,
   infoButton: Schema.Boolean,
+  oldVersions: Schema.Boolean,
 }).check(
   Schema.makeFilter((v) =>
     v.passwordAction !== 'set' || v.password.length > 0 ? undefined : { path: ['password'], issue: 'Enter the new password' },
@@ -133,21 +135,23 @@ export const settingsDefaults = (a: Artifact, spa: boolean): ArtifactSettingsInp
   resetViews: false,
   spa,
   infoButton: a.info_button,
+  oldVersions: a.viewer_old_versions,
 })
 
 /**
  * Form -> PATCH body. Keep omits expiry/password instead of resetting
  * them. Explicit TTL choices are relative to the submission time. `spa`
- * only applies to bundles. The info button switch is always sent where it is
- * shown, so saving stores the value the owner saw as the artifact's own.
+ * only applies to bundles. The viewer switches are always sent, so saving
+ * stores the values the owner saw as the artifact's own.
  */
-export const toUpdateRequest = (v: ArtifactSettings, a: Pick<Artifact, 'kind' | 'info_button_supported'>): UpdateArtifactRequest => ({
+export const toUpdateRequest = (v: ArtifactSettings, kind: Artifact['kind']): UpdateArtifactRequest => ({
   title: v.title,
   max_views: v.maxViews,
   ...(v.ttl !== 'keep' && { ttl: v.ttl }),
   ...(v.passwordAction === 'set' && { password: v.password }),
   ...(v.passwordAction === 'remove' && { password: '' }),
   ...(v.resetViews && { reset_views: true }),
-  ...(a.kind === 'bundle' && { spa: v.spa }),
-  ...(a.info_button_supported && { info_button: v.infoButton }),
+  ...(kind === 'bundle' && { spa: v.spa }),
+  info_button: v.infoButton,
+  viewer_old_versions: v.oldVersions,
 })

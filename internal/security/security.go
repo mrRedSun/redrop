@@ -110,23 +110,30 @@ func (s *Signer) mac(v string) string {
 
 // Verify returns the payload if the value is authentic and unexpired.
 func (s *Signer) Verify(v string) (string, bool) {
+	payload, _, ok := s.VerifyExpiry(v)
+	return payload, ok
+}
+
+// VerifyExpiry is Verify that also returns the value's expiry, so a grant
+// derived from it can be made to expire no later.
+func (s *Signer) VerifyExpiry(v string) (string, time.Time, bool) {
 	enc, sig, ok := strings.Cut(v, ".")
 	if !ok || !hmac.Equal([]byte(sig), []byte(s.mac(enc))) {
-		return "", false
+		return "", time.Time{}, false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(enc)
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
 	expS, payload, ok := strings.Cut(string(raw), "|")
 	if !ok {
-		return "", false
+		return "", time.Time{}, false
 	}
 	var exp int64
 	if _, err := fmt.Sscanf(expS, "%d", &exp); err != nil || time.Now().Unix() >= exp {
-		return "", false
+		return "", time.Time{}, false
 	}
-	return payload, true
+	return payload, time.Unix(exp, 0), true
 }
 
 // --- rate limiting (fixed window per key) ---

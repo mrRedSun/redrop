@@ -41,7 +41,8 @@ Flags --url/--token override the environment, which overrides the saved login.
 ## Share
 
     redrop share PATH [--ttl 7d] [--title T] [--once | --max-views N]
-                      [--password-generate | --password-file F] [--no-info] [--json]
+                      [--password-generate | --password-file F]
+                      [--no-info] [--old-versions] [--json]
 
 PATH decides the kind (override with --as html|file|bundle):
 
@@ -78,13 +79,23 @@ chunked and resume automatically after network errors.
   words (about 52 bits), so they can be read out or typed. Older links are 26
   random letters and digits and keep working. Rotate replaces either kind
   with a new four-word link.
-- Info button: HTML pages (html artifacts and bundle pages) show a small "i"
-  button in the bottom-right corner. It tells viewers the title, version and
-  publish time, the expiry countdown, remaining views, whether a password is
-  set, and the size. It never shows who shared the page. Hide it with
-  --no-info on share, update, or set (--info turns it back on); the server
-  default is usually on. Append ?redrop-info=0 to a page URL to hide it for one
-  load, e.g. for screenshots. The stored file is never modified.
+- Info button and viewer: shared pages show a small "i" button in the
+  bottom-right corner with the title, version and publish time, the expiry
+  countdown, remaining views, whether a password is set, the size, and the
+  list of versions with their --note text (viewers see change notes). It never
+  shows who shared the page. HTML artifacts open in redrop's viewer: the
+  artifact itself loads, byte for byte as uploaded, in a full-page frame from
+  a separate raw origin (<slug>--raw.CONTENT-DOMAIN). The address bar follows
+  links clicked inside the frame; single-page-app route and hash changes are
+  not reflected. Files keep redrop's own file page. Your artifact needs
+  nothing redrop-specific.
+  --no-info on share, update, or set serves pages directly instead (no
+  button, no frame); --info turns it back on (the server default is usually
+  on). Append ?redrop-info=0 to a link for one direct, frameless load, e.g.
+  for screenshots.
+- Older versions: --old-versions lets viewers open earlier versions from the
+  info panel (?redrop-version=N); --no-old-versions (the default) shows them
+  the list only.
 - Links are unguessable, not indexed (noindex + robots.txt), and send no
   Referer to third parties. Unknown, expired, used-up and revoked links all
   answer the same "Not found", and clients that hit many of them are
@@ -97,7 +108,7 @@ chunked and resume automatically after network errors.
     redrop info ID|URL
     redrop set ID|URL --ttl 30d | --password-generate | --no-password |
                      --max-views 3 | --unlimited | --reset-views | --title T |
-                     --info | --no-info
+                     --info | --no-info | --old-versions | --no-old-versions
     redrop revoke ID|URL      # disable now (restore with: redrop restore ID)
     redrop rotate ID|URL      # new link; the old one stops working
     redrop versions ID|URL    # history

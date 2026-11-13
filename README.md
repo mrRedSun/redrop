@@ -12,10 +12,12 @@ cross-platform CLI that agents drive.
 - Optional password and view limit. One-time links show an "Open" page first, so
   chat link previews don't use them up. Same-link versions with rollback.
 - Multi-user and invite-only; built-in login with TOTP, plus OIDC single sign-on.
-- HTML pages get a small info button showing viewers the version, expiry
-  countdown, and remaining views, but never who shared the page. Turn it off
-  per artifact (`--no-info`, or in the dashboard settings), or for one load
-  with `?redrop-info=0`.
+- Shared pages get a small info button showing viewers the version history,
+  expiry countdown, and remaining views, never who shared them. HTML opens in
+  redrop's viewer, with the artifact untouched in a frame from its own origin,
+  and the address bar follows the frame. Turn it off per artifact (`--no-info`,
+  or in the dashboard), or for one load with `?redrop-info=0`. Owners can let
+  viewers open older versions (`--old-versions`).
 
 ## Read first
 
@@ -81,18 +83,20 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_DATA_DIR` | `/data` |
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
-| `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the viewer info button on artifacts without their own setting |
+| `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 
 ## Reverse proxy
 
 The dashboard host and the content domain both go to the same server. Artifact
 links come in two formats: four words (`amber-otter-quilt-river`, current) and
-26 base32 characters (older links, still valid). The content router must accept
-both. As a regex on the example domain:
+26 base32 characters (older links, still valid). Each artifact also has raw
+hosts for the viewer frame: `<slug>--raw` and `<slug>--v<N>` (version N, up to
+six digits). The content router must accept all of them. As a regex on the
+example domain:
 
 ```text
-^([a-z2-7]{26}|[a-z]{3,9}(-[a-z]{3,9}){3})\.usercontent\.example$
+^([a-z2-7]{26}|[a-z]{3,9}(-[a-z]{3,9}){3})(--(raw|v[1-9][0-9]{0,5}))?\.usercontent\.example$
 ```
 
 With Traefik v3 labels, plus the apex for the landing page and installers:
@@ -100,11 +104,13 @@ With Traefik v3 labels, plus the apex for the landing page and installers:
 ```yaml
 traefik.http.routers.redrop-content.rule: >-
   Host(`usercontent.example`) ||
-  HostRegexp(`^([a-z2-7]{26}|[a-z]{3,9}(-[a-z]{3,9}){3})\.usercontent\.example$`)
+  HostRegexp(`^([a-z2-7]{26}|[a-z]{3,9}(-[a-z]{3,9}){3})(--(raw|v[1-9][0-9]{0,5}))?\.usercontent\.example$`)
 ```
 
-Update this rule **before** deploying a version that mints word links; a rule
-that only matches the 26-character format sends new links nowhere. The content
+Update this rule **before** deploying a version that mints word links or uses
+the viewer frame: a rule without the word format sends new links nowhere, and
+one without the `--raw`/`--v<N>` suffix leaves the viewer's frame empty. The
+application parser (`ids.ParseHostLabel`) stays authoritative. The content
 domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
 Set `REDROP_TRUSTED_PROXIES` to the proxy's addresses and
 `REDROP_CLIENT_IP_HEADER` to the header it sets (`X-Forwarded-For` for Traefik,

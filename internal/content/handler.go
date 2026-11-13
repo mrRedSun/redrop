@@ -29,6 +29,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 const maxInlineText = 1 << 20
@@ -45,24 +46,28 @@ type Handler struct {
 	pages   *pages
 	install http.Handler // installers and CLI downloads, also served on the apex
 	misses  *security.TokenBucket
+	relay   *relay // address-bar locations of viewer frames
 }
 
 func New(sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger, installers http.Handler) *Handler {
 	return &Handler{
 		sharing: sh, cfg: cfg, clients: clients, log: log, pages: newPages(cfg), install: installers,
 		misses: security.NewTokenBucket(cfg.ContentMissBurst, cfg.ContentMissPerMinute, maxMissClients),
+		relay:  newRelay(),
 	}
 }
 
-// slug extracts the artifact slug from the Host header ("" for the apex,
-// ok=false for hosts that are not a single-label subdomain carrying a
-// well-formed slug).
-func (h *Handler) slug(r *http.Request) (string, bool) {
+// Close ends open address-bar streams; call it when the server shuts down.
+func (h *Handler) Close() { h.relay.close() }
+
+// host parses the artifact host of the request (ok=false for the apex, other
+// hosts, and labels that are not exactly an ids.Host).
+func (h *Handler) host(r *http.Request) (ids.Host, bool) {
 	label, ok := h.label(r)
-	if !ok || (label != "" && !ids.ValidSlug(label)) {
-		return "", false
+	if !ok || label == "" {
+		return ids.Host{}, false
 	}
-	return label, true
+	return ids.ParseHostLabel(label)
 }
 
 // label extracts the subdomain label from the Host header without checking
@@ -123,53 +128,70 @@ func (h *Handler) tooManyMisses(w http.ResponseWriter) {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
-	if h.serveServerIcon(w, r) {
+	if h.serveServerIcon(w, r) || serveViewerAsset(w, r) {
 		return
 	}
-	slug, ok := h.slug(r)
+	label, isContent := h.label(r)
+	host, ok := h.host(r)
 	switch {
+	case isContent && label == "":
+		h.serveApex(w, r)
+		return
 	case !ok && fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead) && h.singleLabel(r):
-		h.favicon(w, r, "")
+		h.favicon(w, r, ids.Host{})
 		return
 	case !ok:
 		h.miss(w, r)
 		return
-	case slug == "":
-		h.serveApex(w, r)
-		return
 	case r.URL.Path == "/robots.txt":
 		RobotsTxt(w, r)
 		return
+	case isServiceWorkerScript(r):
+		// Service workers would outlive revocation and could answer the
+		// viewer's own navigations, so no artifact host ever serves one.
+		h.pages.notFound(w)
+		return
 	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		h.favicon(w, r, slug)
+		h.favicon(w, r, host)
 		return
 	case h.misses.Exhausted(h.missKey(r)):
 		h.tooManyMisses(w)
 		return
+	case host.IsRaw():
+		h.serveRaw(w, r, host)
+		return
 	}
-	openPath := "/" + sharing.ReservedPrefix + "/open"
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == openPath) {
+	reserved := "/" + sharing.ReservedPrefix + "/"
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == reserved+"open") {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	a, err := h.sharing.Lookup(r.Context(), slug)
+	a, err := h.sharing.Lookup(r.Context(), host.Slug())
 	if err != nil {
 		h.miss(w, r)
 		return
 	}
-	if rest, reserved := strings.CutPrefix(r.URL.Path, "/"+sharing.ReservedPrefix+"/"); reserved {
+	if rest, isReserved := strings.CutPrefix(r.URL.Path, reserved); isReserved {
 		switch rest {
 		case "preview":
 			h.preview(w, r, a)
 		case "open":
 			h.open(w, r, a)
+		case "location":
+			h.location(w, r, a)
 		default:
 			h.pages.notFound(w)
 		}
 		return
 	}
 	h.serve(w, r, a)
+}
+
+// isServiceWorkerScript reports a request for a service worker's script
+// (registration or update check).
+func isServiceWorkerScript(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Dest") == "serviceworker" || r.Header.Get("Service-Worker") == "script"
 }
 
 func (h *Handler) setHeaders(w http.ResponseWriter) {
@@ -200,6 +222,13 @@ func isDocument(r *http.Request) bool {
 	return accept == "" || accept == "*/*" || strings.Contains(accept, "text/html")
 }
 
+// Query parameters the shared link understands. They are not passed to the
+// artifact's frame.
+const (
+	paramInfo    = "redrop-info"    // "0": a direct, frameless view (screenshots)
+	paramVersion = "redrop-version" // N: an older version, when the owner allows it
+)
+
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
 	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
 	switch h.sharing.Decide(a, grants, time.Now()) {
@@ -222,27 +251,89 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 		}
 	case sharing.ServeOwnerPreview:
 	}
-	h.serveContent(w, r, a)
+	q := r.URL.Query()
+	version := 0
+	if v := q.Get(paramVersion); v != "" {
+		var err error
+		if version, err = strconv.Atoi(v); err != nil || version <= 0 {
+			version = -1 // unavailable: redirect to the current version
+		}
+	}
+	snap, err := h.sharing.SelectVersion(r.Context(), a, version)
+	if err != nil {
+		// Not a miss: the visitor passed the gates. Show the current version.
+		http.Redirect(w, r, withoutParams(r.URL, paramVersion), http.StatusSeeOther)
+		return
+	}
+	mode := h.sharing.Mode(a, snap)
+	direct := q.Get(paramInfo) == "0"
+	if mode == sharing.ModeFramed && !direct && isDocument(r) {
+		// Directory redirects and missing paths answer as they would without
+		// the frame; only real pages get the viewer.
+		switch t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind {
+		case sharing.TargetRedirect:
+			http.Redirect(w, r, t.Location, http.StatusMovedPermanently)
+		case sharing.TargetNotFound:
+			h.pages.notFound(w)
+		default:
+			h.viewerPage(w, r, a, snap, grants)
+		}
+		return
+	}
+	var info *sharing.ViewerInfo
+	if mode == sharing.ModeFilePage && !direct && h.sharing.InfoShown(a) {
+		v := h.sharing.ViewerInfo(r.Context(), a, snap)
+		info = &v
+	}
+	h.serveContent(w, r, a, snap, info)
 }
 
-func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
-	t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path)
+// withoutParams returns u's path and query without the named parameters.
+func withoutParams(u *url.URL, names ...string) string {
+	q := u.Query()
+	for _, n := range names {
+		q.Del(n)
+	}
+	if len(q) == 0 {
+		return u.EscapedPath()
+	}
+	return u.EscapedPath() + "?" + q.Encode()
+}
+
+// serveContent answers from snap's files on the shared link: the direct view,
+// subresources of a direct view, and the file page. info is the file page's
+// panel, nil without one.
+func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, info *sharing.ViewerInfo) {
+	t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path)
 	switch t.Kind {
 	case sharing.TargetFile:
-		download := r.URL.Query().Has("download")
-		if snippet, ok := h.infoFor(w, r, a, t.File, download); ok && h.sendPageWithInfo(w, r, t.File, snippet) {
-			return
+		if snap.Kind == api.KindFile && scriptable(t.File.ContentType) {
+			// The file page carries trusted info on this origin; a shared SVG
+			// or HTML file opened here must not be able to script it.
+			w.Header().Set("Content-Security-Policy", "sandbox")
+		} else if d := r.Header.Get("Sec-Fetch-Dest"); d == "object" || d == "embed" {
+			w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
 		}
-		h.sendFile(w, r, t.File, download)
+		h.sendFile(w, r, t.File, r.URL.Query().Has("download"))
 	case sharing.TargetViewer:
-		h.pages.fileViewer(w, h.sharing, t.File)
+		h.pages.fileViewer(w, h.sharing, t.File, h.viewerOrigin(a), snap, info, r.URL)
 	case sharing.TargetListing:
-		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), a, t.Dir))
+		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), snap, t.Dir))
 	case sharing.TargetRedirect:
 		http.Redirect(w, r, t.Location, http.StatusMovedPermanently)
 	default:
 		h.pages.notFound(w)
 	}
+}
+
+// scriptable reports content types a browser runs scripts in when opened.
+func scriptable(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	return ct == "text/html" || ct == "image/svg+xml" || ct == "application/xhtml+xml" || ct == "application/xml" || ct == "text/xml"
+}
+
+func (h *Handler) viewerOrigin(a *store.Artifact) string {
+	return h.cfg.ContentOrigin(ids.ViewerHost(a.Slug))
 }
 
 func (h *Handler) sendFile(w http.ResponseWriter, r *http.Request, f *store.File, download bool) {
@@ -333,8 +424,7 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 	}
 	name, reserved := strings.CutPrefix(r.URL.Path, iconPrefix)
 	if !reserved {
-		slug, ok := h.slug(r)
-		if !ok || slug != "" {
+		if label, ok := h.label(r); !ok || label != "" {
 			return false
 		}
 		name = strings.TrimPrefix(r.URL.Path, "/")
@@ -351,7 +441,22 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 // live) gets the identical default response and no lookup is made: free
 // icon requests cannot tell hits from misses. Icon requests never record or
 // consume a view.
-func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
+func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, host ids.Host) {
+	if host.IsRaw() {
+		if cookie := h.cookieValue(r, cookieRaw); cookie != "" {
+			if a, err := h.sharing.Lookup(r.Context(), host.Slug()); err == nil {
+				if acc, ok := h.sharing.AuthorizeRaw(r.Context(), a, host, cookie, time.Now()); ok {
+					if t := h.sharing.ResolvePath(r.Context(), acc.Snapshot, r.URL.Path); t.Kind == sharing.TargetFile {
+						h.sendFile(w, r, t.File, false)
+						return
+					}
+				}
+			}
+		}
+		brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)
+		return
+	}
+	slug := host.Slug()
 	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
 	seen := h.cookieValue(r, cookieSeen)
 	if slug != "" && (grants.Visit != "" || grants.Preview != "" || seen != "") {
@@ -359,7 +464,7 @@ func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
 			d := h.sharing.Decide(a, grants, time.Now())
 			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
 			if proven {
-				if t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path); t.Kind == sharing.TargetFile {
+				if t := h.sharing.ResolvePath(r.Context(), sharing.CurrentSnapshot(a), r.URL.Path); t.Kind == sharing.TargetFile {
 					h.sendFile(w, r, t.File, false)
 					return
 				}

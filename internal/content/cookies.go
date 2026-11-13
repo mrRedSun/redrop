@@ -12,6 +12,7 @@ const (
 	cookieVisit   = "visit"   // granted after Open / correct password
 	cookiePreview = "preview" // owner preview from the dashboard
 	cookieSeen    = "seen"    // de-duplicates view counting
+	cookieRaw     = "raw"     // admits the viewer frame on a raw host
 )
 
 func (h *Handler) cookieName(base string) string {
@@ -39,4 +40,19 @@ func (h *Handler) setCookie(w http.ResponseWriter, base string, g *sharing.Grant
 		c.SameSite, c.Partitioned = http.SameSiteNoneMode, true
 	}
 	http.SetCookie(w, c)
+}
+
+// setRawCookie writes a raw-host grant. The raw host is framed by the viewer
+// (or the dashboard preview), so its cookie is a cookie in a frame:
+//
+//   - When the content domain is a registrable domain, the viewer and raw
+//     hosts are same-site and Lax would do; when it is on the Public Suffix
+//     List, every artifact host is its own site and the frame is third-party.
+//     SameSite=None with Partitioned (CHIPS) works in both: the cookie is
+//     keyed to the top-level site (the viewer, or the dashboard for previews)
+//     and survives third-party cookie blocking where CHIPS is supported.
+//   - SameSite=None requires Secure, so plain-HTTP development uses Lax and
+//     needs viewer and raw hosts to be same-site.
+func (h *Handler) setRawCookie(w http.ResponseWriter, g *sharing.Grant) {
+	h.setCookie(w, cookieRaw, g, true)
 }

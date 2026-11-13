@@ -14,7 +14,7 @@ const form = useForm({
   defaultValues: settingsDefaults(artifact, currentVersion.spa),
 })
 const onSubmit = useFormSubmit(form, artifacts.saveSettings(artifact.id), {
-  toArg: (values) => ({ values, artifact }),
+  toArg: (values) => ({ values, kind: artifact.kind }),
   onSuccess: (saved, values) => form.reset(settingsDefaults(saved, values.spa)),
 })
 ```
@@ -47,9 +47,11 @@ func (h adminAPI) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error)
 | `internal/accounts/admin.go` | The `Administration` port for user edits, invitations, and reset links. Invite lifetime parsing belongs here, not in HTTP handlers. |
 | `internal/sharing` | Upload verification and extraction, publishing, ownership, versions, artifact settings, access grants, lifecycle, content resolution, and maintenance policy. |
 | `internal/sharing/views.go` | Safe owner/admin results, version/file/access-log results, and the status/link/purge-time calculation. |
+| `internal/sharing/frame.go` | Viewer frame policy: `modeFor` (the only "which kinds get the frame" rule), version selection, enter tokens, raw cookies, `AuthorizeRaw` live checks, and address-bar stream tokens. `ViewerInfo` (views.go) is the viewer-safe panel model. |
+| `internal/ids/host.go` | `ids.Host`: the only parser/formatter of artifact host labels (`<slug>`, `<slug>--raw`, `<slug>--v<N>`), next to `ValidSlug`. |
 | `internal/sharing/moderation.go` | The `Moderation` port for metadata listing, revoke/restore, deletion, and server usage. |
 | `internal/httpapi` | Fuego routes, authentication and CSRF middleware, cookie handling, input decoding, pure DTO mapping, and RFC 9457 responses. |
-| `internal/content` | HTTP and HTML presentation on per-artifact subdomains: neutral gates, visitors' cookies, file streaming, directory listings, viewers, and the uniform miss response with its per-client miss limiter. `info.go` and `infowidget.js` add the viewer info button to HTML pages at serve time (DESIGN.md "Info button"); `sharing.ViewerInfo` decides what it may show. |
+| `internal/content` | HTTP and HTML presentation on per-artifact subdomains: neutral gates, visitors' cookies, file streaming, directory listings, viewers, and the uniform miss response with its per-client miss limiter. `viewer.go` (viewer page, address-bar stream, `static/viewer.{js,css}`), `raw.go` (raw hosts) and `relay.go` (bounded in-memory address-bar relay) implement the viewer frame (DESIGN.md "Viewer frame"). |
 | `internal/store` | SQLite records, queries, transactions, quotas, atomic view consumption, and consistent database snapshots. |
 | `internal/blob` | Content-addressed file storage and garbage collection. |
 | `internal/security`, `internal/netutil` | Password hashing, signed grants, fixed-window and token-bucket limiters, and trusted-proxy client resolution. |
@@ -277,6 +279,6 @@ This is an architecture/dashboard change, not a production deployment or a produ
 
 - The operator owns DNS/TLS for the separate app/content domains, trusted-proxy configuration, OIDC provider configuration, quotas, and resource limits. The LAN development server intentionally does not exercise production Secure cookies or TLS.
 - Existing janitor snapshots cover SQLite. Recovery also needs blobs and the signing secret; protect and back up the whole data directory with permissions restricted to the service operator. Restore consistent snapshots, and do not delete persistent data during upgrades or rollback.
-- Rollback must use a matching server/dashboard/CLI artifact and a compatible database backup when a migration was added. Migration 2 adds the nullable `artifacts.info_button` column (NULL follows `REDROP_INFO_BUTTON_DEFAULT`). Older servers ignore the column, so rolling back the binary alone keeps working; per-artifact info button choices are simply not applied there. Production Docker Compose packaging, pinned production images, and publishing/security-scan CI remain work outside this pass; they are prerequisites before claiming the global production delivery bar is met.
+- Rollback must use a matching server/dashboard/CLI artifact and a compatible database backup when a migration was added. Migration 2 adds the nullable `artifacts.info_button` column (NULL follows `REDROP_INFO_BUTTON_DEFAULT`); migration 3 adds `viewer_old_versions` (default 0) and the `last_version` high-water mark. Older servers ignore these columns, so rolling back the binary alone keeps working: artifacts are then served directly again, per-artifact viewer choices are not applied, and an older server can reuse a deleted version's number. Roll back the reverse-proxy rule last; it only adds hosts. Production Docker Compose packaging, pinned production images, and publishing/security-scan CI remain work outside this pass; they are prerequisites before claiming the global production delivery bar is met.
 - Browser rendering, keyboard/mobile flows, third-party-cookie behavior of embedded previews, and a real OIDC round trip were not exercised. The owner explicitly skipped installing browser test tooling. Runtime atom APIs are marked unstable upstream, so upgrades require the test and contract suite. Clipboard access on a plain-HTTP LAN origin may be unavailable; copy fields allow manual selection.
 - Handwritten Schemas can drift. Keep the OpenAPI snapshot and live contract check in release verification. The checks cover dashboard-consumed operations rather than unused upload endpoints. Existing backend concurrency/resource-exhaustion behavior, full shutdown/maintenance coordination, and a comprehensive production security review remain separate work.

@@ -218,7 +218,7 @@ func TestOneTimePasswordLinkFlow(t *testing.T) {
 	if len(visit) == 0 {
 		t.Fatal("no visit cookie")
 	}
-	r = h.content("GET", a.URL, "/", nil, "", visit...)
+	r = h.content("GET", a.URL, "/?redrop-info=0", nil, "", visit...) // the direct view, without the frame
 	expectStatus(t, r, 200, "content with grant")
 	if !strings.Contains(body(r), "secret numbers") {
 		t.Fatal("content not served after unlock")

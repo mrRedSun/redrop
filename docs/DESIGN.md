@@ -31,15 +31,21 @@ Two separately configured origins:
 * **App origin** (`REDROP_PUBLIC_URL`, e.g. `https://redrop.example.com`): dashboard,
   JSON API, OIDC callbacks, install scripts and CLI downloads.
 * **Content domain** (`REDROP_CONTENT_URL`, e.g. `https://usercontent.example`): every
-  artifact is served from its own subdomain `https://<slug>.usercontent.example/`. The
-  apex serves only a landing page, `robots.txt`, and install scripts.
+  artifact is served from its own subdomain `https://<slug>.usercontent.example/` (the
+  shared link). HTML artifacts also have **raw hosts** for the viewer frame:
+  `<slug>--raw` (current version) and `<slug>--v<N>` (version N); see "Viewer frame".
+  The apex serves only a landing page, `robots.txt`, and install scripts.
 
 The content domain must be a different registrable domain from the app origin
 so untrusted HTML can never be same-site with the dashboard or other services
 (cookie tossing, same-site CSRF, Safe Browsing blast radius). Per-artifact
 subdomains give each artifact its own browser origin, so artifacts cannot read
-each other's storage, cookies, or service workers, while still allowing normal
-`localStorage`/`fetch` inside one artifact.
+each other's storage or cookies, while still allowing normal
+`localStorage`/`fetch` inside one artifact. No artifact host serves a service
+worker script (requests with `Sec-Fetch-Dest: serviceworker` or
+`Service-Worker: script` get `404`): a worker would keep answering after the
+link is revoked or expires, and could answer the viewer page's own
+navigations.
 
 The slug is the access secret. "Rotate link" replaces the slug; the artifact ID
 used by the API/CLI is stable. Artifact slugs appear in TLS SNI and DNS
@@ -110,7 +116,8 @@ Every content response sets:
   limited to the app origin (dashboard preview), restrictive
   `Permissions-Policy`.
 
-Paths under `/__redrop/` are reserved for gate pages and cannot be uploaded.
+Paths under `/__redrop/` are reserved for redrop (gate, preview, viewer
+assets, frame entry, address-bar stream) and cannot be uploaded.
 
 ### Icons
 
@@ -135,75 +142,192 @@ Paths under `/__redrop/` are reserved for gate pages and cannot be uploaded.
   for every slug. Serving an artifact's own icon to anyone who could see its
   content would let unlimited icon probes find live artifacts that ship an
   icon. The `/__redrop/` icons on server pages are server-owned and never
-  depend on the slug either. Icon links are never added to artifact HTML
-  (the info button below is the only serve-time addition). Directory
+  depend on the slug either. Artifact bytes are never modified. Directory
   listings and file viewers do not link an icon, so the browser's own
   `/favicon.ico` request decides.
 
-### Info button
+### Viewer frame
 
-HTML artifact pages carry a small round "i" button in the bottom-right
-corner. It opens a popover with what the visitor is entitled to know about
-the page they are looking at.
+An artifact is exactly the bytes its owner uploaded. redrop never modifies
+them and never asks them to contain anything redrop-specific. The info button
+lives on redrop's own pages instead.
 
-* **Shown:** the title, the current version number and when it was
-  published, the expiry as a live countdown (or "never expires"), the view
-  limit and views left for view-limited links ("one-time link: this was the
-  only view"), "password-protected" when set, the current version's size and
-  file count, and "Shared with redrop" with the redrop mark.
+* **Modes.** `sharing.modeFor(kind, info)` is the only kind policy:
+  * `html` and `bundle` with the info button on are **framed**: the shared
+    link serves redrop's viewer page, which frames the artifact from a raw
+    host.
+  * With the info button off, they are served **directly** on the shared
+    link, exactly as before the frame existed.
+  * `file` artifacts always get redrop's **file page**, which renders the info
+    panel natively when the button is on.
+* **Hosts.** `ids.Host` parses and formats artifact host labels, next to
+  `ids.ValidSlug`:
+  * `<slug>` is the shared link (viewer, gates, direct and file views).
+  * `<slug>--raw` serves the current version. It is one stable origin, so an
+    artifact's storage survives updates.
+  * `<slug>--v<N>` (N from 1 to 999999, no leading zero) serves version N on
+    its own origin. Two tabs on different versions never mix files, and
+    root-absolute URLs inside artifacts keep working.
+
+  Valid slugs never contain `--`, so the suffix is unambiguous; the longest
+  label is 48 octets. Version numbers are never reused (a high-water mark per
+  artifact), so a pinned host never serves different bytes later.
+* **Viewer page.** A top-level page navigation to a framed artifact gets
+  redrop's viewer page after the usual gates, in this order:
+  1. Directory redirects and missing paths answer as before, with `301` and
+     `404`.
+  2. The page is a full-viewport `<iframe>` of the raw host at the same path
+     and query, with `allow="fullscreen; clipboard-write"` and no `sandbox`,
+     so PDFs, downloads, modals and printing behave as before.
+  3. The "i" button and the panel sit outside the frame, so the artifact can
+     neither reach nor restyle them.
+
+  The page runs no inline script; it loads only `/__redrop/viewer.js` and
+  `/__redrop/viewer.css`. It sends these headers:
+  * CSP `default-src 'none'`, with `script-src` and `style-src` pinned to
+    those two paths;
+  * `connect-src 'self'`;
+  * `frame-src` of the raw host plus `https:`, because the parent's
+    `frame-src` also governs where the frame navigates;
+  * `frame-ancestors 'none'`;
+  * `Cross-Origin-Opener-Policy: same-origin`;
+  * `Cache-Control: private, no-store`, because the page carries grants.
+
+  Non-document requests on the shared link (the subresources of a direct
+  view) are served as before. Bytes fetched as `<object>`/`<embed>` there get
+  an opaque-origin `CSP: sandbox allow-scripts`. A file artifact's own HTML, SVG
+  or XML file gets `CSP: sandbox` when opened, since the file page shares its
+  origin.
+* **Raw hosts.** A raw host serves the stored bytes exactly, with the blob
+  ETag and normal Range/conditional handling, and
+  `frame-ancestors 'self' <shared link> <dashboard>` (`'self'` lets an
+  artifact frame its own pages). It handles requests as follows:
+  * A top-level navigation (`Sec-Fetch-Dest: document`, as from
+    `target=_top` links) gets `303` to the same path on the shared link, plus
+    `redrop-version=N` for a pinned host. This is decided from the host label
+    alone, before any lookup. Clients without Fetch Metadata are
+    indistinguishable from curl, so for them the grant check below is the
+    guard.
+  * Every other request needs a raw cookie. Without a valid one, the request
+    gets the identical miss (the same `404` as an unknown link) and spends
+    miss budget.
+  * Malformed raw labels, unknown slugs, bad enter or preview tokens, a wrong
+    host version, the info button turned off, and older versions closed all
+    give that same miss.
+* **Grants.** The viewer page mints one frame per load:
+  * **Enter token:** artifact ID, access generation, host version, kind
+    (open, visit or preview), frame id and cookie expiry, signed, for 2
+    minutes. `/__redrop/enter?t=…&next=…` on the raw host verifies it, sets
+    the raw cookie, and redirects to `next`. A replay within 2 minutes grants
+    nothing its holder didn't already have, so no single-use state is kept.
+  * **Raw cookie** (`__Host-rd_raw`): the same claim. It lasts at most an
+    hour, and never longer than the visit grant it came from.
+  * **Live checks:** every raw request re-checks the claim against the
+    artifact. A changed access generation (password change, rotation,
+    revocation), expiry, an "open" grant after a password or view limit was
+    added, the info button turned off, and older versions turned off each
+    end access on the next request.
+* **Cookies in a frame.** The raw host runs in a frame of the shared link.
+  * **Registrable content domain:** the two are same-site.
+  * **Content domain on the Public Suffix List:** every artifact host is its
+    own site, and the frame is third-party.
+  * **Choice:** the raw cookie is `Secure; HttpOnly; SameSite=None;
+    Partitioned` (CHIPS), which works in both cases. The cookie is keyed to
+    the top-level site, the viewer (or the dashboard, for previews), so it
+    survives third-party cookie blocking where CHIPS is supported. Where a
+    browser blocks partitioned third-party cookies, the frame fails closed
+    with the miss page.
+  * **Plain-HTTP development:** `SameSite=None` needs `Secure`, so it uses
+    `SameSite=Lax`, and the viewer and raw hosts must be same-site there.
+* **Views.** Counting is unchanged: only a page load on the shared link
+  counts. Ungated links count once per browser per 30 minutes (`seen`);
+  gated links count once at Open. Raw-host requests, enter, viewer assets,
+  icons, and the address-bar stream never count.
+* **Dashboard preview.** For framed artifacts the dashboard frames
+  `<slug>--raw/__redrop/preview?t=…` directly. The owner token sets an
+  owner-preview raw cookie (partitioned under the dashboard), which never
+  counts and skips gates. The viewer page therefore never needs a framing
+  ancestor and keeps `frame-ancestors 'none'`. The preview shows the
+  content without the viewer's chrome.
+* **Direct views.** `?redrop-info=0` on a framed artifact, and every page of
+  an artifact with the info button off, are served directly on the shared
+  link, as before. These pages run on the same origin as the viewer page, so
+  four measures keep them from reaching it:
+  * the viewer page's `Cross-Origin-Opener-Policy` (no window reference);
+  * `frame-ancestors 'none'` (they can't frame it);
+  * the service-worker refusal (they can't intercept its loads);
+  * the viewer reads no storage or cookies they could write.
+
+  A service worker registered by an artifact before this release keeps
+  running in browsers that already have it until the browser drops it.
+  Operators who need a guarantee for such browsers can move to a fresh
+  content domain.
+* **Behaviour notes.**
+  * **Address bar:** it follows in-frame navigation through the relay below.
+  * **Tab title:** the artifact's title, not the frame document's title.
+  * **Printing:** the browser prints the viewer page, with the button,
+    panel and version bar hidden and the frame filling the page. An artifact's
+    own `window.print()` prints the frame. `?redrop-info=0` gives a
+    frameless page for screenshots and exact printing.
+
+### Info panel and versions
+
+* **Shown:** the title; the shown version and when it was published (relative
+  and absolute, in local time); the expiry as a live countdown or "never
+  expires"; the views left of a view-limited link ("one-time link: this was
+  the only view"); "password-protected"; the shown version's size and file
+  count; and "Shared with redrop" with the redrop mark.
+* **Versions:** every retained version is listed, newest first, with its
+  number, publish time and change note, and the current one marked. Change
+  notes are therefore visible to viewers, and the dashboard says so.
 * **Never shown:** the owner's identity, usernames, emails, artifact or token
-  IDs and names, the slug, other versions' content or sizes, or the view count
-  of an unlimited link. The rule is: nothing a visitor couldn't already see or
-  infer from the page they were let into. `sharing.ViewerInfo` holds exactly
-  these fields, and tests pin both it and the JSON the page receives.
-* **Where:** only top-level page navigations of `text/html` files in `html`
-  artifacts and bundles (`api.HasInfoButton`; the API reports it per
-  artifact as `info_button_supported`). A navigation is
-  `Sec-Fetch-Dest: document`. Without Fetch Metadata (older browsers,
-  plain-HTTP origins, curl) the `Accept` header must contain `text/html`, so
-  `fetch()`, `*/*`, and header-less downloads get the stored bytes. It is never
-  added to frames (the widget also checks `window.top`), fetches,
-  subresources, non-HTML files, file artifacts (redrop's own viewer page),
-  gates, or `?download`.
-* **How:** at serve time, one `<script>` element is inserted before the
-  closing `</body>` tag. Only the last 64 KiB of the page is examined. The
-  last `</body` there counts only when it is a tag (`</body` then optional
-  whitespace and `>`) and no `<script`, `</script`, `<!--` or `-->` comes after
-  it or is left open before it, so it can't be text inside a script string or
-  a comment. Otherwise, or when there is none, the script is appended at the
-  very end, where browsers still run it. The rest of the document is not
-  parsed or changed, and stored blobs are never modified. The script
-  carries its data as JSON from `encoding/json`, which escapes `<`, `>`, `&`,
-  U+2028 and U+2029, so a title cannot end the script element. It renders
-  into a closed shadow root with `:host { all: initial !important }` and a
-  maximum z-index. It makes no network requests (the mark is a `data:` URL),
-  adds document listeners only while the popover is open, and defines one
-  global, the non-enumerable `__redropInfo` guard against double injection.
-* **HTTP:** the injected response is its own representation, streamed from
-  the blob around the snippet (memory per request is the snippet plus the
-  64 KiB tail scan, whatever the page size). It has its own strong ETag (blob
-  hash plus a hash of the snippet) and a correct `Content-Length`. HEAD,
-  conditional, and Range requests all address that representation, so a
-  resumed download never mixes it with the stored bytes. `If-Range` with
-  another ETag gets the full page. It sends `Vary: Sec-Fetch-Dest, Accept`,
-  and `Cache-Control` stays `private, no-cache`.
-* **CSP:** redrop's artifact CSP only sets `frame-ancestors`, so the inline
-  script is allowed. If an artifact's own `<meta>` CSP or Trusted Types policy
-  blocks it, the page simply has no button. Styles use a constructed
-  stylesheet where supported (browsers do not currently apply `style-src` to
-  those), with a `<style>` element as the fallback.
-* **Views:** adding the button changes nothing about view counting. It is
-  part of the same response, and the widget never calls the server.
-* **Control:** a per-artifact setting (dashboard "Show info button", CLI
-  `--info` / `--no-info` on `share`, `update`, and `set`, API `info_button`).
-  A given flag, or saving the dashboard settings, stores the value
-  explicitly. `update` saves it before uploading the new version, so a
-  failed setting change never leaves a version published. If publishing
-  then fails, the CLI says the setting was saved. Artifacts without their own
-  setting, including those created before it existed, follow
-  `REDROP_INFO_BUTTON_DEFAULT` (default `true`). Adding
-  `?redrop-info=0` to a page URL hides it for that load only, e.g. for
-  screenshots.
+  IDs and names, the slug, other versions' sizes or contents (unless the
+  owner lets viewers open them), or the view count of an unlimited link. The
+  rule is: what the visitor can see or infer from the page they were let
+  into, plus the owner's published version history. `sharing.ViewerInfo` and
+  `sharing.Revision` hold exactly these fields, and tests pin them.
+* **Older versions:** "Viewers can open older versions" is a per-artifact
+  setting, off by default; it needs the info button.
+  * **Off:** the list is metadata only, and `?redrop-version=N` redirects to
+    the current version.
+  * **On:** each version links to `?redrop-version=N`. The frame then loads
+    `<slug>--v<N>` with a grant for exactly that host, and the viewer shows
+    "Viewing version N of M · Back to latest" above the frame. M is the
+    highest retained version number.
+  * **Turning it off** closes pinned hosts on their next request.
+  * **File artifacts** use the same parameter on the file page.
+* **Rendering:** the panel is server-rendered (`html/template`) and opens
+  with the native `popover` attribute (Esc and outside clicks close it).
+  `viewer.js` only adds local and relative times, the countdown while the
+  panel is open, and the address-bar relay. The panel is keyboard-accessible,
+  works at phone width and on touch, and respects `prefers-color-scheme` and
+  `prefers-reduced-motion`.
+
+### Address bar
+
+The address bar follows navigation inside the frame without anything from the
+artifact.
+
+* **Publishing:** a raw-host navigation (`Sec-Fetch-Mode: navigate`,
+  `Sec-Fetch-Dest: iframe`) admitted with a frame grant publishes its path
+  and query for that frame id.
+* **Stream:** the viewer subscribes to
+  `/__redrop/location?s=<token>`, a server-sent-events stream on the shared
+  link. The token is minted with the frame and bound to the artifact, its
+  access generation and the frame id.
+* **Applying:** `viewer.js` mirrors each path with `history.replaceState`
+  (never `pushState`, because the frame owns its history entries), keeping
+  `redrop-version`, so copying or reloading lands on the same page.
+* **Bounds:** paths up to 2 KiB; 10,000 remembered frames (least recently
+  used without subscribers dropped, an hour at most); 4 streams per client
+  and 1,000 in all (`429` beyond); a stream closes after 5 idle minutes,
+  when its token expires, or at shutdown; a 25 s heartbeat.
+* **Limits:** one raw cookie serves every tab of an artifact version in a
+  browser, so the server can't tell which tab navigated. The viewer
+  therefore applies a path only around its own frame's `load` event, which
+  also ignores navigations of frames nested inside the artifact.
+  Single-page-app `pushState` and hash changes don't load a document, so they
+  are not reflected.
 
 ### Gates and view counting
 

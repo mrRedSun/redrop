@@ -13,6 +13,7 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/blob"
+	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -38,23 +39,25 @@ type Content struct {
 
 // Settings are the access settings of a new artifact.
 type Settings struct {
-	Title      string
-	TTL        string // "" = server default, "never", or a duration
-	Password   string
-	MaxViews   int
-	InfoButton *bool // nil = server default
+	Title       string
+	TTL         string // "" = server default, "never", or a duration
+	Password    string
+	MaxViews    int
+	InfoButton  *bool // nil = server default
+	OldVersions bool  // viewers may open older versions
 }
 
 // Patch changes an artifact's settings (nil = unchanged).
 type Patch struct {
-	Title      *string
-	TTL        *string
-	Password   *string // "" removes the password
-	MaxViews   *int    // 0 removes the limit
-	ResetViews bool
-	Revoked    *bool
-	SPA        *bool
-	InfoButton *bool
+	Title       *string
+	TTL         *string
+	Password    *string // "" removes the password
+	MaxViews    *int    // 0 removes the limit
+	ResetViews  bool
+	Revoked     *bool
+	SPA         *bool
+	InfoButton  *bool
+	OldVersions *bool
 }
 
 // --- validation and policy ---
@@ -237,7 +240,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	}
 	id, err := s.db.CreateArtifact(ctx, &store.NewArtifact{
 		UserID: actor.UserID, TokenID: actor.TokenID, TokenName: actor.TokenName,
-		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp, InfoButton: set.InfoButton,
+		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp, InfoButton: set.InfoButton, OldVersions: set.OldVersions,
 	}, v, s.cfg.MaxTotalBytes)
 	if err != nil {
 		return Artifact{}, mapStore(err)
@@ -356,7 +359,7 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 		}
 		u.MaxViews = p.MaxViews
 	}
-	u.ResetViews, u.Revoked, u.SPA, u.InfoButton = p.ResetViews, p.Revoked, p.SPA, p.InfoButton
+	u.ResetViews, u.Revoked, u.SPA, u.InfoButton, u.OldVersions = p.ResetViews, p.Revoked, p.SPA, p.InfoButton, p.OldVersions
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
 		return Artifact{}, mapStore(err)
 	}
@@ -400,7 +403,14 @@ func (s *Service) Preview(ctx context.Context, actor Actor, id string) (PreviewL
 	}
 	exp := time.Now().Add(previewTTL)
 	tok := s.previewSigner.Sign(previewTokenPayload(a), exp)
-	return PreviewLink{URL: s.cfg.ArtifactURL(a.Slug) + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
+	// Framed artifacts preview on their raw host: the dashboard frames the
+	// content directly, so the viewer page never needs to allow a framing
+	// ancestor.
+	host := ids.ViewerHost(a.Slug)
+	if s.Mode(a, CurrentSnapshot(a)) == ModeFramed {
+		host = ids.RawHost(a.Slug, 0)
+	}
+	return PreviewLink{URL: s.cfg.ContentOrigin(host) + "/" + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
 }
 
 func (s *Service) Versions(ctx context.Context, actor Actor, id string) ([]Version, error) {

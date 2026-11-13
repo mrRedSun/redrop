@@ -274,8 +274,11 @@ type PublishOptions struct {
 	TTL      string
 	Password string
 	MaxViews int
-	// InfoButton shows or hides the viewer info button; nil uses the server default.
+	// InfoButton shows or hides the info button (and the viewer frame for
+	// HTML); nil uses the server default.
 	InfoButton *bool
+	// OldVersions lets viewers open older versions from the info panel.
+	OldVersions bool
 }
 
 // Share prepares, uploads, and publishes a new artifact.
@@ -292,7 +295,7 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
 		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note},
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
-		InfoButton: opts.InfoButton,
+		InfoButton: opts.InfoButton, OldVersions: opts.OldVersions,
 	})
 }
 
@@ -303,9 +306,10 @@ func (c *Client) Update(ctx context.Context, artifactID string, src *Source, pro
 
 // VersionOptions are artifact settings changed together with a new version.
 type VersionOptions struct {
-	// InfoButton, when set, is saved explicitly before the upload starts, so
-	// a failed setting change never leaves a new version published.
-	InfoButton *bool
+	// Settings that are set are saved explicitly before the upload starts,
+	// so a failed setting change never leaves a new version published.
+	InfoButton  *bool
+	OldVersions *bool
 }
 
 // ErrSettingsOnly reports that VersionOptions were saved but the new version
@@ -326,8 +330,8 @@ func (c *Client) UpdateWithOptions(ctx context.Context, artifactID string, src *
 	}
 	defer p.Close()
 	applied := false
-	if opts.InfoButton != nil {
-		if _, err := c.UpdateArtifact(ctx, artifactID, &api.UpdateArtifactRequest{InfoButton: opts.InfoButton}); err != nil {
+	if opts.InfoButton != nil || opts.OldVersions != nil {
+		if _, err := c.UpdateArtifact(ctx, artifactID, &api.UpdateArtifactRequest{InfoButton: opts.InfoButton, OldVersions: opts.OldVersions}); err != nil {
 			return nil, err
 		}
 		applied = true
