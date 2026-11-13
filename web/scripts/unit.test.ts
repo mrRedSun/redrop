@@ -11,7 +11,8 @@ import * as auth from '@/features/auth/endpoints'
 import { ArtifactSettingsForm, filterFromSearch, toUpdateRequest } from '@/features/artifacts/schemas'
 import { AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import { NewAccountForm, NewPasswordForm } from '@/features/onboarding/schemas'
-import { CreatedToken, TokenList, cliSetupCommands } from '@/features/tokens/schemas'
+import { CreatedToken, TokenList } from '@/features/tokens/schemas'
+import { psQuote, setupCommand, setupOsFromPlatform, shQuote } from '@/features/tokens/setup-command'
 
 Object.defineProperty(globalThis, 'location', { configurable: true, value: { origin: 'https://app.example', pathname: '/artifacts/deep/link' } })
 
@@ -126,11 +127,35 @@ await test('atom families deduplicate filters, invalidate reads, and Reset drops
   } finally { unmount(); registry.dispose() }
 })
 
-await test('CLI setup commands prompt for the token instead of putting it into history', () => {
-  const commands = cliSetupCommands('https://app.example')
-  assert.equal(commands.login, "redrop login --url 'https://app.example'")
-  assert(!commands.login.includes('--token'))
-  assert(commands.install.includes("'https://app.example/install.sh'"))
+await test('setup command installs and logs in with the token, scoped to the installer', () => {
+  assert.equal(setupCommand('unix', 'https://redrop.example.com', 'rdp_abc-123_x'),
+    "curl -fsSL 'https://redrop.example.com/install.sh' | REDROP_TOKEN='rdp_abc-123_x' sh")
+  assert.equal(setupCommand('windows', 'https://redrop.example.com', 'rdp_abc-123_x'),
+    "$env:REDROP_TOKEN='rdp_abc-123_x'; irm 'https://redrop.example.com/install.ps1' | iex")
+})
+
+await test('setup command quotes for POSIX sh and PowerShell', () => {
+  const q = "'"
+  assert.equal(shQuote(''), "''")
+  assert.equal(shQuote("it's"), String.raw`'it'\''s'`)
+  assert.equal(shQuote(q + q), String.raw`''\'''\'''`)
+  // Inside POSIX single quotes $, `, \, ", spaces and newlines are literal.
+  assert.equal(shQuote('$(id) `x` \\ "a b"\n'), "'$(id) `x` \\ \"a b\"\n'")
+  assert.equal(psQuote(''), "''")
+  assert.equal(psQuote("it's"), "'it''s'")
+  // PowerShell also ends single-quoted strings at typographic quotes U+2018..U+201B.
+  assert.equal(psQuote('a‘b’c‚d‛e'), "'a‘‘b’’c‚‚d‛‛e'")
+  // Inside PowerShell single quotes $ and the backtick escape are literal.
+  assert.equal(psQuote('$env:X `n "y"'), `'$env:X \`n "y"'`)
+  assert.equal(setupCommand('unix', 'https://redrop.example.com', "x'; rm -rf ~; '"),
+    String.raw`curl -fsSL 'https://redrop.example.com/install.sh' | REDROP_TOKEN='x'\''; rm -rf ~; '\''' sh`)
+  assert.equal(setupCommand('windows', 'https://redrop.example.com', "x'; Remove-Item ~; '"),
+    "$env:REDROP_TOKEN='x''; Remove-Item ~; '''; irm 'https://redrop.example.com/install.ps1' | iex")
+})
+
+await test('setup OS defaults from the browser platform', () => {
+  for (const p of ['Win32', 'Windows', 'win64']) assert.equal(setupOsFromPlatform(p), 'windows')
+  for (const p of ['MacIntel', 'macOS', 'Linux x86_64', 'iPhone', '']) assert.equal(setupOsFromPlatform(p), 'unix')
 })
 
 await test('successful command responses are schema validated too', async () => {

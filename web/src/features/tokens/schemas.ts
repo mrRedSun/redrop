@@ -28,12 +28,3 @@ export const createTokenDefaults: typeof CreateTokenForm.Encoded = { name: '', t
 
 /** Form -> request. Pure. */
 export const toCreateTokenRequest = (v: CreateTokenValues): typeof CreateTokenRequest.Type => ({ name: v.name, ttl: v.ttl })
-
-/** POSIX shell quoting for an administrator-configured server origin. */
-const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
-
-/** Login prompts without echo. The token is never embedded in a shell command or shell history. */
-export const cliSetupCommands = (publicUrl: string) => ({
-  install: `curl -fsSL ${shellQuote(publicUrl + '/install.sh')} | sh`,
-  login: `redrop login --url ${shellQuote(publicUrl)}`,
-})

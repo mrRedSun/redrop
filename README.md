@@ -31,6 +31,23 @@ cross-platform CLI that agents drive.
 | `web/` | Dashboard, built into `internal/webui/dist` and embedded in the server |
 | `scripts/` | Dev server and end-to-end test |
 
+## CLI
+
+When you create an API token on the dashboard's Tokens page, it shows a
+one-line command that installs the CLI and logs it in with that token:
+
+```sh
+# macOS / Linux
+curl -fsSL https://redrop.example.com/install.sh | REDROP_TOKEN='rdp_…' sh
+# Windows (PowerShell)
+$env:REDROP_TOKEN='rdp_…'; irm https://redrop.example.com/install.ps1 | iex
+```
+
+The command contains the token, so it ends up in your shell history. To avoid
+that, run the installer without `REDROP_TOKEN`, then
+`redrop login --url https://redrop.example.com` and paste the token at the
+prompt. `redrop guide` explains everything else.
+
 ## Develop
 
 Requires Go 1.26 and Node 24.

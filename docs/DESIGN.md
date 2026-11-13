@@ -128,5 +128,7 @@ arm64). The server embeds all builds and serves `install.sh`/`install.ps1`, so
 `curl -fsSL https://<app>/install.sh | sh` installs a version matching the
 server and verifies SHA-256 checksums. Configuration is
 `redrop login --url … --token …` or the `REDROP_URL`/`REDROP_TOKEN`
-environment variables. Every command supports `--json`; exit codes are stable
+environment variables. Setting `REDROP_TOKEN` for the installer
+(`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
+command when a token is created. Every command supports `--json`; exit codes are stable
 (see `redrop guide`). The Go package `pkg/client` is the same client as a library.

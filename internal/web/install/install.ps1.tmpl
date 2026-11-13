@@ -1,35 +1,74 @@
 # redrop CLI installer for Windows. Usage: irm {{.Base}}/install.ps1 | iex
+# Options (env): REDROP_INSTALL_DIR=C:\custom\bin
+#   REDROP_TOKEN=rdp_...  also log in with this token after installing
+#   (the dashboard's Tokens page shows this one-line setup command).
+# The script block keeps variables and $ErrorActionPreference out of the
+# caller's session, which `iex` would otherwise share.
+& {
 $ErrorActionPreference = 'Stop'
 $base = '{{.Base}}'
-$arch = 'amd64'
-if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { $arch = 'arm64' }
-$file = "redrop-windows-$arch.exe"
-$dir = if ($env:REDROP_INSTALL_DIR) { $env:REDROP_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'redrop\bin' }
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
-New-Item -ItemType Directory -Path $tmp | Out-Null
+# Take the token out of the environment right away. The CLI treats
+# REDROP_TOKEN as an override of the saved login, so a leftover variable would
+# shadow the saved config in this shell. The finally block removes it again.
+$token = $env:REDROP_TOKEN
+Remove-Item Env:REDROP_TOKEN -ErrorAction SilentlyContinue
 try {
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  Invoke-WebRequest -UseBasicParsing -Uri "$base/download/$file" -OutFile (Join-Path $tmp $file)
-  $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$base/download/SHA256SUMS").Content
-  if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
-  $line = ($sums -split "\r?\n") | Where-Object { $_ -match "\s$([regex]::Escape($file))$" } | Select-Object -First 1
-  if (-not $line) { throw "no checksum for $file" }
-  $want = ($line -split '\s+')[0].ToLower()
-  $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $file)).Hash.ToLower()
-  if ($want -ne $got) { throw "checksum mismatch for $file" }
-  Move-Item -Force (Join-Path $tmp $file) (Join-Path $dir 'redrop.exe')
+  $arch = 'amd64'
+  if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { $arch = 'arm64' }
+  $file = "redrop-windows-$arch.exe"
+  $dir = if ($env:REDROP_INSTALL_DIR) { $env:REDROP_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'redrop\bin' }
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $exe = Join-Path $dir 'redrop.exe'
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
+  New-Item -ItemType Directory -Path $tmp | Out-Null
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/download/$file" -OutFile (Join-Path $tmp $file)
+    $sums = (Invoke-WebRequest -UseBasicParsing -Uri "$base/download/SHA256SUMS").Content
+    if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+    $line = ($sums -split "\r?\n") | Where-Object { $_ -match "\s$([regex]::Escape($file))$" } | Select-Object -First 1
+    if (-not $line) { throw "no checksum for $file" }
+    $want = ($line -split '\s+')[0].ToLower()
+    $got = (Get-FileHash -Algorithm SHA256 (Join-Path $tmp $file)).Hash.ToLower()
+    if ($want -ne $got) { throw "checksum mismatch for $file" }
+    Move-Item -Force (Join-Path $tmp $file) $exe
+  } finally {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  }
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if (-not ($userPath -split ';' | Where-Object { $_ -eq $dir })) {
+    [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $dir), 'User')
+    $env:Path = $env:Path + ';' + $dir
+    Write-Host "Added $dir to your user PATH (restart other terminals to pick it up)."
+  }
+  Write-Host "Installed redrop to $exe"
+  & $exe version
+
+  if (-not $token) {
+    Write-Host ""
+    Write-Host "Next: create an API token in the dashboard ($base/tokens), then run:"
+    Write-Host "  redrop login --url $base"
+    Write-Host "The Tokens page also shows a one-line command that installs and logs in."
+    return
+  }
+
+  # The token reaches the CLI on stdin only, never in its command line.
+  Write-Host ""
+  $token | & $exe login --url $base --token-stdin
+  $loginExit = $LASTEXITCODE
+  $token = $null
+  if ($loginExit -ne 0) {
+    throw "redrop is installed at $exe, but login failed (see above). To retry, run: & '$exe' login --url $base and paste the token at the prompt (create a new one at $base/tokens if needed)."
+  }
+  # Confirm the saved login (no token in the environment now).
+  & $exe --url $base whoami | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "redrop is installed at $exe, but the saved login does not work. Retry with: & '$exe' login --url $base"
+  }
+  Write-Host ""
+  Write-Host "redrop is set up. Next: run 'redrop guide' to see how to share files and pages."
 } finally {
-  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  $token = $null
+  Remove-Item Env:REDROP_TOKEN -ErrorAction SilentlyContinue
 }
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (-not ($userPath -split ';' | Where-Object { $_ -eq $dir })) {
-  [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $dir), 'User')
-  $env:Path = $env:Path + ';' + $dir
-  Write-Host "Added $dir to your user PATH (restart other terminals to pick it up)."
 }
-Write-Host "Installed redrop to $dir\redrop.exe"
-& (Join-Path $dir 'redrop.exe') version
-Write-Host ""
-Write-Host "Next: create an API token in the dashboard ($base/tokens), then run:"
-Write-Host "  redrop login --url $base"
