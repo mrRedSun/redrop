@@ -30,6 +30,25 @@ TOKEN=$(curl -fsS -b "$CJ" "${H[@]}" -d '{"name":"e2e"}' "$BASE/api/v1/tokens" |
 pass "token created"
 printf %s "$TOKEN" | $R login --url "$BASE" --token-stdin >/dev/null; pass "cli login"
 
+# One-line setup from the token dialog: the real install.sh with REDROP_TOKEN,
+# in an isolated HOME/config/install dir with no redrop variables inherited.
+IH="$WORK/install-home"
+iso() { env -u REDROP_CONFIG -u REDROP_URL -u REDROP_TOKEN -u XDG_CONFIG_HOME HOME="$IH" REDROP_INSTALL_DIR="$IH/bin" "$@"; }
+mkdir -p "$IH"
+STOKEN=$(curl -fsS -b "$CJ" "${H[@]}" -d '{"name":"e2e-setup"}' "$BASE/api/v1/tokens" | python3 -c 'import json,sys;print(json.load(sys.stdin)["secret"])')
+curl -fsSL "$BASE/install.sh" | iso REDROP_TOKEN="$STOKEN" sh > "$WORK/install.log" 2>&1 || { cat "$WORK/install.log"; die "one-line setup"; }
+grep -q 'redrop is set up' "$WORK/install.log" || die "setup success message"
+[ "$(stat -c %a "$IH/.config/redrop/config.json")" = 600 ] || die "saved config mode"
+iso "$IH/bin/redrop" whoami --json | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["me"]["token_name"]=="e2e-setup",d' \
+  || die "saved login from one-line setup"
+pass "one-line setup: install.sh installs, logs in, and saves a working login"
+set +e
+curl -fsSL "$BASE/install.sh" | iso REDROP_TOKEN=rdp_bad sh > "$WORK/install-bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" != 0 ] || die "one-line setup with a bad token should fail"
+grep -q 'redrop is installed at' "$WORK/install-bad.log" || die "bad-token message"
+pass "one-line setup with a bad token fails with a retry hint"
+
 # tokens cannot manage tokens
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name":"x"}' "$BASE/api/v1/tokens")
 [ "$code" = 403 ] || die "token->tokens expected 403 got $code"; pass "API token cannot create tokens"
