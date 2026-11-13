@@ -37,14 +37,21 @@ func newPages(cfg *config.Config) *pages {
 }
 
 type pageData struct {
-	Title string
-	CSS   template.CSS
-	Data  any
+	Title    string
+	CSS      template.CSS
+	IconBase string // "" leaves the icon to the browser's /favicon.ico request
+	Data     any
 }
 
-func (p *pages) render(w http.ResponseWriter, status int, name, title string, data any) {
+// Icon links for server-rendered pages.
+const (
+	serverIcons   = iconPrefix // redrop's own pages: always the redrop icon
+	artifactIcons = ""         // pages showing artifact content: /favicon.ico decides
+)
+
+func (p *pages) render(w http.ResponseWriter, status int, name, title, icons string, data any) {
 	var buf bytes.Buffer
-	if err := p.tmpl.ExecuteTemplate(&buf, name, pageData{Title: title, CSS: p.css, Data: data}); err != nil {
+	if err := p.tmpl.ExecuteTemplate(&buf, name, pageData{Title: title, CSS: p.css, IconBase: icons, Data: data}); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -56,7 +63,7 @@ func (p *pages) render(w http.ResponseWriter, status int, name, title string, da
 }
 
 func (p *pages) message(w http.ResponseWriter, status int, heading, body string) {
-	p.render(w, status, "message.html", "redrop", map[string]string{"Heading": heading, "Body": body})
+	p.render(w, status, "message.html", "redrop", serverIcons, map[string]string{"Heading": heading, "Body": body})
 }
 
 func (p *pages) notFound(w http.ResponseWriter) {
@@ -69,7 +76,7 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	if a.MaxViews > 0 {
 		remaining = a.MaxViews - a.Views
 	}
-	p.render(w, status, "gate.html", "Shared link", map[string]any{
+	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
 		"Action": "/" + sharing.ReservedPrefix + "/open",
 	})
@@ -100,7 +107,7 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 			d.Text, d.Truncated = text, truncated
 		}
 	}
-	p.render(w, http.StatusOK, "file.html", f.Path, d)
+	p.render(w, http.StatusOK, "file.html", f.Path, artifactIcons, d)
 }
 
 type listItem struct {
@@ -119,12 +126,12 @@ func (p *pages) listing(w http.ResponseWriter, dir string, entries []sharing.Dir
 		}
 		items = append(items, it)
 	}
-	p.render(w, http.StatusOK, "listing.html", "Files", map[string]any{"Dir": dir, "Items": items})
+	p.render(w, http.StatusOK, "listing.html", "Files", artifactIcons, map[string]any{"Dir": dir, "Items": items})
 }
 
 // Apex renders the content-domain landing page.
 func (p *pages) apex(w http.ResponseWriter) {
-	p.render(w, http.StatusOK, "apex.html", "redrop", nil)
+	p.render(w, http.StatusOK, "apex.html", "redrop", "/", nil)
 }
 
 func humanBytes(n int64) string {

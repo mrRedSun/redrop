@@ -6,6 +6,9 @@
 // exhausted, or revoked slug) gets the same 404 page and spends one token of
 // the client's miss budget. A client that has spent its budget gets 429 for
 // every artifact-host request until it refills; hits never spend budget.
+// Fallback icon requests (/favicon.ico, /apple-touch-icon.png) are exempt:
+// they are free, so they answer every slug identically unless the visitor
+// has proven access to the artifact (see favicon).
 package content
 
 import (
@@ -19,6 +22,7 @@ import (
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/netutil"
@@ -54,6 +58,16 @@ func New(sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolve
 // ok=false for hosts that are not a single-label subdomain carrying a
 // well-formed slug).
 func (h *Handler) slug(r *http.Request) (string, bool) {
+	label, ok := h.label(r)
+	if !ok || (label != "" && !ids.ValidSlug(label)) {
+		return "", false
+	}
+	return label, true
+}
+
+// label extracts the subdomain label from the Host header without checking
+// its slug syntax ("" for the apex, ok=false for other hosts).
+func (h *Handler) label(r *http.Request) (string, bool) {
 	host := strings.ToLower(r.Host)
 	if hp, _, err := net.SplitHostPort(host); err == nil {
 		host = hp
@@ -64,10 +78,17 @@ func (h *Handler) slug(r *http.Request) (string, bool) {
 		return "", true
 	}
 	label, ok := strings.CutSuffix(host, "."+base)
-	if !ok || !ids.ValidSlug(label) {
+	if !ok || label == "" || strings.Contains(label, ".") {
 		return "", false
 	}
 	return label, true
+}
+
+// singleLabel reports whether the host is one label under the content domain
+// (an artifact host, whether or not the label is a well-formed slug).
+func (h *Handler) singleLabel(r *http.Request) bool {
+	label, ok := h.label(r)
+	return ok && label != ""
 }
 
 // missKey is the client a miss is charged to: the trusted-proxy-resolved
@@ -102,8 +123,14 @@ func (h *Handler) tooManyMisses(w http.ResponseWriter) {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
+	if h.serveServerIcon(w, r) {
+		return
+	}
 	slug, ok := h.slug(r)
 	switch {
+	case !ok && fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead) && h.singleLabel(r):
+		h.favicon(w, r, "")
+		return
 	case !ok:
 		h.miss(w, r)
 		return
@@ -112,6 +139,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.URL.Path == "/robots.txt":
 		RobotsTxt(w, r)
+		return
+	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.favicon(w, r, slug)
 		return
 	case h.misses.Exhausted(h.missKey(r)):
 		h.tooManyMisses(w)
@@ -271,6 +301,64 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 	}
 	h.setCookie(w, cookieVisit, g, false)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// iconPrefix is where server-rendered pages on the content domain link their
+// icons. It is reserved, so it can never collide with artifact files.
+const iconPrefix = "/" + sharing.ReservedPrefix + "/"
+
+// fallbackIcons are the paths browsers request without being told to. On an
+// artifact origin they fall back to the redrop icon when the artifact has none.
+var fallbackIcons = map[string]bool{"/favicon.ico": true, "/apple-touch-icon.png": true}
+
+// cacheFallbackIcon keeps the default icon out of shared caches on artifact
+// origins: a CDN must not pin it over an artifact's own icon once a visitor
+// unlocks the artifact or its owner uploads one.
+const cacheFallbackIcon = "private, max-age=86400"
+
+// serveServerIcon answers icon requests that never depend on an artifact:
+// /__redrop/<icon> on any content host (linked by server-rendered pages) and
+// the root icons on the apex.
+func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	name, reserved := strings.CutPrefix(r.URL.Path, iconPrefix)
+	if !reserved {
+		slug, ok := h.slug(r)
+		if !ok || slug != "" {
+			return false
+		}
+		name = strings.TrimPrefix(r.URL.Path, "/")
+	}
+	return brand.Has(name) && brand.Serve(w, r, name, brand.CacheShared)
+}
+
+// favicon serves an artifact's own icon to a visitor who has proven access to
+// it, and the redrop icon otherwise. Proof is a valid visit or preview grant,
+// or, for ungated artifacts, the "seen" cookie set by viewing a page; the
+// browser fetches the icon after the page, so real visitors still see the
+// artifact's icon. These requests spend no miss budget, so without proof
+// every slug (unknown, malformed, expired, revoked, exhausted, locked, or
+// live) gets the identical default response and no lookup is made: free
+// icon requests cannot tell hits from misses. Icon requests never record or
+// consume a view.
+func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
+	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
+	seen := h.cookieValue(r, cookieSeen)
+	if slug != "" && (grants.Visit != "" || grants.Preview != "" || seen != "") {
+		if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
+			d := h.sharing.Decide(a, grants, time.Now())
+			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
+			if proven {
+				if t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path); t.Kind == sharing.TargetFile {
+					h.sendFile(w, r, t.File, false)
+					return
+				}
+			}
+		}
+	}
+	brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)
 }
 
 // safeNext only allows same-host relative paths outside the reserved space.

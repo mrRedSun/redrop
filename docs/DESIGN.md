@@ -112,6 +112,33 @@ Every content response sets:
 
 Paths under `/__redrop/` are reserved for gate pages and cannot be uploaded.
 
+### Icons
+
+* redrop's own pages (dashboard, content apex, gate and message pages) link
+  the redrop icon. On the content domain they link it under `/__redrop/`, so
+  it never depends on an artifact. These server-owned icons are served with
+  `Cache-Control: public, max-age=86400`.
+* On an artifact origin, `/favicon.ico` and `/apple-touch-icon.png` return
+  the artifact's own file to a visitor who has **proven access**: a valid
+  visit or owner-preview grant, or, for ungated artifacts, the `seen` cookie
+  a page view sets. Browsers request the icon after the page, so visitors
+  still see the artifact's icon. It is served as `private, no-cache` content.
+  Everyone else gets the redrop icon with `Cache-Control: private,
+  max-age=86400`, whatever the slug: unknown, malformed, expired, revoked,
+  exhausted, locked, or live. It is private so a CDN cannot pin the default
+  over an icon the visitor unlocks later. These requests never count,
+  consume, or log a view.
+* Fallback icon requests are exempt from the miss rules above. They never
+  spend miss budget and are answered even for a client whose budget is
+  spent. Because they are free, they must not reveal whether a slug exists:
+  without proof of access no lookup is made and the response is identical
+  for every slug. Serving an artifact's own icon to anyone who could see its
+  content would let unlimited icon probes find live artifacts that ship an
+  icon. The `/__redrop/` icons on server pages are server-owned and never
+  depend on the slug either. Artifact HTML is never rewritten. Directory
+  listings and file viewers do not link an icon, so the browser's own
+  `/favicon.ico` request decides.
+
 ### Gates and view counting
 
 * **No password, no view limit:** served directly. A human document navigation
@@ -180,5 +207,7 @@ arm64). The server embeds all builds and serves `install.sh`/`install.ps1`, so
 `curl -fsSL https://<app>/install.sh | sh` installs a version matching the
 server and verifies SHA-256 checksums. Configuration is
 `redrop login --url … --token …` or the `REDROP_URL`/`REDROP_TOKEN`
-environment variables. Every command supports `--json`; exit codes are stable
+environment variables. Setting `REDROP_TOKEN` for the installer
+(`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
+command when a token is created. Every command supports `--json`; exit codes are stable
 (see `redrop guide`). The Go package `pkg/client` is the same client as a library.

@@ -57,6 +57,7 @@ func (h adminAPI) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error)
 | `internal/apperr` | Transport-independent error kinds and user-safe messages, with private causes for logging. |
 | `internal/dashpaths` | Dashboard destinations minted or used by the server. Its test checks the corresponding declarations in `web/src/app/paths.ts`. |
 | `internal/web`, `internal/webui` | SPA/install/download delivery and the embedded Vite output. |
+| `internal/brand` | The redrop icons and their HTTP serving. `iconsrc` describes the mark once and generates the SVG, ICO, and Apple touch icon using only the standard library. |
 | `internal/janitor` | Maintenance scheduling and daily SQLite snapshots. |
 | `pkg/api`, `pkg/client`, `cmd/redrop` | Public JSON DTOs, the Go API client, and CLI behavior. |
 
@@ -185,7 +186,7 @@ Successful sign-in, setup, and invite acceptance use full navigation. Confirmed 
 
 `useFormSubmit` uses promise-exit mode, displays typed failures at `root.server`, and resets the mutation atom in `finally`. This clears both the last argument and result, because `Atom.fn` retains both. Passwords remain only in their form or the short-lived login TOTP step. Creation dialogs copy one-time results into their own state, then disappear on close. Secrets decode as `Redacted`, and no secret is persisted to browser storage or included in a toast.
 
-Token CLI commands do not contain the token. `redrop login --url ...` prompts without echo, avoiding shell history. The one-time token itself is displayed separately, as requested.
+The token dialog shows a one-line setup command that contains the new token, at the owner's request: `curl … /install.sh | REDROP_TOKEN='…' sh` or `$env:REDROP_TOKEN='…'; irm … /install.ps1 | iex`. `features/tokens/setup-command.ts` builds it from the canonical `public_url` and quotes the token for POSIX sh or PowerShell. The installers move the token out of the environment before running anything else, pipe it to `redrop login --token-stdin` (never argv), and the PowerShell installer clears `Env:REDROP_TOKEN` on success or failure so it cannot shadow the saved login. The dialog warns that the command lands in shell history and names the prompting `redrop login --url ...` alternative.
 
 Settings use explicit `keep`, `set`, and `remove` choices so opening a form does not extend expiry or remove a password. The live version supplies the SPA flag because the artifact DTO does not contain it. Explicit TTL choices are relative to submission time, not idempotent absolute timestamps. The server remains authoritative about TTL policy and limits.
 
@@ -261,6 +262,8 @@ npm run gen:api
 # Explicitly targets disposable development state, not production:
 BASE=http://127.0.0.1:8080 npm run check:contract
 ```
+
+`go generate ./internal/brand` regenerates `internal/brand/icons/` from `internal/brand/iconsrc`. A test fails when the committed files differ from the generator output. The Vite dev server reads the same directory as its public directory. The build does not copy it, because the Go server serves the icons at the root.
 
 `npm run gen:api` refreshes `openapi.json`; it no longer emits an unused openapi-fetch declaration file. `check:contract` runs the actual endpoint functions and Schemas against a server. It logs in/out, round-trips settings, and creates/revokes a token and invite. It is not a production health probe. Its defaults match the disposable e2e fixture; override credentials through the documented environment variables when appropriate.
 

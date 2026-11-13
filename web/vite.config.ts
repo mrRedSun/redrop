@@ -5,6 +5,8 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 // The Go server embeds the build from internal/webui/dist.
+// Icons come from internal/brand: the Go server serves them at the root, so
+// the dev server reads them from there and the build does not copy them.
 // `npm run dev` proxies API calls to a redrop server (REDROP_DEV_API).
 export default defineConfig({
   plugins: [
@@ -23,7 +25,9 @@ export default defineConfig({
   resolve: {
     alias: { '@': path.resolve(import.meta.dirname, './src') },
   },
+  publicDir: '../internal/brand/icons',
   build: {
+    copyPublicDir: false,
     outDir: '../internal/webui/dist',
     emptyOutDir: false,
   },

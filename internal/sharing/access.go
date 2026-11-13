@@ -161,11 +161,18 @@ func (s *Service) RecordView(ctx context.Context, a *store.Artifact, v Visitor, 
 		s.db.RecordView(ctx, a.ID, store.OutcomePreview, v.Country, v.Label())
 		return nil
 	}
-	if p, ok := s.seenSigner.Verify(seen); ok && p == a.ID {
+	if s.Seen(a, seen) {
 		return nil
 	}
 	s.db.RecordView(ctx, a.ID, store.OutcomeView, v.Country, v.Label())
 	return &Grant{Value: s.seenSigner.Sign(a.ID, time.Now().Add(seenWindow)), TTL: seenWindow}
+}
+
+// Seen reports whether seen is a valid de-duplication cookie for a, i.e. the
+// browser has viewed one of its pages within seenWindow.
+func (s *Service) Seen(a *store.Artifact, seen string) bool {
+	p, ok := s.seenSigner.Verify(seen)
+	return ok && p == a.ID
 }
 
 // RecordGateImpression logs link-preview fetches of gated links.
