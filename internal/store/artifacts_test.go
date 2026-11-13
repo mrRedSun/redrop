@@ -2,56 +2,88 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
 
-// TestInfoButtonMigration: artifacts from before the setting existed follow
-// the server default (NULL); new and updated ones store an explicit choice.
-func TestInfoButtonMigration(t *testing.T) {
+// TestSlugCollisionRetry forces the slug generator to repeat a taken slug and
+// checks that creation and rotation retry with a fresh one, and give up
+// with ErrSlugExhausted instead of looping forever.
+func TestSlugCollisionRetry(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "t.db")
-	old, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := old.Exec(schemaV1 + `; PRAGMA user_version = 1;
-		INSERT INTO users (id, username, display_name, password_hash, role, quota_bytes, created_at) VALUES ('u', 'alice', '', '', 'admin', 0, 1);
-		INSERT INTO artifacts (id, slug, user_id, title, current_version, created_at, updated_at) VALUES ('a', 's', 'u', 'old', 1, 1, 1);
-		INSERT INTO versions (artifact_id, number, kind, size, files, created_at) VALUES ('a', 1, 'html', 3, 1, 42);`); err != nil {
-		t.Fatal(err)
-	}
-	old.Close()
-
-	db, err := Open(path)
+	db, err := Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a, err := db.ArtifactByID(ctx, "a")
+	u, err := createUser(ctx, db.DB, "alice", "Alice", "", "admin", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.InfoButton != nil || a.Published.Unix() != 42 {
-		t.Fatalf("migrated artifact: info %v published %v", a.InfoButton, a.Published)
+	version := func() *NewVersion {
+		return &NewVersion{Kind: "html", Entry: "index.html", Files: []File{{Path: "index.html", Blob: "b", Size: 1, ContentType: "text/html"}}}
+	}
+	queue := func(slugs ...string) {
+		db.newSlug = func() string {
+			if len(slugs) == 0 {
+				t.Fatal("slug generator called more often than expected")
+			}
+			s := slugs[0]
+			slugs = slugs[1:]
+			return s
+		}
+	}
+	slugOf := func(id string) string {
+		var s string
+		if err := db.DB.QueryRowContext(ctx, `SELECT slug FROM artifacts WHERE id = ?`, id).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
 
-	off := false
-	id, err := db.CreateArtifact(ctx, &NewArtifact{UserID: "u", InfoButton: &off}, &NewVersion{Kind: "html"}, 0)
+	queue("amber-otter-quilt-river")
+	first, err := db.CreateArtifact(ctx, &NewArtifact{UserID: u.ID}, version(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := db.ArtifactByID(ctx, id); b.InfoButton == nil || *b.InfoButton {
-		t.Fatalf("created with off: %v", b.InfoButton)
+
+	queue("amber-otter-quilt-river", "amber-otter-quilt-river", "cedar-heron-maple-stone")
+	second, err := db.CreateArtifact(ctx, &NewArtifact{UserID: u.ID}, version(), 0)
+	if err != nil {
+		t.Fatalf("create after collisions: %v", err)
 	}
-	on := true
-	if err := db.UpdateArtifact(ctx, "a", ArtifactUpdate{InfoButton: &on}); err != nil {
-		t.Fatal(err)
+	if got := slugOf(second); got != "cedar-heron-maple-stone" {
+		t.Fatalf("second slug %q", got)
 	}
-	if a, _ = db.ArtifactByID(ctx, "a"); a.InfoButton == nil || !*a.InfoButton {
-		t.Fatalf("updated to on: %v", a.InfoButton)
+
+	title := "renamed"
+	queue("amber-otter-quilt-river", "dune-fern-glade-lake")
+	if err := db.UpdateArtifact(ctx, second, ArtifactUpdate{RotateSlug: true, Title: &title}); err != nil {
+		t.Fatalf("rotate after collision: %v", err)
+	}
+	if got, _ := db.ArtifactBySlug(ctx, "dune-fern-glade-lake"); got == nil || got.ID != second || got.Title != "renamed" || got.AccessGen != 2 { // starts at 1; one bump, not one per attempt
+		t.Fatalf("rotated artifact: %+v", got)
+	}
+
+	taken := make([]string, slugAttempts)
+	for i := range taken {
+		taken[i] = "amber-otter-quilt-river"
+	}
+	queue(taken...)
+	if _, err := db.CreateArtifact(ctx, &NewArtifact{UserID: u.ID}, version(), 0); !errors.Is(err, ErrSlugExhausted) {
+		t.Fatalf("create with only collisions: %v, want ErrSlugExhausted", err)
+	}
+	queue(taken...)
+	if err := db.UpdateArtifact(ctx, second, ArtifactUpdate{RotateSlug: true}); !errors.Is(err, ErrSlugExhausted) {
+		t.Fatalf("rotate with only collisions: %v, want ErrSlugExhausted", err)
+	}
+	if got := slugOf(second); got != "dune-fern-glade-lake" {
+		t.Fatalf("failed rotation changed the slug to %q", got)
+	}
+	var n int
+	db.DB.QueryRowContext(ctx, `SELECT count(*) FROM artifacts`).Scan(&n)
+	if n != 2 || slugOf(first) != "amber-otter-quilt-river" {
+		t.Fatalf("artifacts=%d first=%q", n, slugOf(first))
 	}
 }

@@ -220,8 +220,11 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 			tok = sql.NullString{String: na.TokenID, Valid: true}
 		}
 		n := now()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button)
-			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?)`, id, ids.Slug(), na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton)); err != nil {
+		if err := s.withNewSlug(func(slug string) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button)
+			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?)`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton))
+			return err
+		}); err != nil {
 			return err
 		}
 		return insertVersion(ctx, tx, id, 1, v)
@@ -310,14 +313,25 @@ func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate)
 		if u.InfoButton != nil {
 			set, args = append(set, "info_button = ?"), append(args, *u.InfoButton)
 		}
+		slugArg := -1
 		if u.RotateSlug {
-			set, args = append(set, "slug = ?"), append(args, ids.Slug())
+			set, args, slugArg = append(set, "slug = ?"), append(args, ""), len(args)
 		}
 		if u.BumpGen || u.RotateSlug || u.PasswordHash != nil || (u.Revoked != nil && *u.Revoked) {
 			set = append(set, "access_gen = access_gen + 1")
 		}
 		args = append(args, id)
-		res, err := tx.ExecContext(ctx, `UPDATE artifacts SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...)
+		var res sql.Result
+		update := func() (err error) {
+			res, err = tx.ExecContext(ctx, `UPDATE artifacts SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...)
+			return err
+		}
+		var err error
+		if slugArg >= 0 {
+			err = s.withNewSlug(func(slug string) error { args[slugArg] = slug; return update() })
+		} else {
+			err = update()
+		}
 		if err != nil {
 			return err
 		}
@@ -625,4 +639,28 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		(SELECT count(*) FROM artifacts WHERE revoked = 0 AND (expires_at IS NULL OR expires_at > ?) AND (max_views = 0 OR views < max_views)),
 		(SELECT coalesce(sum(size),0) FROM versions)`, n).Scan(&st.Users, &st.Artifacts, &st.Active, &st.LogicalBytes)
 	return st, err
+}
+
+// slugAttempts bounds retries when a freshly minted slug is already taken.
+// With ~2^51.7 slugs a single collision is already improbable.
+const slugAttempts = 5
+
+// ErrSlugExhausted means every attempt to mint a unique slug collided.
+var ErrSlugExhausted = errors.New("could not mint a unique artifact slug")
+
+// withNewSlug runs exec with fresh slugs until it does not violate the slug
+// uniqueness constraint. SQLite rolls back only the failed statement, so the
+// surrounding transaction stays usable between attempts.
+func (s *Store) withNewSlug(exec func(slug string) error) error {
+	for range slugAttempts {
+		err := exec(s.newSlug())
+		if err == nil || !isSlugConflict(err) {
+			return err
+		}
+	}
+	return ErrSlugExhausted
+}
+
+func isSlugConflict(err error) bool {
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: artifacts.slug")
 }

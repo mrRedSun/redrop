@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,14 +131,31 @@ func TestFaviconFallback(t *testing.T) {
 	f.expectUncounted("ungated artifact", a, 0)
 }
 
+// An ungated artifact's own icon wins for a browser that has viewed one of
+// its pages (the page sets the "seen" cookie before the browser asks for the
+// icon). Without that proof the icon path answers like any other slug.
 func TestFaviconArtifactIconWins(t *testing.T) {
 	f := newIconFixture(t)
 	a := f.share(true, client.PublishOptions{})
-	f.expectOwn("bundle with favicon.ico", a.URL)
-	if _, b := f.icon(a.URL, "/apple-touch-icon.png"); !bytes.Equal(b, ownIcon) {
+	f.expectDefault("bundle, no page view yet", a.URL, "/favicon.ico")
+	f.expectUncounted("ungated bundle before page view", a, 0)
+
+	r := f.h.content("GET", a.URL, "/", nil, "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0")
+	expectStatus(t, r, 200, "page view")
+	seen := r.Cookies()
+	if len(seen) == 0 {
+		t.Fatal("page view set no seen cookie")
+	}
+	f.expectOwn("bundle with favicon.ico after a page view", a.URL, seen...)
+	if _, b := f.icon(a.URL, "/apple-touch-icon.png", seen...); !bytes.Equal(b, ownIcon) {
 		t.Errorf("bundle apple-touch-icon.png: got %q", b)
 	}
-	f.expectUncounted("ungated bundle", a, 0)
+	f.expectUncounted("ungated bundle", a, 1)
+
+	// Another artifact's seen cookie proves nothing here.
+	other := f.share(false, client.PublishOptions{})
+	r = f.h.content("GET", other.URL, "/", nil, "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0")
+	f.expectDefault("foreign seen cookie", a.URL, "/favicon.ico", r.Cookies()...)
 }
 
 func TestFaviconDoesNotConsumeViews(t *testing.T) {
@@ -193,7 +211,7 @@ func TestFaviconUnknownAndExpiredSlugs(t *testing.T) {
 	if err := f.h.app.db.UpdateArtifact(context.Background(), expired.ID, store.ArtifactUpdate{ExpiresAt: &pp}); err != nil {
 		t.Fatal(err)
 	}
-	expectStatus(t, f.h.content("GET", expired.URL, "/", nil, ""), 410, "expired page")
+	expectStatus(t, f.h.content("GET", expired.URL, "/", nil, ""), 404, "expired page")
 	f.expectDefault("expired", expired.URL, "/favicon.ico")
 	f.expectDefault("expired", expired.URL, "/apple-touch-icon.png")
 
@@ -239,4 +257,67 @@ func TestServerIcons(t *testing.T) {
 		t.Errorf("apex page does not link the icon: %s", apex)
 	}
 	f.expectUncounted("gate page and icons", a, 0)
+}
+
+// TestFaviconSpendsNoMissBudget: fallback icon requests on unknown, malformed,
+// expired and locked slugs never spend the miss budget, are served even to a
+// client whose budget is spent, and look the same for live and unknown slugs.
+func TestFaviconSpendsNoMissBudget(t *testing.T) {
+	t.Setenv("REDROP_CONTENT_MISS_BURST", "2")
+	t.Setenv("REDROP_CONTENT_MISS_PER_MINUTE", "1")
+	f := newIconFixture(t)
+	live := f.share(true, client.PublishOptions{})
+	locked := f.share(true, client.PublishOptions{Password: "hunter22"})
+	expired := f.share(true, client.PublishOptions{})
+	past := time.Now().Add(-time.Minute)
+	pp := &past
+	if err := f.h.app.db.UpdateArtifact(context.Background(), expired.ID, store.ArtifactUpdate{ExpiresAt: &pp}); err != nil {
+		t.Fatal(err)
+	}
+	from := map[string]string{"X-Forwarded-For": "192.0.2.30"}
+	hosts := map[string]string{
+		"unknown word":   "amber-otter-quilt-river.content.test",
+		"unknown legacy": "s3eybdkc67r7zegmb7qbugpmvy.content.test",
+		"malformed":      "not-a-slug.content.test",
+		"expired":        hostOf(t, expired.URL),
+		"locked":         hostOf(t, locked.URL),
+		"live":           hostOf(t, live.URL),
+	}
+	iconFrom := func(host, path string) *http.Response {
+		req, _ := http.NewRequest("GET", f.h.srv.URL+path, nil)
+		req.Host = host
+		req.Header.Set("X-Forwarded-For", from["X-Forwarded-For"])
+		resp, err := f.h.srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	check := func(stage string) {
+		t.Helper()
+		for _, path := range []string{"/favicon.ico", "/apple-touch-icon.png"} {
+			want := fingerprint(iconFrom(hosts["unknown word"], path))
+			if !strings.HasPrefix(want, "200 ") {
+				t.Fatalf("%s: %s on unknown slug:\n%s", stage, path, want)
+			}
+			for name, host := range hosts {
+				for range 5 {
+					if got := fingerprint(iconFrom(host, path)); got != want {
+						t.Fatalf("%s: %s on %s differs from unknown slug:\n%s\n---\n%s", stage, path, name, got, want)
+					}
+				}
+			}
+		}
+	}
+	check("fresh client")
+
+	// Dozens of icon requests later the client still has its whole burst.
+	unknown := hosts["unknown word"]
+	expectStatus(t, f.h.get(unknown, from), 404, "first miss")
+	expectStatus(t, f.h.get(unknown, from), 404, "second miss")
+	expectStatus(t, f.h.get(unknown, from), 429, "miss over burst")
+
+	// A spent client still gets the same icons, not 429.
+	check("spent client")
 }

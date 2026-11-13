@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -99,6 +100,9 @@ func (h *harness) content(method, artifactURL, path string, form url.Values, ua 
 	h.t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
+
+// wordLinkRE is the documented shape of a newly minted artifact link.
+var wordLinkRE = regexp.MustCompile(`^http://[a-z]{3,9}(-[a-z]{3,9}){3}\.content\.test/$`)
 
 func decode[T any](t *testing.T, r *http.Response) T {
 	t.Helper()
@@ -192,6 +196,9 @@ func TestOneTimePasswordLinkFlow(t *testing.T) {
 	if a.Title != "Quarterly" || a.Kind != api.KindHTML || !a.HasPassword || a.MaxViews != 1 {
 		t.Fatalf("unexpected artifact: %+v", a)
 	}
+	if !wordLinkRE.MatchString(a.URL) {
+		t.Fatalf("new artifact URL %q is not a four-word link", a.URL)
+	}
 
 	// The gate hides content and title, also from link-preview bots.
 	r := h.content("GET", a.URL, "/", nil, "TelegramBot (like TwitterBot)")
@@ -217,8 +224,8 @@ func TestOneTimePasswordLinkFlow(t *testing.T) {
 		t.Fatal("content not served after unlock")
 	}
 
-	// Everyone else now gets 410.
-	expectStatus(t, h.content("GET", a.URL, "/", nil, ""), 410, "second visitor")
+	// Everyone else now gets the same 404 as an unknown link.
+	expectStatus(t, h.content("GET", a.URL, "/", nil, ""), 404, "second visitor")
 
 	got, err := c.GetArtifact(context.Background(), a.ID)
 	if err != nil {
@@ -233,8 +240,8 @@ func TestOneTimePasswordLinkFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rot.URL == a.URL {
-		t.Fatal("rotate kept the URL")
+	if rot.URL == a.URL || !wordLinkRE.MatchString(rot.URL) {
+		t.Fatalf("rotate gave %q (old %q), want a new word link", rot.URL, a.URL)
 	}
 	expectStatus(t, h.content("GET", a.URL, "/", nil, ""), 404, "old URL after rotate")
 }

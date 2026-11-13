@@ -1,4 +1,5 @@
-// Package ids generates random identifiers and secrets.
+// Package ids generates random identifiers and secrets, and owns the artifact
+// slug format (the secret subdomain label of every artifact link).
 package ids
 
 import (
@@ -6,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
-	"strings"
 )
 
 var enc = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
@@ -23,9 +23,6 @@ func Random(n int) string {
 // ID is a short, stable public identifier (80 bits).
 func ID() string { return Random(10) }
 
-// Slug is the secret artifact subdomain (130 bits, 26 chars).
-func Slug() string { return Random(16)[:26] }
-
 // Secret returns a 256-bit secret string.
 func Secret() string { return Random(32) }
 
@@ -33,12 +30,4 @@ func Secret() string { return Random(32) }
 func Hash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
-}
-
-// ValidSlug reports whether s looks like a slug (cheap pre-check before DB).
-func ValidSlug(s string) bool {
-	if len(s) != 26 {
-		return false
-	}
-	return strings.Trim(s, "abcdefghijklmnopqrstuvwxyz234567") == ""
 }

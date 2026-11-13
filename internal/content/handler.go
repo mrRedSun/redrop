@@ -1,6 +1,14 @@
 // Package content serves artifacts on their own subdomains of the content
 // domain (https://<slug>.<content-domain>/) plus the content apex. Access
 // rules live in the sharing service; this package only speaks HTTP.
+//
+// Every miss on an artifact host (malformed, unknown, deleted, expired,
+// exhausted, or revoked slug) gets the same 404 page and spends one token of
+// the client's miss budget. A client that has spent its budget gets 429 for
+// every artifact-host request until it refills; hits never spend budget.
+// Fallback icon requests (/favicon.ico, /apple-touch-icon.png) are exempt:
+// they are free, so they answer every slug identically unless the visitor
+// has proven access to the artifact (see favicon).
 package content
 
 import (
@@ -9,18 +17,24 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
+	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/netutil"
+	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
 )
 
 const maxInlineText = 1 << 20
+
+// maxMissClients bounds the miss limiter's memory (roughly 100 bytes each).
+const maxMissClients = 100_000
 
 // Handler serves the content domain.
 type Handler struct {
@@ -30,15 +44,30 @@ type Handler struct {
 	log     *slog.Logger
 	pages   *pages
 	install http.Handler // installers and CLI downloads, also served on the apex
+	misses  *security.TokenBucket
 }
 
 func New(sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger, installers http.Handler) *Handler {
-	return &Handler{sharing: sh, cfg: cfg, clients: clients, log: log, pages: newPages(cfg), install: installers}
+	return &Handler{
+		sharing: sh, cfg: cfg, clients: clients, log: log, pages: newPages(cfg), install: installers,
+		misses: security.NewTokenBucket(cfg.ContentMissBurst, cfg.ContentMissPerMinute, maxMissClients),
+	}
 }
 
 // slug extracts the artifact slug from the Host header ("" for the apex,
-// ok=false for hosts that are not single-label subdomains).
+// ok=false for hosts that are not a single-label subdomain carrying a
+// well-formed slug).
 func (h *Handler) slug(r *http.Request) (string, bool) {
+	label, ok := h.label(r)
+	if !ok || (label != "" && !ids.ValidSlug(label)) {
+		return "", false
+	}
+	return label, true
+}
+
+// label extracts the subdomain label from the Host header without checking
+// its slug syntax ("" for the apex, ok=false for other hosts).
+func (h *Handler) label(r *http.Request) (string, bool) {
 	host := strings.ToLower(r.Host)
 	if hp, _, err := net.SplitHostPort(host); err == nil {
 		host = hp
@@ -55,6 +84,43 @@ func (h *Handler) slug(r *http.Request) (string, bool) {
 	return label, true
 }
 
+// singleLabel reports whether the host is one label under the content domain
+// (an artifact host, whether or not the label is a well-formed slug).
+func (h *Handler) singleLabel(r *http.Request) bool {
+	label, ok := h.label(r)
+	return ok && label != ""
+}
+
+// missKey is the client a miss is charged to: the trusted-proxy-resolved
+// address, widened to its /64 for IPv6 because one subscriber usually holds
+// a whole /64.
+func (h *Handler) missKey(r *http.Request) string {
+	addr := h.clients.IP(r)
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return addr
+	}
+	if ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return ip.String()
+}
+
+// miss answers a request for a slug that does not resolve to an available
+// artifact. All misses look the same, whatever the reason.
+func (h *Handler) miss(w http.ResponseWriter, r *http.Request) {
+	if !h.misses.Take(h.missKey(r)) {
+		h.tooManyMisses(w)
+		return
+	}
+	h.pages.notFound(w)
+}
+
+func (h *Handler) tooManyMisses(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa((60+h.cfg.ContentMissPerMinute-1)/h.cfg.ContentMissPerMinute))
+	h.pages.message(w, http.StatusTooManyRequests, "Too many requests", "Too many links from your network did not work. Wait a minute and try again.")
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
 	if h.serveServerIcon(w, r) {
@@ -62,8 +128,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	slug, ok := h.slug(r)
 	switch {
+	case !ok && fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead) && h.singleLabel(r):
+		h.favicon(w, r, "")
+		return
 	case !ok:
-		h.pages.notFound(w)
+		h.miss(w, r)
 		return
 	case slug == "":
 		h.serveApex(w, r)
@@ -74,6 +143,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.favicon(w, r, slug)
 		return
+	case h.misses.Exhausted(h.missKey(r)):
+		h.tooManyMisses(w)
+		return
 	}
 	openPath := "/" + sharing.ReservedPrefix + "/open"
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == openPath) {
@@ -83,7 +155,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := h.sharing.Lookup(r.Context(), slug)
 	if err != nil {
-		h.pages.notFound(w)
+		h.miss(w, r)
 		return
 	}
 	if rest, reserved := strings.CutPrefix(r.URL.Path, "/"+sharing.ReservedPrefix+"/"); reserved {
@@ -132,7 +204,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
 	switch h.sharing.Decide(a, grants, time.Now()) {
 	case sharing.ShowGone:
-		h.pages.gone(w)
+		h.miss(w, r)
 		return
 	case sharing.ShowGate:
 		if !isDocument(r) {
@@ -224,7 +296,7 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 	if err != nil {
 		switch e := apperr.As(err); e.Kind {
 		case apperr.KindGone:
-			h.pages.gone(w)
+			h.miss(w, r)
 		case apperr.KindUnauthorized:
 			h.pages.gate(w, http.StatusUnauthorized, a, e.Msg, next)
 		case apperr.KindRateLimited:
@@ -270,18 +342,27 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 	return brand.Has(name) && brand.Serve(w, r, name, brand.CacheShared)
 }
 
-// favicon serves an artifact's own icon when the visitor may see its content,
-// and the redrop icon otherwise. Unknown, expired, revoked, exhausted and
-// still-locked artifacts all get the same default response, so this path
-// reveals nothing the origin's gate pages do not. It never records a view or
-// consumes one: browsers fetch icons on their own, not on a visitor's behalf.
+// favicon serves an artifact's own icon to a visitor who has proven access to
+// it, and the redrop icon otherwise. Proof is a valid visit or preview grant,
+// or, for ungated artifacts, the "seen" cookie set by viewing a page; the
+// browser fetches the icon after the page, so real visitors still see the
+// artifact's icon. These requests spend no miss budget, so without proof
+// every slug (unknown, malformed, expired, revoked, exhausted, locked, or
+// live) gets the identical default response and no lookup is made: free
+// icon requests cannot tell hits from misses. Icon requests never record or
+// consume a view.
 func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
-	if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
-		grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
-		if d := h.sharing.Decide(a, grants, time.Now()); d == sharing.Serve || d == sharing.ServeOwnerPreview {
-			if t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path); t.Kind == sharing.TargetFile {
-				h.sendFile(w, r, t.File, false)
-				return
+	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
+	seen := h.cookieValue(r, cookieSeen)
+	if slug != "" && (grants.Visit != "" || grants.Preview != "" || seen != "") {
+		if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
+			d := h.sharing.Decide(a, grants, time.Now())
+			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
+			if proven {
+				if t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path); t.Kind == sharing.TargetFile {
+					h.sendFile(w, r, t.File, false)
+					return
+				}
 			}
 		}
 	}
