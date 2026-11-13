@@ -5,9 +5,6 @@
     "typescript",
     "oxc"
   ],
-  "ignorePatterns": [
-    "src/.stale-*/**"
-  ],
   "rules": {
     "react/rules-of-hooks": "error",
     "react/only-export-components": [
