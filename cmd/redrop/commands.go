@@ -784,10 +784,18 @@ Create a token in the dashboard under Tokens. Without --token, the token is
 read from stdin (--token-stdin) or prompted for without echo.
 
 Alternatively set REDROP_URL and REDROP_TOKEN in the environment; they
-override the saved login.`,
+override the saved login.
+
+When you create a token, the dashboard shows a one-line command that installs
+the CLI and runs this login for you (it contains the token, so it ends up in
+your shell history).`,
 		Example: `  redrop login --url https://redrop.example.com
   redrop login --url https://redrop.example.com --token rdp_…
-  printf %s "$TOKEN" | redrop login --url https://redrop.example.com --token-stdin`,
+  printf %s "$TOKEN" | redrop login --url https://redrop.example.com --token-stdin
+
+  # Install and log in at once (macOS/Linux, then Windows PowerShell):
+  curl -fsSL https://redrop.example.com/install.sh | REDROP_TOKEN='rdp_…' sh
+  $env:REDROP_TOKEN='rdp_…'; irm https://redrop.example.com/install.ps1 | iex`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := loadConfig()

@@ -24,6 +24,14 @@ someone to open an HTML page you generated.
 
 ## Setup (once)
 
+Creating a token in the dashboard (Tokens page) shows a one-line command that
+installs the CLI and logs in with that token:
+
+    curl -fsSL https://SERVER/install.sh | REDROP_TOKEN='rdp_...' sh          # macOS/Linux
+    $env:REDROP_TOKEN='rdp_...'; irm https://SERVER/install.ps1 | iex       # Windows
+
+If the CLI is already installed:
+
     redrop login --url https://SERVER --token rdp_...   # or --token-stdin
     redrop whoami                                       # verify
 
