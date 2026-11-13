@@ -1,0 +1,9 @@
+This repository includes the following third-party material.
+
+EFF Large Wordlist for Passphrases
+  File:    internal/ids/eff_large_wordlist.txt (unmodified)
+  Source:  https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
+  Author:  Electronic Frontier Foundation (https://www.eff.org/dice)
+  License: Creative Commons Attribution 3.0 United States (CC BY 3.0 US),
+           https://creativecommons.org/licenses/by/3.0/us/
+  Use:     artifact link words; redrop keeps only entries matching ^[a-z]{3,9}$.

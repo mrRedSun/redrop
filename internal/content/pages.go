@@ -70,10 +70,6 @@ func (p *pages) notFound(w http.ResponseWriter) {
 	p.message(w, http.StatusNotFound, "Not found", "This link doesn't exist, or it has expired.")
 }
 
-func (p *pages) gone(w http.ResponseWriter) {
-	p.message(w, http.StatusGone, "This link is no longer available", "It may have expired, reached its view limit, or been revoked by the person who shared it.")
-}
-
 // gate never reveals the artifact title or kind (link previews see it too).
 func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMsg, next string) {
 	remaining := 0

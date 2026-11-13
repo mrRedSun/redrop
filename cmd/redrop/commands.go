@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/pkg/api"
 	"github.com/mrRedSun/redrop/pkg/client"
 )
@@ -106,30 +107,47 @@ func readSecretFile(p string) (string, error) {
 	return strings.TrimRight(string(b), "\r\n"), nil
 }
 
-// resolveID accepts an artifact ID or its URL.
+// resolveID accepts an artifact ID, its link, or the link's slug.
 func resolveID(ctx context.Context, c *client.Client, arg string) (string, error) {
-	arg = strings.TrimSpace(arg)
-	if !strings.Contains(arg, "://") && !strings.Contains(arg, ".") {
-		return arg, nil
-	}
-	raw := arg
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return "", withCode(exitUsage, "not an artifact ID or URL: %s", arg)
+	slug, err := artifactSlug(arg)
+	if err != nil || slug == "" {
+		return strings.TrimSpace(arg), err
 	}
 	list, err := c.ListArtifacts(ctx, "", "all")
 	if err != nil {
 		return "", mapErr(err)
 	}
 	for _, a := range list {
-		if au, err := url.Parse(a.URL); err == nil && strings.EqualFold(au.Hostname(), u.Hostname()) {
+		if s, _ := artifactSlug(a.URL); s == slug {
 			return a.ID, nil
 		}
 	}
-	return "", withCode(exitNotFound, "no artifact of yours has the URL %s", arg)
+	return "", withCode(exitNotFound, "no artifact of yours has the link %s", arg)
+}
+
+// artifactSlug returns the slug named by a link (https://<slug>.<content-domain>/,
+// scheme optional) or a bare slug, and "" for anything else, which is taken
+// as an artifact ID. A link whose first label is not a slug is a usage error.
+func artifactSlug(arg string) (string, error) {
+	arg = strings.TrimSpace(arg)
+	if ids.ValidSlug(arg) {
+		return arg, nil
+	}
+	if !strings.Contains(arg, "://") && !strings.Contains(arg, ".") {
+		return "", nil
+	}
+	raw := arg
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err == nil {
+		label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
+		if ids.ValidSlug(label) {
+			return label, nil
+		}
+	}
+	return "", withCode(exitUsage, "not an artifact ID or link: %s (links look like https://amber-otter-quilt-river.usercontent.example/)", arg)
 }
 
 func printArtifact(a *api.Artifact, extra map[string]string) error {
@@ -330,7 +348,7 @@ func updateCmd() *cobra.Command {
 password, and view limit stay the same; previous versions are kept and can be
 restored with "redrop rollback".`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
-  redrop update https://abc….usercontent.example/ ./dist --spa`,
+  redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
@@ -565,7 +583,7 @@ func revokeCmd(revoke bool) *cobra.Command {
 func rotateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rotate ID|URL",
-		Short: "Replace the link with a new one; the old URL stops working",
+		Short: "Replace the link with a new four-word one; the old URL stops working",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()

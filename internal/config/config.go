@@ -46,6 +46,11 @@ type Config struct {
 	ViewWindowLimited  time.Duration
 	ViewWindowPassword time.Duration
 
+	// Artifact-host misses (unknown, deleted, or unavailable slugs) allowed
+	// per client network: a burst, then a steady refill per minute.
+	ContentMissBurst     int
+	ContentMissPerMinute int
+
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
 	CountryHeader  string
@@ -105,6 +110,14 @@ func envBytes(key, def string) (int64, error) {
 	n, err := ParseBytes(env(key, def))
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return n, nil
+}
+
+func envPositiveInt(key, def string) (int, error) {
+	n, err := strconv.Atoi(env(key, def))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer (got %q)", key, env(key, def))
 	}
 	return n, nil
 }
@@ -199,6 +212,12 @@ func Load() (*Config, error) {
 	}
 	if c.KeepVersions, err = strconv.Atoi(env("REDROP_KEEP_VERSIONS", "0")); err != nil {
 		return nil, fmt.Errorf("REDROP_KEEP_VERSIONS: %w", err)
+	}
+	if c.ContentMissBurst, err = envPositiveInt("REDROP_CONTENT_MISS_BURST", "30"); err != nil {
+		return nil, err
+	}
+	if c.ContentMissPerMinute, err = envPositiveInt("REDROP_CONTENT_MISS_PER_MINUTE", "5"); err != nil {
+		return nil, err
 	}
 
 	for _, cidr := range strings.FieldsFunc(env("REDROP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128"), func(r rune) bool { return r == ',' || r == ' ' }) {

@@ -54,6 +54,7 @@ LABEL org.opencontainers.image.title="redrop" \
       org.opencontainers.image.version="${VERSION}"
 COPY --from=server /out/redrop-server /usr/local/bin/redrop-server
 COPY --from=cli /out/cli /usr/share/redrop/cli
+COPY NOTICE /usr/share/doc/redrop/NOTICE
 COPY --from=server --chown=65532:65532 /out/data /data
 ENV REDROP_LISTEN=:8080 \
     REDROP_DATA_DIR=/data \
