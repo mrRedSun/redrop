@@ -1,0 +1,12 @@
+.git
+.github
+.agent
+**/node_modules
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+web/dist
+*.db
+*.db-*
+data
+bin
+dist
