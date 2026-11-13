@@ -60,6 +60,23 @@ Every content response sets:
 
 Paths under `/__redrop/` are reserved for gate pages and cannot be uploaded.
 
+### Icons
+
+* redrop's own pages (dashboard, content apex, gate and message pages) link
+  the redrop icon. On the content domain they link it under `/__redrop/`, so
+  it never depends on an artifact. These server-owned icons are served with
+  `Cache-Control: public, max-age=86400`.
+* On an artifact origin, `/favicon.ico` and `/apple-touch-icon.png` return
+  the artifact's own file when the visitor could see its content (same
+  decision as any other path, served as `private, no-cache` content).
+  Otherwise, including for unknown, expired, revoked, exhausted, and still
+  locked links, they return the redrop icon with
+  `Cache-Control: private, max-age=86400`. It is private so a CDN cannot pin
+  the default over an icon the visitor unlocks later. These requests never
+  count, consume, or log a view. Artifact HTML is never rewritten. Directory
+  listings and file viewers do not link an icon, so the browser's own
+  `/favicon.ico` request decides.
+
 ### Gates and view counting
 
 * **No password, no view limit:** served directly. A human document navigation

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running dev server (see dev-server.sh).
 # Creates the admin via the setup link on a fresh data dir, then exercises the CLI.
+# Set REDROP_CLI to test a CLI binary other than the dev server's build.
 set -euo pipefail
 BASE=${BASE:-http://$(hostname -I | awk '{print $1}'):8080}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
-R=/root/redrop-dev/cli/redrop-linux-amd64
+R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
 export REDROP_CONFIG="$WORK/cli.json"
 pass() { printf '  ok  %s\n' "$*"; }
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
@@ -49,6 +50,23 @@ pass "html served with noindex/no-referrer/private cache"
 [ "$($R info "$ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["title"])')" = "E2E Report" ] || die "title from <title>"
 pass "title taken from <title>"
 
+# favicons: dashboard, content apex, and an artifact origin without its own icon
+curl -fsS "$BASE/favicon.ico" -o "$WORK/default.ico"
+curl -fsSI "$BASE/favicon.ico" | grep -qi 'content-type: image/x-icon' || die "dashboard favicon type"
+curl -fsSI "$BASE/favicon.svg" | grep -qi 'cache-control: public, max-age=86400' || die "dashboard favicon cache"
+curl -fsS "$BASE/apple-touch-icon.png" >/dev/null || die "dashboard apple-touch-icon"
+curl -fsS "$BASE/" | grep -q 'rel="icon" href="/favicon.svg"' || die "dashboard links favicon"
+APEX=$(echo "$URL" | sed -E 's#//[^.]+\.#//#')
+curl -fsS "${APEX}favicon.ico" | cmp -s - "$WORK/default.ico" || die "apex favicon"
+curl -fsS "$APEX" | grep -q 'rel="icon" href="/favicon.svg"' || die "apex links favicon"
+VIEWS=$($R info "$ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["views"])')
+for _ in 1 2 3; do
+  curl -fsS -H 'Accept: text/html' "${URL}favicon.ico" | cmp -s - "$WORK/default.ico" || die "artifact fallback favicon"
+done
+curl -fsSI "${URL}favicon.ico" | grep -qi 'cache-control: private, max-age=86400' || die "artifact fallback favicon cache"
+[ "$($R info "$ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["views"])')" = "$VIEWS" ] || die "favicon counted as a view"
+pass "favicon on dashboard, apex and artifact origin; not counted as a view"
+
 # update keeps link
 echo '<!doctype html><title>v2</title><p>second</p>' > "$WORK/page.html"
 $R update "$ID" "$WORK/page.html" --note v2 >/dev/null
@@ -62,6 +80,9 @@ P=$($R share "$WORK/page.html" --once --password-generate --json)
 OURL=$(echo "$P" | python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])')
 OPW=$(echo "$P" | python3 -c 'import json,sys;print(json.load(sys.stdin)["password"])')
 curl -fsS -A 'TelegramBot (like TwitterBot)' "$OURL" | grep -q 'password protected' || die "gate for bot"
+curl -fsS "$OURL" | grep -q 'href="/__redrop/favicon.svg"' || die "gate links favicon"
+curl -fsS "${OURL}__redrop/favicon.svg" | grep -q '<svg' || die "gate favicon"
+curl -fsS "${OURL}favicon.ico" | cmp -s - "$WORK/default.ico" || die "locked artifact favicon"
 curl -fsS "$OURL" | grep -q 'password protected' || die "gate"
 code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: same-origin' --data-urlencode "password=wrong" "${OURL}__redrop/open")
 [ "$code" = 401 ] || die "wrong password expected 401 got $code"
@@ -70,17 +91,20 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -c "$C2" -H 'Sec-Fetch-Site: same-
 [ "$code" = 303 ] || die "open expected 303 got $code"
 curl -fsS -b "$C2" "$OURL" | grep -q second || die "content after unlock"
 curl -fsS -b "$C2" "$OURL" | grep -q second || die "reload within visit window"
+curl -fsS -b "$C2" "${OURL}favicon.ico" >/dev/null || die "favicon during visit"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$OURL")
 [ "$code" = 410 ] || die "second visitor expected 410 got $code"
+curl -fsS "${OURL}favicon.ico" | cmp -s - "$WORK/default.ico" || die "exhausted artifact favicon"
 OID=$($R info "$OURL" --json | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["id"], d["status"], d["views"], d["previews"])')
 echo "$OID" | grep -q " exhausted 1 1" || die "status after one-time: $OID"
-pass "one-time + password: bot preview not counted, wrong pw rejected, second visitor gets 410"
+pass "one-time + password: bot preview and favicons not counted, wrong pw rejected, second visitor gets 410"
 
 # bundle with SPA and listing
 mkdir -p "$WORK/site/assets" "$WORK/site/docs"
 echo '<!doctype html><title>Site</title><div id=app>spa</div>' > "$WORK/site/index.html"
 echo 'body{}' > "$WORK/site/assets/app.css"
 echo 'doc' > "$WORK/site/docs/readme.txt"
+printf 'own-icon' > "$WORK/site/favicon.ico"
 BURL=$($R share "$WORK/site" --spa -q)
 curl -fsS "$BURL" | grep -q spa || die "bundle index"
 curl -fsSI "${BURL}assets/app.css" | grep -qi 'content-type: text/css' || die "css type"
@@ -88,7 +112,8 @@ curl -fsS "${BURL}some/route" | grep -q spa || die "spa fallback"
 curl -fsS "${BURL}docs/" | grep -q readme.txt || die "dir listing"
 code=$(curl -s -o /dev/null -w '%{http_code}' "${BURL}missing.js")
 [ "$code" = 404 ] || die "missing asset expected 404 got $code"
-pass "bundle: index, types, SPA fallback, listing, 404"
+[ "$(curl -fsS "${BURL}favicon.ico")" = own-icon ] || die "bundle's own favicon"
+pass "bundle: index, types, SPA fallback, listing, 404, own favicon"
 
 # file kind + range request
 head -c 3000000 /dev/urandom > "$WORK/blob.bin"

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/netutil"
 	"github.com/mrRedSun/redrop/internal/sharing"
@@ -56,6 +57,9 @@ func (h *Handler) slug(r *http.Request) (string, bool) {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
+	if h.serveServerIcon(w, r) {
+		return
+	}
 	slug, ok := h.slug(r)
 	switch {
 	case !ok:
@@ -66,6 +70,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.URL.Path == "/robots.txt":
 		RobotsTxt(w, r)
+		return
+	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.favicon(w, r, slug)
 		return
 	}
 	openPath := "/" + sharing.ReservedPrefix + "/open"
@@ -222,6 +229,55 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 	}
 	h.setCookie(w, cookieVisit, g, false)
 	http.Redirect(w, r, next, http.StatusSeeOther)
+}
+
+// iconPrefix is where server-rendered pages on the content domain link their
+// icons. It is reserved, so it can never collide with artifact files.
+const iconPrefix = "/" + sharing.ReservedPrefix + "/"
+
+// fallbackIcons are the paths browsers request without being told to. On an
+// artifact origin they fall back to the redrop icon when the artifact has none.
+var fallbackIcons = map[string]bool{"/favicon.ico": true, "/apple-touch-icon.png": true}
+
+// cacheFallbackIcon keeps the default icon out of shared caches on artifact
+// origins: a CDN must not pin it over an artifact's own icon once a visitor
+// unlocks the artifact or its owner uploads one.
+const cacheFallbackIcon = "private, max-age=86400"
+
+// serveServerIcon answers icon requests that never depend on an artifact:
+// /__redrop/<icon> on any content host (linked by server-rendered pages) and
+// the root icons on the apex.
+func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	name, reserved := strings.CutPrefix(r.URL.Path, iconPrefix)
+	if !reserved {
+		slug, ok := h.slug(r)
+		if !ok || slug != "" {
+			return false
+		}
+		name = strings.TrimPrefix(r.URL.Path, "/")
+	}
+	return brand.Has(name) && brand.Serve(w, r, name, brand.CacheShared)
+}
+
+// favicon serves an artifact's own icon when the visitor may see its content,
+// and the redrop icon otherwise. Unknown, expired, revoked, exhausted and
+// still-locked artifacts all get the same default response, so this path
+// reveals nothing the origin's gate pages do not. It never records a view or
+// consumes one: browsers fetch icons on their own, not on a visitor's behalf.
+func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
+	if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
+		grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
+		if d := h.sharing.Decide(a, grants, time.Now()); d == sharing.Serve || d == sharing.ServeOwnerPreview {
+			if t := h.sharing.ResolvePath(r.Context(), a, r.URL.Path); t.Kind == sharing.TargetFile {
+				h.sendFile(w, r, t.File, false)
+				return
+			}
+		}
+	}
+	brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)
 }
 
 // safeNext only allows same-host relative paths outside the reserved space.

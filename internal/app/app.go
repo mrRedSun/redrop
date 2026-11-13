@@ -19,6 +19,7 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/blob"
+	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/content"
 	"github.com/mrRedSun/redrop/internal/httpapi"
@@ -79,6 +80,9 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	api.Mount("/install.ps1", installers.ServeHTTP)
 	api.Mount("/download/{file}", installers.ServeHTTP)
 	api.Mount("/robots.txt", content.RobotsTxt)
+	for _, p := range brand.Paths {
+		api.Mount(p, brand.Handler)
+	}
 	api.Mount("/", site.SPA)
 
 	a := &App{
