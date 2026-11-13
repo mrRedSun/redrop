@@ -38,6 +38,10 @@ type WatchOptions struct {
 	Progress Progress
 	// OnPublish is called after each successful publish.
 	OnPublish func(WatchResult)
+	// OnReady is called once, after the filesystem watches are registered
+	// and the initial content hash is seeded: changes made after OnReady
+	// are guaranteed to be picked up.
+	OnReady func()
 	// Log receives transient-failure notices (retried, not fatal).
 	Log func(format string, args ...any)
 	// RetryBackoff overrides the transient-failure retry delay (tests).
@@ -143,6 +147,9 @@ func (w *watcher) run() error {
 		return err
 	}
 	w.published = sum
+	if w.opts.OnReady != nil {
+		w.opts.OnReady()
+	}
 	for {
 		if err := w.awaitSettled(); err != nil {
 			return err
@@ -320,9 +327,15 @@ func (w *watcher) ctxDone() bool {
 	}
 }
 
-// watchTree adds dir and every existing subdirectory to w.
-func watchTree(w *fsnotify.Watcher, dir string) error {
-	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+// watchTree adds root itself (fsnotify needs both files and directories
+// named explicitly) plus every subdirectory under it.
+func watchTree(w *fsnotify.Watcher, root string) error {
+	if fi, err := os.Lstat(root); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return w.Add(root)
+	}
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

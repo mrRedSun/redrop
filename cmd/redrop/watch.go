@@ -70,8 +70,12 @@ server errors are retried with backoff while watching continues.`,
 				fmt.Printf("version %d published at %s\n", r.Version, r.At.Format("2006-01-02 15:04:05 MST"))
 				fmt.Println(r.Artifact.URL)
 			}
-			if !g.json {
-				fmt.Fprintf(os.Stderr, "watching %s -> %s (Ctrl-C to stop)\n", args[1], id)
+			// Announce only once changes are guaranteed to be seen: the
+			// watches are registered and the initial hash is seeded.
+			opts.OnReady = func() {
+				if !g.json {
+					fmt.Fprintf(os.Stderr, "watching %s -> %s (Ctrl-C to stop)\n", args[1], id)
+				}
 			}
 			err = client.Watch(cmd.Context(), c, id, args[1], opts)
 			if err == nil || errors.Is(err, context.Canceled) {

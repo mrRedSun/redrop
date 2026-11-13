@@ -103,6 +103,10 @@ pass "update + rollback keep the same link"
 $R watch "$ID" "$WORK/page.html" --debounce 300ms >"$WORK/watch.log" 2>"$WORK/watch.err" &
 WPID=$!
 w_versions() { $R info "$ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["versions"])'; }
+# "watching" is printed only after the watches are registered, so an edit
+# made after it cannot fall into the startup gap.
+for _ in $(seq 1 50); do grep -q "^watching" "$WORK/watch.err" && break; sleep 0.2; done
+grep -q "^watching" "$WORK/watch.err" || { cat "$WORK/watch.err"; die "watch did not start"; }
 echo '<!doctype html><title>v3</title><p>third</p>' > "$WORK/page.html"
 for _ in $(seq 1 50); do
   curl -fsS "$URL" | grep -q third && break
@@ -118,8 +122,9 @@ wait $WPID; WRC=$?
 [ "$(w_versions)" = 3 ] || die "watch made exactly one new version, got $(w_versions)"
 pass "watch: content change published, version printed, clean SIGTERM exit"
 
-# one-time link with password
-P=$($R share "$WORK/page.html" --once --password-generate --json)
+# one-time link with password (fresh file: page.html now holds the watch v3)
+echo '<!doctype html><title>v2</title><p>second</p>' > "$WORK/once.html"
+P=$($R share "$WORK/once.html" --once --password-generate --json)
 OURL=$(echo "$P" | python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])')
 OPW=$(echo "$P" | python3 -c 'import json,sys;print(json.load(sys.stdin)["password"])')
 curl -fsS -A 'TelegramBot (like TwitterBot)' "$OURL" | grep -q 'password protected' || die "gate for bot"
