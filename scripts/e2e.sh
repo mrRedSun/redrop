@@ -7,7 +7,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
-R=/root/redrop-dev/cli/redrop-linux-amd64
+R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
 export REDROP_CONFIG="$WORK/cli.json"
 pass() { printf '  ok  %s\n' "$*"; }
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
@@ -40,6 +40,11 @@ EOF
 URL=$($R share "$WORK/page.html" -q)
 ID=$($R info "$URL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 pass "share html -> $URL"
+# New links are four words (legacy 26-char links are covered by the Go tests).
+SLUG=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$URL")
+echo "$SLUG" | grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' || die "new link is not four words: $URL"
+[ "$($R info "$SLUG" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')" = "$ID" ] || die "info by bare slug"
+pass "four-word link; CLI resolves it by link and by slug"
 body=$(curl -fsS "$URL"); echo "$body" | grep -q '<h1>hello</h1>' || die "html content"
 hdr=$(curl -sSI "$URL")
 echo "$hdr" | grep -qi 'x-robots-tag: noindex' || die "noindex header"
@@ -71,10 +76,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -c "$C2" -H 'Sec-Fetch-Site: same-
 curl -fsS -b "$C2" "$OURL" | grep -q second || die "content after unlock"
 curl -fsS -b "$C2" "$OURL" | grep -q second || die "reload within visit window"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$OURL")
-[ "$code" = 410 ] || die "second visitor expected 410 got $code"
+[ "$code" = 404 ] || die "second visitor expected 404 got $code"
 OID=$($R info "$OURL" --json | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["id"], d["status"], d["views"], d["previews"])')
 echo "$OID" | grep -q " exhausted 1 1" || die "status after one-time: $OID"
-pass "one-time + password: bot preview not counted, wrong pw rejected, second visitor gets 410"
+pass "one-time + password: bot preview not counted, wrong pw rejected, second visitor gets 404"
 
 # bundle with SPA and listing
 mkdir -p "$WORK/site/assets" "$WORK/site/docs"
@@ -103,12 +108,13 @@ pass "file viewer, range requests, download"
 SURL=$(echo '# notes' | $R share - --name notes.md -q)
 SID=$($R info "$SURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 $R revoke "$SID" >/dev/null
-[ "$(curl -s -o /dev/null -w '%{http_code}' "$SURL")" = 410 ] || die "revoked"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$SURL")" = 404 ] || die "revoked"
 $R restore "$SID" >/dev/null
 NEW=$($R rotate "$SID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])')
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$SURL")" = 404 ] || die "old link after rotate"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$NEW")" = 200 ] || die "new link after rotate"
-pass "stdin share, revoke/restore, rotate"
+python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$NEW" | grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' || die "rotated link is not four words: $NEW"
+pass "stdin share, revoke/restore, rotate to a four-word link"
 
 # exit codes
 set +e

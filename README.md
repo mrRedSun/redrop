@@ -7,7 +7,8 @@ cross-platform CLI that agents drive.
 
 - Every artifact is served from its own origin (`https://<slug>.<content-domain>/`)
   on a domain separate from the dashboard, so shared HTML/JS is isolated.
-- Links are unguessable, never indexed, and send no Referer.
+- Links are four random words (`https://amber-otter-quilt-river.<content-domain>/`),
+  unguessable, never indexed, and send no Referer.
 - Optional password and view limit. One-time links show an "Open" page first, so
   chat link previews don't use them up. Same-link versions with rollback.
 - Multi-user and invite-only; built-in login with TOTP, plus OIDC single sign-on.
@@ -59,5 +60,32 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_DATA_DIR` | `/data` |
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
+| `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
+
+## Reverse proxy
+
+The dashboard host and the content domain both go to the same server. Artifact
+links come in two formats: four words (`amber-otter-quilt-river`, current) and
+26 base32 characters (older links, still valid). The content router must accept
+both. As a regex on the example domain:
+
+```text
+^([a-z2-7]{26}|[a-z]{3,9}(-[a-z]{3,9}){3})\.usercontent\.example$
+```
+
+With Traefik v3 labels, plus the apex for the landing page and installers:
+
+```yaml
+traefik.http.routers.redrop-content.rule: >-
+  Host(`usercontent.example`) ||
+  HostRegexp(`^([a-z2-7]{26}|[a-z]{3,9}(-[a-z]{3,9}){3})\.usercontent\.example$`)
+```
+
+Update this rule **before** deploying a version that mints word links; a rule
+that only matches the 26-character format sends new links nowhere. The content
+domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
+Set `REDROP_TRUSTED_PROXIES` to the proxy's addresses and
+`REDROP_CLIENT_IP_HEADER` to the header it sets (`X-Forwarded-For` for Traefik,
+`CF-Connecting-IP` behind Cloudflare) so per-client limits see real clients.
 
 Status: in development, not yet released.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mrRedSun/redrop/internal/ids"
 	_ "modernc.org/sqlite"
 )
 
@@ -21,6 +22,8 @@ var ErrNotFound = errors.New("not found")
 
 type Store struct {
 	DB *sql.DB
+	// newSlug mints artifact slugs; tests replace it to force collisions.
+	newSlug func() string
 }
 
 // Open opens (and migrates) the database at path.
@@ -31,7 +34,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
-	s := &Store{DB: db}
+	s := &Store{DB: db, newSlug: ids.Slug}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err

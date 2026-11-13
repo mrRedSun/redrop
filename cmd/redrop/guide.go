@@ -64,10 +64,16 @@ chunked and resume automatically after network errors.
   local processes).
 - View limit: --once or --max-views N. Recipients first see an "Open" page;
   link-preview bots in chat apps cannot consume views. After the last view the
-  link shows "no longer available" and the content is deleted shortly after.
+  link answers "Not found" and the content is deleted shortly after.
 - Combine freely, e.g. --once --password-generate --ttl 1d.
+- Links look like https://amber-otter-quilt-river.CONTENT-DOMAIN/: four random
+  words (about 52 bits), so they can be read out or typed. Older links are 26
+  random letters and digits and keep working. Rotate replaces either kind
+  with a new four-word link.
 - Links are unguessable, not indexed (noindex + robots.txt), and send no
-  Referer to third parties.
+  Referer to third parties. Unknown, expired, used-up and revoked links all
+  answer the same "Not found", and clients that hit many of them are
+  temporarily blocked.
 
 ## Update and manage
 
@@ -84,7 +90,8 @@ chunked and resume automatically after network errors.
     redrop views ID|URL       # opens, link previews, failed passwords
     redrop delete ID|URL --yes
 
-Anywhere an ID is accepted, the artifact URL works too.
+Anywhere an ID is accepted, the artifact link (or just its four-word part,
+e.g. amber-otter-quilt-river) works too.
 
 ## Exit codes
 

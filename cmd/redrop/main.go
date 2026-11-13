@@ -194,8 +194,10 @@ func newRootCmd() *cobra.Command {
 site) to your redrop server and prints a private, unguessable link that can
 expire, require a password, or work only once.
 
-Every artifact gets its own isolated origin (https://<random>.<content-domain>/),
-so shared HTML/JS runs safely. Links are not indexed by search engines.
+Every artifact gets its own isolated origin, named by four random words
+(https://amber-otter-quilt-river.<content-domain>/), so shared HTML/JS runs
+safely. Links are not indexed by search engines. Commands that take an ID also
+accept the link or its four-word part; older 26-character links still work.
 
 Quick start:
   redrop login --url https://redrop.example.com      # paste an API token

@@ -49,10 +49,11 @@ func (h adminAPI) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error)
 | `internal/sharing/views.go` | Safe owner/admin results, version/file/access-log results, and the status/link/purge-time calculation. |
 | `internal/sharing/moderation.go` | The `Moderation` port for metadata listing, revoke/restore, deletion, and server usage. |
 | `internal/httpapi` | Fuego routes, authentication and CSRF middleware, cookie handling, input decoding, pure DTO mapping, and RFC 9457 responses. |
-| `internal/content` | HTTP and HTML presentation on per-artifact subdomains: neutral gates, visitors' cookies, file streaming, directory listings, and viewers. |
+| `internal/content` | HTTP and HTML presentation on per-artifact subdomains: neutral gates, visitors' cookies, file streaming, directory listings, viewers, and the uniform miss response with its per-client miss limiter. |
 | `internal/store` | SQLite records, queries, transactions, quotas, atomic view consumption, and consistent database snapshots. |
 | `internal/blob` | Content-addressed file storage and garbage collection. |
-| `internal/security`, `internal/ids`, `internal/netutil` | Password hashing, signed grants, limiters, random identifiers, and trusted-proxy client resolution. |
+| `internal/security`, `internal/netutil` | Password hashing, signed grants, fixed-window and token-bucket limiters, and trusted-proxy client resolution. |
+| `internal/ids` | Random identifiers and the artifact slug format: the embedded EFF wordlist, `Slug` (mints four-word slugs), and `ValidSlug`, the only slug syntax check (word and legacy formats). |
 | `internal/apperr` | Transport-independent error kinds and user-safe messages, with private causes for logging. |
 | `internal/dashpaths` | Dashboard destinations minted or used by the server. Its test checks the corresponding declarations in `web/src/app/paths.ts`. |
 | `internal/web`, `internal/webui` | SPA/install/download delivery and the embedded Vite output. |

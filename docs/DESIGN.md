@@ -18,6 +18,7 @@ management dashboard and a cross-platform CLI that agents drive.
 | Agent auth | Per-user named API tokens (`rdp_…`), shown once, stored as SHA-256 |
 | Expiry | Default 7 days; `never` allowed (both configurable; max TTL configurable) |
 | Access | Unguessable link; optional password; optional max views (1 = one-time) |
+| Link format | Four EFF-wordlist words, e.g. `amber-otter-quilt-river` (~51.7 bits); legacy 26-char base32 links keep working |
 | Versions | Same link, version history, rollback |
 | Encryption at rest | None (rely on host isolation) |
 | Limits | 500 MB per version, 50 GB server total, 10 GB default per-user quota |
@@ -40,9 +41,60 @@ subdomains give each artifact its own browser origin, so artifacts cannot read
 each other's storage, cookies, or service workers, while still allowing normal
 `localStorage`/`fetch` inside one artifact.
 
-The slug is 26 lowercase base32 characters (130 random bits) and is the access
-secret. "Rotate link" replaces the slug; the artifact ID used by the API/CLI
-is stable. Artifact slugs appear in TLS SNI and DNS lookups; that is accepted.
+The slug is the access secret. "Rotate link" replaces the slug; the artifact ID
+used by the API/CLI is stable. Artifact slugs appear in TLS SNI and DNS
+lookups; that is accepted.
+
+### Slug format
+
+New slugs are four words joined by `-`, e.g.
+`https://amber-otter-quilt-river.usercontent.example/`, so links can be read
+aloud and typed. Older slugs keep working forever and are not migrated.
+
+| Format | Pattern | Entropy | Minted |
+|---|---|---|---|
+| Word (current) | `^[a-z]{3,9}(-[a-z]{3,9}){3}$` | 4 × log2(7772) ≈ 51.70 bits | creation and rotation |
+| Legacy | `^[a-z2-7]{26}$` | 130 bits | never again; still resolved |
+
+* **Wordlist.** The EFF large diceware list (7,776 entries, CC BY 3.0 US, see
+  `NOTICE`) is embedded unmodified in the binary. redrop keeps entries
+  matching `^[a-z]{3,9}$` and drops the 4 hyphenated ones (`drop-down`,
+  `felt-tip`, `t-shirt`, `yo-yo`), leaving **7,772 words**. A test pins the
+  file's SHA-256, the count, and the derived vocabulary's hash.
+* **Why four words.** The owner compared three words (~38.8 bits, guessable)
+  with four (~51.7 bits) and chose four. The floor is 50 bits; the wordlist
+  test fails below it.
+* **Generation.** Each word is drawn with `crypto/rand.Int`, which uses
+  rejection sampling, so there is no modulo bias. The longest slug is 39
+  characters, within the 63-octet DNS label limit. A collision with an
+  existing slug retries with a fresh one (bounded; failure is an internal
+  error).
+* **Validation.** `internal/ids.ValidSlug` is the single syntax check and
+  accepts exactly the two patterns above. The content host parser and the
+  CLI use it before any lookup. The JSON API never accepts slugs, only
+  artifact IDs, so its contract is unchanged.
+* **Reverse proxy.** The content router must match both formats (see the
+  README), or new links will not reach the server.
+
+### Enumeration hardening
+
+* Every miss on an artifact host looks the same: malformed, unknown, deleted,
+  expired, used-up, or revoked links all get the same `404` "Not found" page
+  with the same headers. (Before word slugs, unavailable links got `410`.)
+  Malformed slugs are rejected without a database query; every other miss is
+  a single indexed lookup, so all misses are in the same timing class.
+* Misses are limited per client: a token bucket of `REDROP_CONTENT_MISS_BURST`
+  (default 30) refilled at `REDROP_CONTENT_MISS_PER_MINUTE` (default 5). The
+  client is the trusted-proxy-resolved address (`REDROP_TRUSTED_PROXIES`,
+  `REDROP_CLIENT_IP_HEADER`, e.g. `CF-Connecting-IP` or Traefik's
+  `X-Forwarded-For`), never a proxy's socket address; IPv6 clients are
+  grouped by /64. At most 100,000 clients are tracked.
+* Hits never spend budget, so normal use is not throttled however much it
+  loads. A client that has spent its budget gets `429` with `Retry-After` for
+  **every** artifact-host request, hits included, until a token refills. If
+  hits stayed open to a spent client, the difference between `429` and
+  `200` would itself reveal which guesses are live links, and the limiter
+  would not slow enumeration at all.
 
 ## Content serving rules
 
