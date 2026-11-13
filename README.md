@@ -61,3 +61,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
 
 Status: in development, not yet released.
+
+## License
+
+[MIT](LICENSE).
