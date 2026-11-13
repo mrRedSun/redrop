@@ -11,16 +11,18 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import * as auth from '@/features/auth/atoms'
 import { schemaResolver, useFormSubmit } from '@/lib/forms'
 import * as tokens from '../atoms'
-import { CreateTokenForm, cliSetupCommands, createTokenDefaults, type CreatedToken } from '../schemas'
+import { CreateTokenForm, createTokenDefaults, type CreatedToken } from '../schemas'
+import { setupCommand, setupOsFromPlatform, type SetupOs } from '../setup-command'
 
 const ttlLabels = { '30d': '30 days', '90d': '90 days', '1y': '1 year', never: 'Never expires' } as const
 
 /**
- * Create a token, then show its secret exactly once with the CLI setup
- * commands. The secret lives in this component's state only; closing the
+ * Create a token, then show its secret exactly once with a one-line CLI
+ * setup command that contains it. The secret lives in this component's state only; closing the
  * dialog drops it and resets the mutation atom.
  */
 export function CreateTokenDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -86,7 +88,7 @@ function CreateForm({ onCreated }: { onCreated: (t: CreatedToken) => void }) {
 function Reveal({ token, onDone }: { token: CreatedToken; onDone: () => void }) {
   const config = useAtomSuspense(auth.config).value
   const secret = Redacted.value(token.secret)
-  const cmd = cliSetupCommands(config.public_url)
+  const [os, setOs] = useState<SetupOs>(() => setupOsFromPlatform(navigator.platform))
   return (
     <>
       <DialogHeader>
@@ -94,11 +96,21 @@ function Reveal({ token, onDone }: { token: CreatedToken; onDone: () => void }) 
       </DialogHeader>
       <SecretReveal label="API token" value={secret}>
         <div className="space-y-2 pt-2">
-          <p className="text-sm font-medium">Set up the CLI on the machine that will publish</p>
-          <CopyField value={cmd.install} label="Install command" />
-          <CopyField value={cmd.login} label="Login command" />
-          <p className="text-muted-foreground text-xs">Paste the token at the CLI's hidden prompt. It will not enter your shell history.</p>
-          <p className="text-muted-foreground text-xs">Or set REDROP_URL and REDROP_TOKEN in the agent's environment. Run <code>redrop guide</code> for agent instructions.</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium">Set up the CLI</p>
+            <Tabs value={os} onValueChange={(v) => setOs(v as SetupOs)}>
+              <TabsList aria-label="Operating system">
+                <TabsTrigger value="unix">macOS / Linux</TabsTrigger>
+                <TabsTrigger value="windows">Windows</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+          <CopyField value={setupCommand(os, config.public_url, secret)} label="Setup command" />
+          <p className="text-muted-foreground text-xs">This command contains the token. It is shown only once and will be saved in your shell history.</p>
+          <p className="text-muted-foreground text-xs">
+            To keep the token out of history, run the installer without REDROP_TOKEN, then <code>redrop login --url {config.public_url}</code>, which prompts for it.
+            Agents can instead use REDROP_URL and REDROP_TOKEN. Run <code>redrop guide</code> for agent instructions.
+          </p>
         </div>
       </SecretReveal>
       <DialogFooter>
