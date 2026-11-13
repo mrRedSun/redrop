@@ -48,8 +48,12 @@ func TestViewerInfoSetting(t *testing.T) {
 			if _, ok := s.ViewerInfo(a); ok != tc.wantVisible {
 				t.Fatalf("visible = %v, want %v", ok, tc.wantVisible)
 			}
-			if got := s.meta(a, time.Now()).InfoButton; got != (tc.setting == nil && tc.serverOn || tc.setting != nil && *tc.setting) {
-				t.Fatalf("meta InfoButton = %v", got)
+			m := s.meta(a, time.Now())
+			if m.InfoButton != (tc.setting == nil && tc.serverOn || tc.setting != nil && *tc.setting) {
+				t.Fatalf("meta InfoButton = %v", m.InfoButton)
+			}
+			if m.InfoButtonSupported != (tc.kind != api.KindFile) {
+				t.Fatalf("meta InfoButtonSupported = %v", m.InfoButtonSupported)
 			}
 		})
 	}

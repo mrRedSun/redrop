@@ -14,7 +14,7 @@ const form = useForm({
   defaultValues: settingsDefaults(artifact, currentVersion.spa),
 })
 const onSubmit = useFormSubmit(form, artifacts.saveSettings(artifact.id), {
-  toArg: (values) => ({ values, kind: artifact.kind }),
+  toArg: (values) => ({ values, artifact }),
   onSuccess: (saved, values) => form.reset(settingsDefaults(saved, values.spa)),
 })
 ```

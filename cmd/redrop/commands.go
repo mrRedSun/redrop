@@ -190,7 +190,7 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		views += fmt.Sprintf(" (+%d link previews)", a.Previews)
 	}
 	fmt.Fprintf(w, "views:\t%s\n", views)
-	if a.Kind != api.KindFile {
+	if a.InfoButtonSupported {
 		info := "shown"
 		if !a.InfoButton {
 			info = "hidden"
@@ -387,7 +387,7 @@ func updateCmd() *cobra.Command {
 		Long: `Upload PATH as a new version of an existing artifact. The link, expiry,
 password, and view limit stay the same; previous versions are kept and can be
 restored with "redrop rollback". --info / --no-info also change whether HTML
-pages show the viewer info button.`,
+pages show the viewer info button; that setting is saved before the upload.`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
   redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa`,
 		Args: cobra.ExactArgs(2),
@@ -408,14 +408,10 @@ pages show the viewer info button.`,
 			if err != nil {
 				return err
 			}
-			a, err := c.Update(cmd.Context(), id, src, progressFn())
+			// The setting is saved before the upload (see UpdateWithOptions).
+			a, err := c.UpdateWithOptions(cmd.Context(), id, src, client.VersionOptions{InfoButton: info}, progressFn())
 			if err != nil {
 				return mapErr(err)
-			}
-			if info != nil && *info != a.InfoButton {
-				if a, err = c.UpdateArtifact(cmd.Context(), id, &api.UpdateArtifactRequest{InfoButton: info}); err != nil {
-					return mapErr(err)
-				}
 			}
 			return printArtifact(a, nil)
 		},

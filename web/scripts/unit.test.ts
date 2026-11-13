@@ -8,7 +8,7 @@ import { fromProblem } from '@/api/errors'
 import { safeNext } from '@/app/paths'
 import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
-import { Artifact, ArtifactSettingsForm, filterFromSearch, hasInfoButton, settingsDefaults, toUpdateRequest } from '@/features/artifacts/schemas'
+import { Artifact, ArtifactSettingsForm, filterFromSearch, settingsDefaults, toUpdateRequest } from '@/features/artifacts/schemas'
 import { AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import { NewAccountForm, NewPasswordForm } from '@/features/onboarding/schemas'
 import { CreatedToken, TokenList } from '@/features/tokens/schemas'
@@ -81,8 +81,8 @@ await test('proxy and network errors are typed, malformed success is a defect', 
 await test('forms validate numbers and cross-field confirmation, and keep password/TTL omitted', () => {
   const input = { title: '  Report  ', ttl: 'keep', passwordAction: 'keep', password: '', maxViews: '12', resetViews: false, spa: true, infoButton: true }
   const values = Schema.decodeUnknownSync(ArtifactSettingsForm)(input)
-  assert.deepEqual(toUpdateRequest(values, { kind: 'bundle', info_button: true }), { title: 'Report', max_views: 12, spa: true })
-  assert(!('spa' in toUpdateRequest(values, { kind: 'file', info_button: true })))
+  assert.deepEqual(toUpdateRequest(values, { kind: 'bundle', info_button_supported: false }), { title: 'Report', max_views: 12, spa: true })
+  assert(!('spa' in toUpdateRequest(values, { kind: 'file', info_button_supported: false })))
   for (const maxViews of ['-1', '1.5', '1000001', 'not a number']) assert(Option.isNone(Schema.decodeUnknownOption(ArtifactSettingsForm)({ ...input, maxViews })))
   assert(Option.isNone(Schema.decodeUnknownOption(NewPasswordForm)({ password: 'example-test-only', confirm: 'different' })))
   assert(Option.isNone(Schema.decodeUnknownOption(NewAccountForm)({ username: '../', password: 'example-test-only', confirm: 'example-test-only' })))
@@ -91,23 +91,22 @@ await test('forms validate numbers and cross-field confirmation, and keep passwo
   assert.equal(toUpdateUserRequest({ displayName: 'name', role: 'user', quotaGB: 1.5, disabled: false }).quota_bytes, 1_500_000_000)
 })
 
-await test('info button setting: defaults from the artifact, sent only when changed, never for files', () => {
+await test('info button setting: defaults from the artifact, always sent where shown, never for unsupported kinds', () => {
   const artifact = {
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
-    created_at: new Date(), updated_at: new Date(), expires_at: null, last_viewed_at: null, purge_at: null, info_button: false,
+    created_at: new Date(), updated_at: new Date(), expires_at: null, last_viewed_at: null, purge_at: null,
+    info_button: true, info_button_supported: true,
   } as const
   const defaults = settingsDefaults(artifact, false)
-  assert.equal(defaults.infoButton, false)
+  assert.equal(defaults.infoButton, true)
   const unchanged = Schema.decodeUnknownSync(ArtifactSettingsForm)(defaults)
-  assert(!('info_button' in toUpdateRequest(unchanged, artifact)), 'an untouched switch keeps the server default')
-  const on = Schema.decodeUnknownSync(ArtifactSettingsForm)({ ...defaults, infoButton: true })
-  assert.equal(toUpdateRequest(on, artifact).info_button, true)
+  assert.equal(toUpdateRequest(unchanged, artifact).info_button, true, 'the shown value is saved explicitly')
   const off = Schema.decodeUnknownSync(ArtifactSettingsForm)({ ...defaults, infoButton: false })
-  assert.equal(toUpdateRequest(off, { kind: 'bundle', info_button: true }).info_button, false)
-  assert(!('info_button' in toUpdateRequest(on, { kind: 'file', info_button: false })))
-  assert(hasInfoButton('html') && hasInfoButton('bundle') && !hasInfoButton('file'))
-  assert.equal(Schema.decodeUnknownSync(Artifact)({ ...artifact, created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z' }).info_button, false)
+  assert.equal(toUpdateRequest(off, artifact).info_button, false)
+  assert(!('info_button' in toUpdateRequest(off, { ...artifact, kind: 'file', info_button_supported: false })))
+  const decoded = Schema.decodeUnknownSync(Artifact)({ ...artifact, created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z' })
+  assert(decoded.info_button && decoded.info_button_supported)
 })
 
 await test('metadata decoding strips links and token lists strip secrets', () => {

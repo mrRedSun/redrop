@@ -11,6 +11,11 @@ const (
 	KindBundle = "bundle"
 )
 
+// HasInfoButton reports whether an artifact kind's pages can carry the
+// viewer info button: HTML pages of html artifacts and bundles. File
+// artifacts get redrop's own viewer page. This is the only place that decides it.
+func HasInfoButton(kind string) bool { return kind == KindHTML || kind == KindBundle }
+
 // Artifact statuses.
 const (
 	StatusActive    = "active"
@@ -175,28 +180,29 @@ type Version struct {
 }
 
 type Artifact struct {
-	ID            string     `json:"id"`
-	URL           string     `json:"url"`
-	Title         string     `json:"title"`
-	Kind          string     `json:"kind"`
-	Status        string     `json:"status"`
-	Size          int64      `json:"size" description:"Current version size in bytes"`
-	TotalSize     int64      `json:"total_size" description:"All retained versions in bytes"`
-	Files         int        `json:"files"`
-	Version       int        `json:"version"`
-	Versions      int        `json:"versions"`
-	HasPassword   bool       `json:"has_password"`
-	MaxViews      int        `json:"max_views"`
-	Views         int        `json:"views"`
-	Previews      int        `json:"previews"`
-	LastViewedAt  *time.Time `json:"last_viewed_at"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	ExpiresAt     *time.Time `json:"expires_at"`
-	PurgeAt       *time.Time `json:"purge_at" description:"When content is permanently removed"`
-	TokenName     string     `json:"token_name,omitempty" description:"API token that created it"`
-	OwnerUsername string     `json:"owner_username,omitempty" description:"Only in admin listings"`
-	InfoButton    bool       `json:"info_button" description:"Whether HTML pages show the viewer info button (the artifact's setting or the server default)"`
+	ID                  string     `json:"id"`
+	URL                 string     `json:"url"`
+	Title               string     `json:"title"`
+	Kind                string     `json:"kind"`
+	Status              string     `json:"status"`
+	Size                int64      `json:"size" description:"Current version size in bytes"`
+	TotalSize           int64      `json:"total_size" description:"All retained versions in bytes"`
+	Files               int        `json:"files"`
+	Version             int        `json:"version"`
+	Versions            int        `json:"versions"`
+	HasPassword         bool       `json:"has_password"`
+	MaxViews            int        `json:"max_views"`
+	Views               int        `json:"views"`
+	Previews            int        `json:"previews"`
+	LastViewedAt        *time.Time `json:"last_viewed_at"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	ExpiresAt           *time.Time `json:"expires_at"`
+	PurgeAt             *time.Time `json:"purge_at" description:"When content is permanently removed"`
+	TokenName           string     `json:"token_name,omitempty" description:"API token that created it"`
+	OwnerUsername       string     `json:"owner_username,omitempty" description:"Only in admin listings"`
+	InfoButton          bool       `json:"info_button" description:"Whether HTML pages show the viewer info button (the artifact's setting or the server default)"`
+	InfoButtonSupported bool       `json:"info_button_supported" description:"Whether this artifact's kind has pages that can show the info button"`
 }
 
 type ArtifactList struct {

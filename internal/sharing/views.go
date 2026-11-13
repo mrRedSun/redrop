@@ -34,6 +34,8 @@ type ArtifactMeta struct {
 	PurgeAt      *time.Time // when expired or used-up content is deleted
 	TokenName    string     // API token that created it
 	InfoButton   bool       // effective: the artifact's setting or the server default
+	// InfoButtonSupported: the kind has pages that can carry the button (api.HasInfoButton).
+	InfoButtonSupported bool
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
@@ -112,6 +114,7 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
 		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a),
+		InfoButtonSupported: api.HasInfoButton(a.Kind),
 	}
 }
 
@@ -139,10 +142,9 @@ type ViewerInfo struct {
 }
 
 // ViewerInfo returns the info button contents for a page of a, or false when
-// the button is off for it. Only HTML pages carry the button: html artifacts
-// and bundles. File artifacts get redrop's own viewer page instead.
+// the button is off for it or its kind has no pages that carry it.
 func (s *Service) ViewerInfo(a *store.Artifact) (ViewerInfo, bool) {
-	if (a.Kind != api.KindHTML && a.Kind != api.KindBundle) || !s.infoButton(a) {
+	if !api.HasInfoButton(a.Kind) || !s.infoButton(a) {
 		return ViewerInfo{}, false
 	}
 	info := ViewerInfo{

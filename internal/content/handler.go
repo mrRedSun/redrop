@@ -252,11 +252,11 @@ func (h *Handler) sendFile(w http.ResponseWriter, r *http.Request, f *store.File
 		return
 	}
 	defer fh.Close()
-	h.fileHeaders(w, f, `"`+f.Blob+`"`, download)
+	fileHeaders(w, f, `"`+f.Blob+`"`, download)
 	http.ServeContent(w, r, "", time.Time{}, fh)
 }
 
-func (h *Handler) fileHeaders(w http.ResponseWriter, f *store.File, etag string, download bool) {
+func fileHeaders(w http.ResponseWriter, f *store.File, etag string, download bool) {
 	hd := w.Header()
 	hd.Set("Content-Type", f.ContentType)
 	hd.Set("ETag", etag)

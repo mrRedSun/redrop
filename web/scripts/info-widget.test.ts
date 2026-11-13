@@ -122,9 +122,10 @@ await test('button toggles the panel accessibly; Esc and outside clicks close it
   const w = run(base)
   const root = w.host!.shadow!.node
   const btn = root.find((n) => n.tag === 'button')!
-  const panel = root.find((n) => n.attrs.role === 'dialog')!
+  const panel = root.find((n) => n.attrs.role === 'region')!
   assert.equal(btn.attrs['aria-label'], 'About this shared page')
   assert.equal(btn.attrs['aria-controls'], panel.id)
+  assert.equal(panel.attrs['aria-label'], 'Shared page info')
   assert.equal(panel.hidden, true)
 
   btn.dispatch('click')

@@ -156,26 +156,37 @@ the page they are looking at.
   of an unlimited link. The rule is: nothing a visitor couldn't already see or
   infer from the page they were let into. `sharing.ViewerInfo` holds exactly
   these fields, and tests pin both it and the JSON the page receives.
-* **Where:** only top-level page navigations (`Sec-Fetch-Dest: document`, or
-  an HTML `Accept` without Fetch Metadata) of `text/html` files in `html`
-  artifacts and bundles. It is never added to frames (the widget also checks
-  `window.top`), fetches, subresources, non-HTML files, file artifacts
-  (redrop's own viewer page), gates, `?download`, or Range requests.
+* **Where:** only top-level page navigations of `text/html` files in `html`
+  artifacts and bundles (`api.HasInfoButton`; the API reports it per
+  artifact as `info_button_supported`). A navigation is
+  `Sec-Fetch-Dest: document`. Without Fetch Metadata (older browsers,
+  plain-HTTP origins, curl) the `Accept` header must contain `text/html`, so
+  `fetch()`, `*/*`, and header-less downloads get the stored bytes. It is never
+  added to frames (the widget also checks `window.top`), fetches,
+  subresources, non-HTML files, file artifacts (redrop's own viewer page),
+  gates, or `?download`.
 * **How:** at serve time, one `<script>` element is inserted before the
-  last `</body>`, or appended when there is none. The rest of the document is
-  not parsed or changed, and stored blobs are never modified. The script
+  closing `</body>` tag. Only the last 64 KiB of the page is examined. The
+  last `</body` there counts only when it is a tag (`</body` then optional
+  whitespace and `>`) and no `<script`, `</script`, `<!--` or `-->` comes after
+  it or is left open before it, so it can't be text inside a script string or
+  a comment. Otherwise, or when there is none, the script is appended at the
+  very end, where browsers still run it. The rest of the document is not
+  parsed or changed, and stored blobs are never modified. The script
   carries its data as JSON from `encoding/json`, which escapes `<`, `>`, `&`,
   U+2028 and U+2029, so a title cannot end the script element. It renders
   into a closed shadow root with `:host { all: initial !important }` and a
   maximum z-index. It makes no network requests (the mark is a `data:` URL),
   adds document listeners only while the popover is open, and defines one
   global, the non-enumerable `__redropInfo` guard against double injection.
-* **HTTP:** the injected response is its own representation. It has its own
-  strong ETag (blob hash plus a hash of the snippet) and a correct
-  `Content-Length`; HEAD and conditional requests behave normally; and it
-  sends `Vary: Sec-Fetch-Dest, Accept`. `Cache-Control` stays
-  `private, no-cache`. Range requests always get the stored bytes with the
-  blob's ETag. Pages over 8 MiB are served unchanged.
+* **HTTP:** the injected response is its own representation, streamed from
+  the blob around the snippet (memory per request is the snippet plus the
+  64 KiB tail scan, whatever the page size). It has its own strong ETag (blob
+  hash plus a hash of the snippet) and a correct `Content-Length`. HEAD,
+  conditional, and Range requests all address that representation, so a
+  resumed download never mixes it with the stored bytes. `If-Range` with
+  another ETag gets the full page. It sends `Vary: Sec-Fetch-Dest, Accept`,
+  and `Cache-Control` stays `private, no-cache`.
 * **CSP:** redrop's artifact CSP only sets `frame-ancestors`, so the inline
   script is allowed. If an artifact's own `<meta>` CSP or Trusted Types policy
   blocks it, the page simply has no button. Styles use a constructed
@@ -185,8 +196,12 @@ the page they are looking at.
   part of the same response, and the widget never calls the server.
 * **Control:** a per-artifact setting (dashboard "Show info button", CLI
   `--info` / `--no-info` on `share`, `update`, and `set`, API `info_button`).
-  Artifacts without their own setting, including those created before it
-  existed, follow `REDROP_INFO_BUTTON_DEFAULT` (default `true`). Adding
+  A given flag, or saving the dashboard settings, stores the value
+  explicitly. `update` saves it before uploading the new version, so a
+  failed setting change never leaves a version published. If publishing
+  then fails, the CLI says the setting was saved. Artifacts without their own
+  setting, including those created before it existed, follow
+  `REDROP_INFO_BUTTON_DEFAULT` (default `true`). Adding
   `?redrop-info=0` to a page URL hides it for that load only, e.g. for
   screenshots.
 

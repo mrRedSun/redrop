@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -26,9 +27,9 @@ var infoWidget string
 // infoOffParam disables the button for one request, e.g. for screenshots.
 const infoOffParam = "redrop-info"
 
-// maxInfoPage bounds how much HTML is read into memory to add the button.
-// Larger pages are streamed unchanged.
-const maxInfoPage = 8 << 20
+// infoTailWindow is how much of the end of a page is read to find </body>.
+// The page itself is streamed from the blob, never buffered.
+const infoTailWindow = 64 << 10
 
 // infoData is the JSON the widget receives. Its fields are exactly
 // sharing.ViewerInfo plus the redrop mark; info_test.go pins them.
@@ -72,36 +73,102 @@ func infoSnippet(info sharing.ViewerInfo) []byte {
 	return b.Bytes()
 }
 
-// insertBeforeBody puts snippet just before the last </body>, or at the end
-// when there is none. The rest of the document is not parsed or changed.
-func insertBeforeBody(page, snippet []byte) []byte {
-	at := lastIndexFold(page, "</body")
+// insertionPoint returns where the snippet goes in a page of size bytes
+// whose last bytes are tail. It is the offset of a closing </body> tag only
+// when no script or comment starts or ends after it, so it can't be text
+// inside a script string or a comment. Otherwise it is the end of the page,
+// where browsers still run a trailing script. Nothing else is parsed. tail is
+// lowercased.
+func insertionPoint(tail []byte, size int64) int64 {
+	lower := bytes.ToLower(tail)
+	at := bytes.LastIndex(lower, []byte("</body"))
 	if at < 0 {
-		at = len(page)
+		return size
 	}
-	out := make([]byte, 0, len(page)+len(snippet))
-	out = append(out, page[:at]...)
-	out = append(out, snippet...)
-	return append(out, page[at:]...)
+	if rest := bytes.TrimLeft(lower[at+len("</body"):], " \t\n\r\f"); len(rest) == 0 || rest[0] != '>' {
+		return size
+	}
+	last := func(m string) int { return bytes.LastIndex(lower, []byte(m)) }
+	if max(last("<script"), last("</script"), last("<!--"), last("-->")) > at ||
+		last("<script") > last("</script") || last("<!--") > last("-->") { // unclosed: </body> is inside it
+		return size
+	}
+	return size - int64(len(tail)) + int64(at)
 }
 
-func lastIndexFold(b []byte, sub string) int {
-	for i := len(b) - len(sub); i >= 0; i-- {
-		if b[i] == sub[0] && bytes.EqualFold(b[i:i+len(sub)], []byte(sub)) {
-			return i
-		}
+// splicedPage is the stored page with the snippet inserted at offset at, as
+// an io.ReadSeeker over the blob. It reads the blob on demand, so serving it
+// takes O(len(snippet)) memory regardless of the page size, and Range and
+// HEAD requests address this representation consistently.
+type splicedPage struct {
+	src      io.ReaderAt
+	size, at int64 // stored size and insertion offset
+	snippet  []byte
+	pos      int64
+}
+
+// newSplicedPage reads at most infoTailWindow bytes of src to place snippet.
+func newSplicedPage(src io.ReaderAt, size int64, snippet []byte) (*splicedPage, error) {
+	tail := make([]byte, min(size, infoTailWindow))
+	if _, err := src.ReadAt(tail, size-int64(len(tail))); err != nil && err != io.EOF {
+		return nil, err
 	}
-	return -1
+	return &splicedPage{src: src, size: size, at: insertionPoint(tail, size), snippet: snippet}, nil
+}
+
+func (p *splicedPage) length() int64 { return p.size + int64(len(p.snippet)) }
+
+func (p *splicedPage) Read(b []byte) (int, error) {
+	n := int64(len(p.snippet))
+	var src, end int64 // blob offset to read from, and where this part ends
+	switch {
+	case p.pos >= p.length():
+		return 0, io.EOF
+	case p.pos >= p.at && p.pos < p.at+n:
+		k := copy(b, p.snippet[p.pos-p.at:])
+		p.pos += int64(k)
+		return k, nil
+	case p.pos < p.at:
+		src, end = p.pos, p.at
+	default:
+		src, end = p.pos-n, p.length()
+	}
+	want := int(min(int64(len(b)), end-p.pos))
+	k, err := p.src.ReadAt(b[:want], src)
+	p.pos += int64(k)
+	if k == want {
+		return k, nil
+	}
+	if err == nil || err == io.EOF {
+		err = io.ErrUnexpectedEOF // the blob is shorter than its recorded size
+	}
+	return k, err
+}
+
+func (p *splicedPage) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekCurrent:
+		offset += p.pos
+	case io.SeekEnd:
+		offset += p.length()
+	}
+	if offset < 0 {
+		return 0, errors.New("seek before start")
+	}
+	p.pos = offset
+	return offset, nil
 }
 
 // topLevelNavigation reports whether the request loads a page into a tab
-// rather than a frame, fetch, or subresource. Browsers without Fetch
-// Metadata fall back to the Accept check; the widget re-checks window.top.
+// rather than a frame, fetch, or subresource. Without Fetch Metadata (older
+// browsers, plain-HTTP origins, curl) only an explicit text/html Accept
+// counts, so fetch() and */* downloads get the stored bytes. The widget
+// re-checks window.top.
 func topLevelNavigation(r *http.Request) bool {
 	if d := r.Header.Get("Sec-Fetch-Dest"); d != "" {
 		return d == "document"
 	}
-	return isDocument(r)
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 func isHTML(contentType string) bool {
@@ -119,31 +186,31 @@ func (h *Handler) infoFor(w http.ResponseWriter, r *http.Request, a *store.Artif
 	}
 	// Same URL, different bytes depending on these request headers.
 	w.Header().Add("Vary", "Sec-Fetch-Dest, Accept")
-	switch {
-	case !topLevelNavigation(r),
-		r.Header.Get("Range") != "", // ranges always address the stored bytes
-		r.URL.Query().Get(infoOffParam) == "0",
-		f.Size > maxInfoPage:
+	if !topLevelNavigation(r) || r.URL.Query().Get(infoOffParam) == "0" {
 		return nil, false
 	}
 	return infoSnippet(info), true
 }
 
-// sendPageWithInfo serves an HTML file with the info button added. It
-// reports false, having written nothing, when the stored page can't be read
-// within the size bound; the caller then serves the file unchanged.
+// sendPageWithInfo serves an HTML file with the info button added, streamed
+// from the blob. It reports false, having written nothing, when the blob
+// can't be read; the caller then serves the file the usual way.
 func (h *Handler) sendPageWithInfo(w http.ResponseWriter, r *http.Request, f *store.File, snippet []byte) bool {
 	fh, err := h.sharing.OpenBlob(f)
 	if err != nil {
 		return false
 	}
 	defer fh.Close()
-	page, err := io.ReadAll(io.LimitReader(fh, maxInfoPage+1))
-	if err != nil || len(page) > maxInfoPage {
+	st, err := fh.Stat()
+	if err != nil {
+		return false
+	}
+	page, err := newSplicedPage(fh, st.Size(), snippet)
+	if err != nil {
 		return false
 	}
 	sum := sha256.Sum256(snippet)
-	h.fileHeaders(w, f, `"`+f.Blob+"-i"+hex.EncodeToString(sum[:8])+`"`, false)
-	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(insertBeforeBody(page, snippet)))
+	fileHeaders(w, f, `"`+f.Blob+"-i"+hex.EncodeToString(sum[:8])+`"`, false)
+	http.ServeContent(w, r, "", time.Time{}, page)
 	return true
 }

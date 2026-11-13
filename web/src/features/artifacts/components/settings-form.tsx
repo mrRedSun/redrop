@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { formatDate } from '@/lib/format'
 import { schemaResolver, useFormSubmit } from '@/lib/forms'
 import * as artifacts from '../atoms'
-import { ArtifactSettingsForm, hasInfoButton, settingsDefaults, type Artifact } from '../schemas'
+import { ArtifactSettingsForm, settingsDefaults, type Artifact } from '../schemas'
 
 const ttlLabels = { keep: 'Keep current expiry', '1h': '1 hour from now', '1d': '1 day from now', '7d': '7 days from now', '30d': '30 days from now', '1y': '1 year from now', never: 'Never expire' } as const
 const passwordLabels = { keep: 'Keep current setting', set: 'Set a new password', remove: 'Remove password' } as const
@@ -101,7 +101,7 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             </FormItem>
           )} />
         )}
-        {hasInfoButton(artifact.kind) && (
+        {artifact.info_button_supported && (
           <FormField control={form.control} name="infoButton" render={({ field }) => (
             <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
               <div className="space-y-0.5">

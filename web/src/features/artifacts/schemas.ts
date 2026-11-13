@@ -30,6 +30,8 @@ export const Artifact = Schema.Struct({
   purge_at: Schema.NullOr(Timestamp),
   /** Effective: the artifact's own setting, or the server default when it has none. */
   info_button: Schema.Boolean,
+  /** The server decides which kinds have pages that can carry the button. */
+  info_button_supported: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
 export const ArtifactList = ListOf(Artifact)
@@ -133,16 +135,13 @@ export const settingsDefaults = (a: Artifact, spa: boolean): ArtifactSettingsInp
   infoButton: a.info_button,
 })
 
-/** Only HTML pages carry the viewer info button: html artifacts and bundle pages. */
-export const hasInfoButton = (kind: Artifact['kind']) => kind !== 'file'
-
 /**
  * Form -> PATCH body. Keep omits expiry/password instead of resetting
  * them. Explicit TTL choices are relative to the submission time. `spa`
- * only applies to bundles. The info button is sent only when it changed, so
- * saving other settings keeps an artifact on the server default.
+ * only applies to bundles. The info button switch is always sent where it is
+ * shown, so saving stores the value the owner saw as the artifact's own.
  */
-export const toUpdateRequest = (v: ArtifactSettings, a: Pick<Artifact, 'kind' | 'info_button'>): UpdateArtifactRequest => ({
+export const toUpdateRequest = (v: ArtifactSettings, a: Pick<Artifact, 'kind' | 'info_button_supported'>): UpdateArtifactRequest => ({
   title: v.title,
   max_views: v.maxViews,
   ...(v.ttl !== 'keep' && { ttl: v.ttl }),
@@ -150,5 +149,5 @@ export const toUpdateRequest = (v: ArtifactSettings, a: Pick<Artifact, 'kind' | 
   ...(v.passwordAction === 'remove' && { password: '' }),
   ...(v.resetViews && { reset_views: true }),
   ...(a.kind === 'bundle' && { spa: v.spa }),
-  ...(hasInfoButton(a.kind) && v.infoButton !== a.info_button && { info_button: v.infoButton }),
+  ...(a.info_button_supported && { info_button: v.infoButton }),
 })

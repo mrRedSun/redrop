@@ -43,7 +43,8 @@ function (d) {
     var panel = el('div', 'p', null, root)
     panel.id = 'p'
     panel.hidden = true
-    attr(panel, { role: 'dialog', 'aria-label': 'About this shared page' })
+    // A non-modal disclosure: focus stays on the button, so not a dialog.
+    attr(panel, { role: 'region', 'aria-label': 'Shared page info' })
     el('h2', '', d.title || 'Untitled', panel)
     var list = el('ul', '', null, panel)
     var published = el('li', '', null, list)

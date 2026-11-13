@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -92,10 +93,17 @@ func TestInfoButtonServing(t *testing.T) {
 	r, _ = h.page("GET", a.URL, "/", map[string]string{"Sec-Fetch-Dest": "document", "If-None-Match": etag})
 	expectStatus(t, r, 304, "revalidate injected page")
 
-	// Range requests address the stored bytes.
-	r, b = h.page("GET", a.URL, "/", map[string]string{"Sec-Fetch-Dest": "document", "Range": "bytes=0-14"})
-	if r.StatusCode != 206 || b != stored[:15] || r.Header.Get("ETag") != rawETag {
+	// Range requests address the same (injected) representation, so a resumed
+	// download can't mix bytes of two representations; If-Range with the
+	// stored ETag gets the full page instead.
+	tailAt := len(got) - 20
+	r, b = h.page("GET", a.URL, "/", map[string]string{"Sec-Fetch-Dest": "document", "Range": "bytes=" + strconv.Itoa(tailAt) + "-"})
+	if r.StatusCode != 206 || b != got[tailAt:] || r.Header.Get("ETag") != etag || r.Header.Get("Accept-Ranges") != "bytes" {
 		t.Errorf("range: %d %q etag %s", r.StatusCode, b, r.Header.Get("ETag"))
+	}
+	r, b = h.page("GET", a.URL, "/", map[string]string{"Sec-Fetch-Dest": "document", "Range": "bytes=0-9", "If-Range": rawETag})
+	if r.StatusCode != 200 || b != got {
+		t.Errorf("If-Range with the stored ETag: %d, %d bytes", r.StatusCode, len(b))
 	}
 
 	// Only top-level navigations: not frames, fetches, or scripts.
@@ -103,12 +111,14 @@ func TestInfoButtonServing(t *testing.T) {
 		{"Sec-Fetch-Dest": "iframe"},
 		{"Sec-Fetch-Dest": "empty", "Accept": "*/*"},
 		{"Accept": "application/json"},
+		{"Accept": "*/*"}, // curl, fetch() without Fetch Metadata
+		{},
 	} {
 		if _, b := h.page("GET", a.URL, "/", hdr); b != stored {
 			t.Errorf("%v: got injected or changed page %q", hdr, b)
 		}
 	}
-	// Without Fetch Metadata, a plain HTML request (e.g. curl) still gets it.
+	// Without Fetch Metadata, an explicit HTML Accept (older browsers) gets it.
 	if _, b := h.page("GET", a.URL, "/", map[string]string{"Accept": "text/html"}); !strings.Contains(b, infoMarker) {
 		t.Error("no widget without Fetch Metadata")
 	}
@@ -234,4 +244,44 @@ func TestInfoButtonPrivacyAndViews(t *testing.T) {
 // become \u escapes.
 func jsonEscaped(s string) string {
 	return strings.NewReplacer("<", `\u003c`, ">", `\u003e`, "&", `\u0026`).Replace(s)
+}
+
+// TestUpdateWithInfoSetting: `redrop update --info/--no-info` saves the
+// setting before uploading, never after a published version, and says so
+// when publishing then fails.
+func TestUpdateWithInfoSetting(t *testing.T) {
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	ctx := context.Background()
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<body>v1</body>"), 0o600)
+	a, err := c.Share(ctx, &client.Source{Path: dir}, client.PublishOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off, on := false, true
+
+	// Bad source: nothing changes.
+	if _, err := c.UpdateWithOptions(ctx, a.ID, &client.Source{Path: filepath.Join(dir, "missing")}, client.VersionOptions{InfoButton: &off}, nil); err == nil {
+		t.Fatal("missing source accepted")
+	}
+	if got, _ := c.GetArtifact(ctx, a.ID); !got.InfoButton || got.Versions != 1 {
+		t.Fatalf("bad source changed the artifact: %+v", got)
+	}
+
+	// Publishing fails after the setting was saved: an explicit error, no version.
+	_, err = c.UpdateWithOptions(ctx, a.ID, &client.Source{Path: dir, Entry: "nope.html"}, client.VersionOptions{InfoButton: &off}, nil)
+	var partial *client.ErrSettingsOnly
+	if !errors.As(err, &partial) || client.StatusOf(err) != 400 {
+		t.Fatalf("want ErrSettingsOnly wrapping a 400, got %v", err)
+	}
+	if got, _ := c.GetArtifact(ctx, a.ID); got.InfoButton || got.Versions != 1 {
+		t.Fatalf("after failed publish: %+v", got)
+	}
+
+	// Success: both apply.
+	got, err := c.UpdateWithOptions(ctx, a.ID, &client.Source{Path: dir}, client.VersionOptions{InfoButton: &on}, nil)
+	if err != nil || !got.InfoButton || got.Versions != 2 || !got.InfoButtonSupported {
+		t.Fatalf("update with --info: %v %+v", err, got)
+	}
 }

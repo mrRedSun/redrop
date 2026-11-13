@@ -157,26 +157,34 @@ pass "file viewer, range requests, download"
 
 # info button: injected into top-level HTML pages only, never into the stored bytes
 W='__redropInfo'
-curl -fsS -H 'Sec-Fetch-Dest: document' "$URL" -o "$WORK/info.html"
+D=(-H 'Sec-Fetch-Dest: document')
+curl -fsS "${D[@]}" "$URL" -o "$WORK/info.html"
 grep -q "$W" "$WORK/info.html" || die "info widget on html artifact"
 grep -q '"title":"E2E Report"' "$WORK/info.html" || die "info widget data"
-len=$(curl -fsSI -H 'Sec-Fetch-Dest: document' "$URL" | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2}')
+hdr=$(curl -fsSI "${D[@]}" "$URL" | tr -d '\r')
+len=$(echo "$hdr" | awk 'tolower($1)=="content-length:"{print $2}')
 [ "$len" = "$(stat -c %s "$WORK/info.html")" ] || die "info page content-length $len"
-curl -fsS "${URL}?download" | grep -q "$W" && die "download carries the widget"
+etag=$(echo "$hdr" | awk 'tolower($1)=="etag:"{print $2}')
+SIZE=$(stat -c %s "$WORK/info.html")
+curl -fsS "${D[@]}" -H "Range: bytes=$((SIZE-40))-" "$URL" -o "$WORK/info.tail"
+tail -c 40 "$WORK/info.html" | cmp -s - "$WORK/info.tail" || die "range of the injected page"
+curl -fsSI "${D[@]}" -H 'Range: bytes=0-9' "$URL" | tr -d '\r' | grep -qi "^etag: $etag" || die "range etag"
+curl -fsS -H 'Accept: text/html' "$URL" | grep -q "$W" || die "widget for an HTML Accept without Fetch Metadata"
+curl -fsS "$URL" | grep -q "$W" && die "plain curl (Accept: */*) carries the widget"
+curl -fsS "${D[@]}" "${URL}?download" | grep -q "$W" && die "download carries the widget"
 curl -fsS -H 'Sec-Fetch-Dest: iframe' "$URL" | grep -q "$W" && die "widget inside a frame"
-curl -fsS -H 'Range: bytes=0-20000' "$URL" | grep -q "$W" && die "range request carries the widget"
-curl -fsS "${URL}?redrop-info=0" | grep -q "$W" && die "redrop-info=0 ignored"
-curl -fsS "${BURL}" | grep -q "$W" || die "info widget on bundle page"
-curl -fsS "${BURL}assets/app.css" | grep -q "$W" && die "widget in css"
-curl -fsS "$FURL" | grep -q "$W" && die "widget on file viewer"
-curl -fsS "${FURL}blob.bin" | grep -aq "$W" && die "widget in binary file"
+curl -fsS "${D[@]}" "${URL}?redrop-info=0" | grep -q "$W" && die "redrop-info=0 ignored"
+curl -fsS "${D[@]}" "${BURL}" | grep -q "$W" || die "info widget on bundle page"
+curl -fsS "${D[@]}" "${BURL}assets/app.css" | grep -q "$W" && die "widget in css"
+curl -fsS "${D[@]}" "$FURL" | grep -q "$W" && die "widget on file viewer"
+curl -fsS "${D[@]}" "${FURL}blob.bin" | grep -aq "$W" && die "widget in binary file"
 NURL=$($R share "$WORK/page.html" --no-info -q)
-curl -fsS "$NURL" | grep -q "$W" && die "widget despite --no-info"
+curl -fsS "${D[@]}" "$NURL" | grep -q "$W" && die "widget despite --no-info"
 $R set "$NURL" --info | grep -q 'info button: *shown' || die "set --info output"
-curl -fsS "$NURL" | grep -q "$W" || die "widget after set --info"
-$R set "$NURL" --no-info >/dev/null
-curl -fsS "$NURL" | grep -q "$W" && die "widget after set --no-info"
-pass "info button: html and bundle pages only; not on downloads, frames, ranges, css, files, --no-info"
+curl -fsS "${D[@]}" "$NURL" | grep -q "$W" || die "widget after set --info"
+$R update "$NURL" "$WORK/page.html" --no-info | grep -q 'info button: *hidden' || die "update --no-info"
+curl -fsS "${D[@]}" "$NURL" | grep -q "$W" && die "widget after update --no-info"
+pass "info button: html and bundle navigations only, ranges of the same page; not for curl */*, downloads, frames, css, files, --no-info"
 
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)

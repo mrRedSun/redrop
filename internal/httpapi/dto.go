@@ -17,6 +17,7 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
 		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
+		InfoButtonSupported: m.InfoButtonSupported,
 	}
 }
 

@@ -71,7 +71,8 @@ const program = Effect.gen(function* () {
     const values = Schema.decodeUnknownSync(ArtifactSettingsForm)(settingsDefaults(a, versions.find((v) => v.current)!.spa))
     const saved = yield* artifacts.update(a.id, toUpdateRequest(values, a))
     check('unchanged settings round-trip', saved.title === a.title && saved.max_views === a.max_views && saved.url === a.url && saved.info_button === a.info_button)
-    if (a.kind !== 'file') {
+    check('info button support matches the kind', a.info_button_supported === (a.kind !== 'file'))
+    if (a.info_button_supported) {
       // The info button switch round-trips and can be put back.
       const flipped = yield* artifacts.update(a.id, toUpdateRequest({ ...values, infoButton: !a.info_button }, a))
       check('info button setting round-trips', flipped.info_button === !a.info_button)
