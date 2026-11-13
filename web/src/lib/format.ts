@@ -13,9 +13,9 @@ export function formatBytes(n: number): string {
 
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
 
-export function relativeTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const diff = new Date(iso).getTime() - Date.now()
+export function relativeTime(date: Date | null | undefined): string {
+  if (!date) return '—'
+  const diff = date.getTime() - Date.now()
   const abs = Math.abs(diff)
   const units: [Intl.RelativeTimeFormatUnit, number][] = [
     ['year', 365 * 864e5],
@@ -31,9 +31,9 @@ export function relativeTime(iso: string | null | undefined): string {
   return diff >= 0 ? 'in a moment' : 'just now'
 }
 
-export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+export function formatDate(date: Date | null | undefined): string {
+  if (!date) return '—'
+  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 export function generatePassword(): string {
@@ -46,4 +46,11 @@ export function generatePassword(): string {
     out += alphabet[b % alphabet.length]
   })
   return out
+}
+
+/** Bytes <-> whole GB for quota inputs (decimal units, matching formatBytes). */
+export const GB = 1_000_000_000
+
+export function isPast(date: Date): boolean {
+  return date.getTime() < Date.now()
 }

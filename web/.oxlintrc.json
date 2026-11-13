@@ -1,8 +1,121 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
+  "plugins": [
+    "react",
+    "typescript",
+    "oxc"
+  ],
+  "ignorePatterns": [
+    "src/.stale-*/**"
+  ],
   "rules": {
     "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
+    "react/only-export-components": [
+      "warn",
+      {
+        "allowConstantExport": true
+      }
+    ],
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": [
+              "@/api/redrop-api",
+              "effect/http",
+              "effect/http/*",
+              "@effect/platform-browser",
+              "@effect/platform-browser/*"
+            ],
+            "message": "Only src/features/*/endpoints.ts talk HTTP (through RedropApi); UI code uses the feature's atoms."
+          }
+        ]
+      }
+    ],
+    "no-unused-vars": [
+      "warn",
+      {
+        "argsIgnorePattern": "^_"
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/features/*/endpoints.ts",
+        "src/api/**",
+        "src/runtime/runtime.ts",
+        "scripts/**"
+      ],
+      "rules": {
+        "no-restricted-imports": "off",
+        "react/rules-of-hooks": "off"
+      }
+    },
+    {
+      "files": [
+        "src/**/*.tsx"
+      ],
+      "rules": {
+        "no-restricted-globals": [
+          "error",
+          "fetch",
+          "XMLHttpRequest"
+        ],
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "@/api/redrop-api",
+                  "**/api/redrop-api",
+                  "effect/http",
+                  "effect/http/*",
+                  "@effect/platform-browser",
+                  "@effect/platform-browser/*",
+                  "**/endpoints",
+                  "**/endpoints.ts"
+                ],
+                "message": "UI reads feature atoms; endpoint functions and HTTP clients belong behind those atoms."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/components/**"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "@/features/*",
+                  "@/features/**",
+                  "@/api/redrop-api",
+                  "effect/http",
+                  "effect/http/*"
+                ],
+                "message": "Shared components stay generic: no feature or HTTP imports."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/components/ui/**"
+      ],
+      "rules": {
+        "react/only-export-components": "off"
+      }
+    }
+  ]
 }

@@ -1,20 +1,20 @@
-import { useState, type ReactNode } from 'react'
-import { QueryClientProvider } from '@tanstack/react-query'
+import type { ReactNode } from 'react'
+import { RegistryContext } from '@effect/atom-react'
 import { ThemeProvider } from 'next-themes'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { createQueryClient } from './query-client'
+import { registry } from '@/runtime/runtime'
 
+/** The atom registry is the same instance router loaders read (created outside React). */
 export function Providers({ children }: { children: ReactNode }) {
-  const [queryClient] = useState(createQueryClient)
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      <QueryClientProvider client={queryClient}>
+      <RegistryContext.Provider value={registry}>
         <TooltipProvider delayDuration={300}>
           {children}
           <Toaster richColors closeButton position="bottom-right" />
         </TooltipProvider>
-      </QueryClientProvider>
+      </RegistryContext.Provider>
     </ThemeProvider>
   )
 }
