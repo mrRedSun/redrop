@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -215,21 +214,21 @@ func (s *Service) blobTitle(sum string) string {
 // --- owner operations ---
 
 // Create publishes an upload as a new artifact.
-func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (*store.Artifact, error) {
+func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (Artifact, error) {
 	exp, err := s.expiry(set.TTL)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	if err := validateMaxViews(set.MaxViews); err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	pwHash, err := hashArtifactPassword(set.Password)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	v, title, err := s.materialize(ctx, actor, c)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	if t := strings.TrimSpace(set.Title); t != "" {
 		title = truncate(t, maxTitle)
@@ -239,13 +238,14 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp,
 	}, v, s.cfg.MaxTotalBytes)
 	if err != nil {
-		return nil, mapStore(err)
+		return Artifact{}, mapStore(err)
 	}
 	s.log.Info("artifact created", "id", id, "user", actor.Username, "kind", v.Kind, "token", actor.TokenName)
-	return s.db.ArtifactByID(ctx, id)
+	return s.reload(ctx, id)
 }
 
-// owned loads an artifact that belongs to the actor.
+// owned loads an artifact that belongs to the actor. Other users' artifacts
+// are reported as not found so IDs cannot be probed.
 func (s *Service) owned(ctx context.Context, actor Actor, id string) (*store.Artifact, error) {
 	a, err := s.db.ArtifactByID(ctx, id)
 	if err != nil || a.UserID != actor.UserID {
@@ -254,13 +254,34 @@ func (s *Service) owned(ctx context.Context, actor Actor, id string) (*store.Art
 	return a, nil
 }
 
-func (s *Service) Get(ctx context.Context, actor Actor, id string) (*store.Artifact, error) {
-	return s.owned(ctx, actor, id)
+// reload returns the owner view of an artifact after a change.
+func (s *Service) reload(ctx context.Context, id string) (Artifact, error) {
+	a, err := s.db.ArtifactByID(ctx, id)
+	if err != nil {
+		return Artifact{}, mapStore(err)
+	}
+	return s.ownerView(a), nil
+}
+
+func (s *Service) Get(ctx context.Context, actor Actor, id string) (Artifact, error) {
+	a, err := s.owned(ctx, actor, id)
+	if err != nil {
+		return Artifact{}, err
+	}
+	return s.ownerView(a), nil
 }
 
 // List returns the actor's artifacts, optionally filtered by status and query.
-func (s *Service) List(ctx context.Context, actor Actor, query, status string) ([]*store.Artifact, error) {
-	return s.list(ctx, store.ListFilter{UserID: actor.UserID, Query: strings.TrimSpace(query)}, status)
+func (s *Service) List(ctx context.Context, actor Actor, query, status string) ([]Artifact, error) {
+	rows, err := s.list(ctx, store.ListFilter{UserID: actor.UserID, Query: strings.TrimSpace(query)}, status)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Artifact, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, s.ownerView(a))
+	}
+	return out, nil
 }
 
 func (s *Service) list(ctx context.Context, f store.ListFilter, status string) ([]*store.Artifact, error) {
@@ -282,28 +303,28 @@ func (s *Service) list(ctx context.Context, f store.ListFilter, status string) (
 }
 
 // AddVersion publishes an upload as the new current version (same link).
-func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (*store.Artifact, error) {
+func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (Artifact, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	v, _, err := s.materialize(ctx, actor, c)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	n, err := s.db.AddVersion(ctx, a.ID, actor.UserID, v, s.cfg.MaxTotalBytes, s.cfg.KeepVersions)
 	if err != nil {
-		return nil, mapStore(err)
+		return Artifact{}, mapStore(err)
 	}
 	s.log.Info("artifact version published", "id", a.ID, "version", n, "user", actor.Username)
-	return s.db.ArtifactByID(ctx, a.ID)
+	return s.reload(ctx, a.ID)
 }
 
 // Update applies a settings patch.
-func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (*store.Artifact, error) {
+func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (Artifact, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	var u store.ArtifactUpdate
 	if p.Title != nil {
@@ -312,44 +333,44 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 	}
 	if p.TTL != nil {
 		if strings.TrimSpace(*p.TTL) == "" {
-			return nil, apperr.Invalid("ttl must not be empty")
+			return Artifact{}, apperr.Invalid("ttl must not be empty")
 		}
 		exp, err := s.expiry(*p.TTL)
 		if err != nil {
-			return nil, err
+			return Artifact{}, err
 		}
 		u.ExpiresAt = &exp
 	}
 	if p.Password != nil {
 		h, err := hashArtifactPassword(*p.Password)
 		if err != nil {
-			return nil, err
+			return Artifact{}, err
 		}
 		u.PasswordHash = &h
 	}
 	if p.MaxViews != nil {
 		if err := validateMaxViews(*p.MaxViews); err != nil {
-			return nil, err
+			return Artifact{}, err
 		}
 		u.MaxViews = p.MaxViews
 	}
 	u.ResetViews, u.Revoked, u.SPA = p.ResetViews, p.Revoked, p.SPA
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
-		return nil, mapStore(err)
+		return Artifact{}, mapStore(err)
 	}
-	return s.db.ArtifactByID(ctx, a.ID)
+	return s.reload(ctx, a.ID)
 }
 
 // Rotate replaces the secret link; the old URL stops working.
-func (s *Service) Rotate(ctx context.Context, actor Actor, id string) (*store.Artifact, error) {
+func (s *Service) Rotate(ctx context.Context, actor Actor, id string) (Artifact, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
-		return nil, err
+		return Artifact{}, err
 	}
 	if err := s.db.UpdateArtifact(ctx, a.ID, store.ArtifactUpdate{RotateSlug: true}); err != nil {
-		return nil, mapStore(err)
+		return Artifact{}, mapStore(err)
 	}
-	return s.db.ArtifactByID(ctx, a.ID)
+	return s.reload(ctx, a.ID)
 }
 
 func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
@@ -370,34 +391,37 @@ type PreviewLink struct {
 	ExpiresAt time.Time
 }
 
-func (s *Service) Preview(ctx context.Context, actor Actor, id string) (*PreviewLink, error) {
+func (s *Service) Preview(ctx context.Context, actor Actor, id string) (PreviewLink, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
-		return nil, err
+		return PreviewLink{}, err
 	}
 	exp := time.Now().Add(previewTTL)
-	tok := s.previewSigner.Sign(a.ID+"|"+strconv.Itoa(a.AccessGen), exp)
-	return &PreviewLink{URL: s.URL(a) + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
+	tok := s.previewSigner.Sign(previewTokenPayload(a), exp)
+	return PreviewLink{URL: s.cfg.ArtifactURL(a.Slug) + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
 }
 
-func (s *Service) Versions(ctx context.Context, actor Actor, id string) (*store.Artifact, []store.VersionRow, error) {
-	a, err := s.owned(ctx, actor, id)
-	if err != nil {
-		return nil, nil, err
-	}
-	list, err := s.db.ListVersions(ctx, a.ID)
-	return a, list, mapStore(err)
-}
-
-func (s *Service) ActivateVersion(ctx context.Context, actor Actor, id string, number int) (*store.Artifact, error) {
+func (s *Service) Versions(ctx context.Context, actor Actor, id string) ([]Version, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.db.SetCurrentVersion(ctx, a.ID, number); err != nil {
+	rows, err := s.db.ListVersions(ctx, a.ID)
+	if err != nil {
 		return nil, mapStore(err)
 	}
-	return s.db.ArtifactByID(ctx, a.ID)
+	return versionsView(a.CurrentVersion, rows), nil
+}
+
+func (s *Service) ActivateVersion(ctx context.Context, actor Actor, id string, number int) (Artifact, error) {
+	a, err := s.owned(ctx, actor, id)
+	if err != nil {
+		return Artifact{}, err
+	}
+	if err := s.db.SetCurrentVersion(ctx, a.ID, number); err != nil {
+		return Artifact{}, mapStore(err)
+	}
+	return s.reload(ctx, a.ID)
 }
 
 func (s *Service) DeleteVersion(ctx context.Context, actor Actor, id string, number int) error {
@@ -412,68 +436,31 @@ func (s *Service) DeleteVersion(ctx context.Context, actor Actor, id string, num
 }
 
 // Files lists a version's files (0 = current version).
-func (s *Service) Files(ctx context.Context, actor Actor, id string, version int) (int, []store.File, error) {
+func (s *Service) Files(ctx context.Context, actor Actor, id string, version int) (FileList, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
-		return 0, nil, err
+		return FileList{}, err
 	}
 	if version <= 0 {
 		version = a.CurrentVersion
 	}
 	files, err := s.db.ListFiles(ctx, a.ID, version)
-	return version, files, mapStore(err)
+	if err != nil {
+		return FileList{}, mapStore(err)
+	}
+	return filesView(version, files), nil
 }
 
 const viewLogLimit = 200
 
-func (s *Service) Views(ctx context.Context, actor Actor, id string) ([]store.ViewRow, error) {
+func (s *Service) Views(ctx context.Context, actor Actor, id string) ([]View, error) {
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := s.db.ListViews(ctx, a.ID, viewLogLimit)
-	return rows, mapStore(err)
-}
-
-// --- admin operations (metadata only) ---
-
-func (s *Service) ListAll(ctx context.Context, query, status string) ([]*store.Artifact, error) {
-	return s.list(ctx, store.ListFilter{Query: strings.TrimSpace(query)}, status)
-}
-
-func (s *Service) AdminSetRevoked(ctx context.Context, admin, id string, revoked bool) (*store.Artifact, error) {
-	if err := s.db.UpdateArtifact(ctx, id, store.ArtifactUpdate{Revoked: &revoked}); err != nil {
-		return nil, mapStore(err)
-	}
-	a, err := s.db.ArtifactByID(ctx, id)
 	if err != nil {
 		return nil, mapStore(err)
 	}
-	s.log.Info("admin changed artifact", "admin", admin, "id", id, "owner", a.OwnerUsername, "revoked", revoked)
-	return a, nil
-}
-
-func (s *Service) AdminDelete(ctx context.Context, admin, id string) error {
-	if err := s.db.DeleteArtifact(ctx, id); err != nil {
-		return mapStore(err)
-	}
-	s.log.Info("admin deleted artifact", "admin", admin, "id", id)
-	return nil
-}
-
-// Stats summarizes server usage.
-type Stats struct {
-	store.Stats
-	StoredBytes     int64
-	MaxTotalBytes   int64
-	MaxVersionBytes int64
-}
-
-func (s *Service) Stats(ctx context.Context) (*Stats, error) {
-	st, err := s.db.Stats(ctx)
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-	stored, _ := s.blobs.Usage()
-	return &Stats{Stats: st, StoredBytes: stored, MaxTotalBytes: s.cfg.MaxTotalBytes, MaxVersionBytes: s.cfg.MaxVersionBytes}, nil
+	return viewsView(rows), nil
 }

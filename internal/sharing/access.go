@@ -108,6 +108,12 @@ func grantPayload(a *store.Artifact, kind string) string {
 	return a.ID + "|" + strconv.Itoa(a.AccessGen) + "|" + kind
 }
 
+// previewTokenPayload binds an owner preview link to the artifact and its
+// access generation, so rotating or revoking invalidates outstanding links.
+func previewTokenPayload(a *store.Artifact) string {
+	return a.ID + "|" + strconv.Itoa(a.AccessGen)
+}
+
 func (s *Service) validGrant(signer *security.Signer, value string, a *store.Artifact, kind string) bool {
 	p, ok := signer.Verify(value)
 	return ok && p == grantPayload(a, kind)
@@ -206,7 +212,7 @@ func (s *Service) Open(ctx context.Context, a *store.Artifact, v Visitor, passwo
 // RedeemPreview exchanges an owner preview token for a preview cookie.
 func (s *Service) RedeemPreview(a *store.Artifact, token string) (*Grant, bool) {
 	p, ok := s.previewSigner.Verify(token)
-	if !ok || p != a.ID+"|"+strconv.Itoa(a.AccessGen) {
+	if !ok || p != previewTokenPayload(a) {
 		return nil, false
 	}
 	return &Grant{Value: s.previewSigner.Sign(grantPayload(a, "preview"), time.Now().Add(previewWindow)), TTL: previewWindow}, true

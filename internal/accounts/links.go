@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"context"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
@@ -12,9 +13,9 @@ import (
 )
 
 var linkPaths = map[string]string{
-	store.PurposeInvite: "/invite/",
-	store.PurposeReset:  "/reset/",
-	store.PurposeSetup:  "/setup/",
+	store.PurposeInvite: dashpaths.Invite,
+	store.PurposeReset:  dashpaths.Reset,
+	store.PurposeSetup:  dashpaths.Setup,
 }
 
 // createLink stores a one-time link and returns its absolute URL.
@@ -158,58 +159,6 @@ func (s *Service) ResetPassword(ctx context.Context, ip, token, password string)
 		return apperr.Internal(err)
 	}
 	return mapStore(s.db.RedeemReset(ctx, o, hash))
-}
-
-// --- admin: invites and reset links ---
-
-type InviteRequest struct {
-	CreatedBy  string
-	Note       string
-	Role       string
-	QuotaBytes int64
-	TTL        time.Duration
-}
-
-// CreateInvite returns the invite and its one-time URL.
-func (s *Service) CreateInvite(ctx context.Context, req InviteRequest) (*store.OneTime, string, error) {
-	if req.Role == "" {
-		req.Role = api.RoleUser
-	}
-	if req.Role != api.RoleUser && req.Role != api.RoleAdmin {
-		return nil, "", apperr.Invalid("role must be user or admin")
-	}
-	if req.QuotaBytes < 0 {
-		return nil, "", apperr.Invalid("quota must be >= 0")
-	}
-	if req.QuotaBytes == 0 {
-		req.QuotaBytes = s.cfg.DefaultQuotaBytes
-	}
-	if req.TTL <= 0 {
-		req.TTL = inviteTTL
-	}
-	o := &store.OneTime{Purpose: store.PurposeInvite, CreatedBy: req.CreatedBy, Role: req.Role, QuotaBytes: req.QuotaBytes,
-		Note: truncate(req.Note, 200), ExpiresAt: time.Now().Add(req.TTL).UTC().Truncate(time.Second)}
-	url, err := s.createLink(ctx, o)
-	return o, url, err
-}
-
-func (s *Service) Invites(ctx context.Context) ([]*store.OneTime, error) {
-	list, err := s.db.ListOneTime(ctx, store.PurposeInvite)
-	return list, mapStore(err)
-}
-
-func (s *Service) DeleteInvite(ctx context.Context, id string) error {
-	return mapStore(s.db.DeleteOneTime(ctx, store.PurposeInvite, id))
-}
-
-// CreateResetLink returns a 24-hour password reset URL for a user.
-func (s *Service) CreateResetLink(ctx context.Context, adminID, userID string, clearTOTP bool) (string, time.Time, error) {
-	if _, err := s.db.UserByID(ctx, userID); err != nil {
-		return "", time.Time{}, apperr.NotFound("user not found")
-	}
-	exp := time.Now().Add(resetTTL).UTC().Truncate(time.Second)
-	url, err := s.createLink(ctx, &store.OneTime{Purpose: store.PurposeReset, UserID: userID, CreatedBy: adminID, ClearTOTP: clearTOTP, ExpiresAt: exp})
-	return url, exp, err
 }
 
 func truncate(s string, n int) string {

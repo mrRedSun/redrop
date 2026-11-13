@@ -60,7 +60,7 @@ func (a *API) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error) {
 	if err != nil {
 		return api.ArtifactList{}, err
 	}
-	return a.artifactList(list, false), nil
+	return api.ArtifactList{Items: mapItems(list, artifactDTO)}, nil
 }
 
 func (a *API) createArtifact(c fuego.ContextWithBody[api.CreateArtifactRequest]) (api.Artifact, error) {
@@ -68,12 +68,11 @@ func (a *API) createArtifact(c fuego.ContextWithBody[api.CreateArtifactRequest])
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	m, err := a.sharing.Create(c.Context(), actorFrom(c.Context()), contentDTO(body.PublishRequest),
-		sharing.Settings{Title: body.Title, TTL: body.TTL, Password: body.Password, MaxViews: body.MaxViews})
+	m, err := a.sharing.Create(c.Context(), actorFrom(c.Context()), contentFromRequest(body.PublishRequest), settingsFromRequest(body))
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	return a.artifactDTO(m, false), nil
+	return artifactDTO(m), nil
 }
 
 func (a *API) getArtifact(c fuego.ContextNoBody) (api.Artifact, error) {
@@ -81,7 +80,7 @@ func (a *API) getArtifact(c fuego.ContextNoBody) (api.Artifact, error) {
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	return a.artifactDTO(m, false), nil
+	return artifactDTO(m), nil
 }
 
 func (a *API) updateArtifact(c fuego.ContextWithBody[api.UpdateArtifactRequest]) (api.Artifact, error) {
@@ -89,14 +88,11 @@ func (a *API) updateArtifact(c fuego.ContextWithBody[api.UpdateArtifactRequest])
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	m, err := a.sharing.Update(c.Context(), actorFrom(c.Context()), c.PathParam("id"), sharing.Patch{
-		Title: body.Title, TTL: body.TTL, Password: body.Password, MaxViews: body.MaxViews,
-		ResetViews: body.ResetViews, Revoked: body.Revoked, SPA: body.SPA,
-	})
+	m, err := a.sharing.Update(c.Context(), actorFrom(c.Context()), c.PathParam("id"), patchFromRequest(body))
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	return a.artifactDTO(m, false), nil
+	return artifactDTO(m), nil
 }
 
 func (a *API) deleteArtifact(c fuego.ContextNoBody) (api.OK, error) {
@@ -109,7 +105,7 @@ func (a *API) rotateArtifact(c fuego.ContextNoBody) (api.Artifact, error) {
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	return a.artifactDTO(m, false), nil
+	return artifactDTO(m), nil
 }
 
 func (a *API) previewArtifact(c fuego.ContextNoBody) (api.PreviewLink, error) {
@@ -121,11 +117,11 @@ func (a *API) previewArtifact(c fuego.ContextNoBody) (api.PreviewLink, error) {
 }
 
 func (a *API) listVersions(c fuego.ContextNoBody) (api.VersionList, error) {
-	m, rows, err := a.sharing.Versions(c.Context(), actorFrom(c.Context()), c.PathParam("id"))
+	list, err := a.sharing.Versions(c.Context(), actorFrom(c.Context()), c.PathParam("id"))
 	if err != nil {
 		return api.VersionList{}, err
 	}
-	return versionList(m.CurrentVersion, rows), nil
+	return api.VersionList{Items: mapItems(list, versionDTO)}, nil
 }
 
 func (a *API) createVersion(c fuego.ContextWithBody[api.PublishRequest]) (api.Artifact, error) {
@@ -133,11 +129,11 @@ func (a *API) createVersion(c fuego.ContextWithBody[api.PublishRequest]) (api.Ar
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	m, err := a.sharing.AddVersion(c.Context(), actorFrom(c.Context()), c.PathParam("id"), contentDTO(body))
+	m, err := a.sharing.AddVersion(c.Context(), actorFrom(c.Context()), c.PathParam("id"), contentFromRequest(body))
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	return a.artifactDTO(m, false), nil
+	return artifactDTO(m), nil
 }
 
 func versionNumber(c fuego.ContextNoBody) (int, error) {
@@ -157,7 +153,7 @@ func (a *API) activateVersion(c fuego.ContextNoBody) (api.Artifact, error) {
 	if err != nil {
 		return api.Artifact{}, err
 	}
-	return a.artifactDTO(m, false), nil
+	return artifactDTO(m), nil
 }
 
 func (a *API) deleteVersion(c fuego.ContextNoBody) (api.OK, error) {
@@ -178,17 +174,17 @@ func (a *API) listFiles(c fuego.ContextNoBody) (api.FileList, error) {
 		}
 		version = n
 	}
-	v, files, err := a.sharing.Files(c.Context(), actorFrom(c.Context()), c.PathParam("id"), version)
+	files, err := a.sharing.Files(c.Context(), actorFrom(c.Context()), c.PathParam("id"), version)
 	if err != nil {
 		return api.FileList{}, err
 	}
-	return fileList(v, files), nil
+	return fileListDTO(files), nil
 }
 
 func (a *API) listViews(c fuego.ContextNoBody) (api.ViewList, error) {
-	rows, err := a.sharing.Views(c.Context(), actorFrom(c.Context()), c.PathParam("id"))
+	list, err := a.sharing.Views(c.Context(), actorFrom(c.Context()), c.PathParam("id"))
 	if err != nil {
 		return api.ViewList{}, err
 	}
-	return viewList(rows), nil
+	return api.ViewList{Items: mapItems(list, viewDTO)}, nil
 }

@@ -13,22 +13,14 @@ import (
 
 var errNoRoute = apperr.NotFound("no such API endpoint")
 
-func (a *API) meDTO(r *http.Request, p *accounts.Principal) api.Me {
-	m := api.Me{
-		User:       userDTO(p.User, a.accounts.Usage(r.Context(), p.User.ID)),
-		AuthMethod: p.Method,
-		CanAdmin:   p.CanAdmin(a.cfg.AdminRequiresSSO),
-	}
-	if p.Token != nil {
-		m.TokenName = p.Token.Name
-	}
-	return m
-}
-
 // startSession sets the session cookie and returns the signed-in user.
-func (a *API) startSession(w http.ResponseWriter, r *http.Request, s *accounts.Session, method string) api.Me {
+func (a *API) startSession(w http.ResponseWriter, r *http.Request, s *accounts.Session) (api.Me, error) {
+	me, err := a.accounts.Me(r.Context(), s.Principal)
+	if err != nil {
+		return api.Me{}, err
+	}
 	a.cookies.setSession(w, s)
-	return a.meDTO(r, &accounts.Principal{User: s.User, Method: method})
+	return meDTO(me), nil
 }
 
 func (a *API) getAuthConfig(c fuego.ContextNoBody) (api.AuthConfig, error) {
@@ -56,7 +48,7 @@ func (a *API) login(c fuego.ContextWithBody[api.LoginRequest]) (api.Me, error) {
 	if err != nil {
 		return api.Me{}, err
 	}
-	return a.startSession(c.Response(), c.Request(), s, accounts.MethodPassword), nil
+	return a.startSession(c.Response(), c.Request(), s)
 }
 
 func (a *API) logout(c fuego.ContextNoBody) (api.OK, error) {
@@ -74,7 +66,7 @@ func (a *API) setup(c fuego.ContextWithBody[api.SetupRequest]) (api.Me, error) {
 	if err != nil {
 		return api.Me{}, err
 	}
-	return a.startSession(c.Response(), c.Request(), s, accounts.MethodPassword), nil
+	return a.startSession(c.Response(), c.Request(), s)
 }
 
 func (a *API) inviteInfo(c fuego.ContextNoBody) (api.InviteInfo, error) {
@@ -94,7 +86,7 @@ func (a *API) acceptInvite(c fuego.ContextWithBody[api.AcceptInviteRequest]) (ap
 	if err != nil {
 		return api.Me{}, err
 	}
-	return a.startSession(c.Response(), c.Request(), s, accounts.MethodPassword), nil
+	return a.startSession(c.Response(), c.Request(), s)
 }
 
 func (a *API) resetInfo(c fuego.ContextNoBody) (api.ResetInfo, error) {

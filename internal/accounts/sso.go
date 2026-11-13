@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"net/url"
 	"regexp"
 	"strings"
@@ -41,10 +42,17 @@ type Provider struct {
 	Label string
 }
 
-func (s *Service) initProviders(ctx context.Context) {
+func (s *Service) initProviders() {
 	s.providers = map[string]*provider{}
 	for _, pc := range s.cfg.OIDC {
 		s.providers[pc.ID] = &provider{cfg: pc}
+	}
+}
+
+// WarmUp performs OIDC discovery for every provider so the first sign-in is
+// fast. Failures are logged; discovery retries on use.
+func (s *Service) WarmUp(ctx context.Context) {
+	for _, pc := range s.cfg.OIDC {
 		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		if _, err := s.discover(dctx, pc.ID); err != nil {
 			// Don't block startup on an unreachable IdP; discovery retries on use.
@@ -117,9 +125,9 @@ type SSOStart struct {
 // FailurePath is where the browser goes when an SSO flow in mode fails.
 func FailurePath(mode string) string {
 	if mode == SSOLink {
-		return "/account"
+		return dashpaths.Account
 	}
-	return "/login"
+	return dashpaths.Login
 }
 
 // BeginSSO validates the request and builds the provider redirect.
@@ -139,7 +147,7 @@ func (s *Service) BeginSSO(ctx context.Context, ip, providerID, mode string, cur
 		if current == nil || current.IsToken() {
 			return nil, apperr.Unauthorized("sign in first to link an account")
 		}
-		st.UserID = current.User.ID
+		st.UserID = current.user.ID
 	case SSOInvite:
 		if _, err := s.db.OneTimeByHash(ctx, store.PurposeInvite, ids.Hash(inviteToken)); err != nil {
 			return nil, apperr.Gone("this invite link was already used or has expired")
@@ -170,7 +178,7 @@ type claims struct {
 // CompleteSSO verifies the callback. failPath is always set so the caller can
 // redirect with the error message.
 func (s *Service) CompleteSSO(ctx context.Context, providerID, signedState string, q url.Values, current *Principal) (res *SSOResult, failPath string, err error) {
-	failPath = "/login"
+	failPath = dashpaths.Login
 	payload, ok := s.stateSigner.Verify(signedState)
 	var st ssoState
 	if !ok || json.Unmarshal([]byte(payload), &st) != nil || st.State != q.Get("state") || st.Provider != providerID {
@@ -218,25 +226,25 @@ func (s *Service) CompleteSSO(ctx context.Context, providerID, signedState strin
 			return nil, failPath, err
 		}
 		sess, err := s.newSession(ctx, u, MethodOIDC)
-		return &SSOResult{Session: sess, Redirect: "/"}, failPath, err
+		return &SSOResult{Session: sess, Redirect: dashpaths.Home}, failPath, err
 
 	case SSOLink:
-		if current == nil || current.User.ID != st.UserID {
-			return nil, "/login", apperr.Unauthorized("sign in again to link an account")
+		if current == nil || current.user.ID != st.UserID {
+			return nil, dashpaths.Login, apperr.Unauthorized("sign in again to link an account")
 		}
 		if lookupErr == nil {
-			if existing.UserID != current.User.ID {
+			if existing.UserID != current.user.ID {
 				return nil, failPath, apperr.Conflict("that %s account is already linked to another user", label)
 			}
-		} else if err := s.db.LinkIdentity(ctx, current.User.ID, st.Provider, idt.Subject, c.Email); err != nil {
+		} else if err := s.db.LinkIdentity(ctx, current.user.ID, st.Provider, idt.Subject, c.Email); err != nil {
 			return nil, failPath, apperr.Internal(err)
 		}
 		// Upgrade to an SSO session (enables admin pages when SSO is required).
-		if current.SessionHash != "" {
-			s.db.DeleteSession(ctx, current.SessionHash)
+		if current.sessionHash != "" {
+			s.db.DeleteSession(ctx, current.sessionHash)
 		}
-		sess, err := s.newSession(ctx, current.User, MethodOIDC)
-		return &SSOResult{Session: sess, Redirect: "/account?linked=1"}, failPath, err
+		sess, err := s.newSession(ctx, current.user, MethodOIDC)
+		return &SSOResult{Session: sess, Redirect: dashpaths.AccountLinked}, failPath, err
 
 	case SSOInvite:
 		if lookupErr == nil {
@@ -253,7 +261,7 @@ func (s *Service) CompleteSSO(ctx context.Context, providerID, signedState strin
 		}
 		s.log.Info("account created", "user", u.Username, "role", u.Role, "via", "invite+sso")
 		sess, err := s.newSession(ctx, u, MethodOIDC)
-		return &SSOResult{Session: sess, Redirect: "/tokens?welcome=1"}, failPath, err
+		return &SSOResult{Session: sess, Redirect: dashpaths.TokensWelcome}, failPath, err
 	}
 	return nil, failPath, apperr.Invalid("unknown sign-in mode")
 }

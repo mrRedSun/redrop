@@ -30,34 +30,47 @@ const (
 const (
 	SessionTTL  = 30 * 24 * time.Hour
 	TokenPrefix = "rdp_"
-	resetTTL    = 24 * time.Hour
+	ResetTTL    = 24 * time.Hour
 	setupTTL    = 24 * time.Hour
-	inviteTTL   = 7 * 24 * time.Hour
+	InviteTTL   = 7 * 24 * time.Hour
 )
 
-// Principal is an authenticated caller.
+// Principal is an authenticated caller. It is opaque to transports: they
+// read identity through accessors and pass it back to the services.
 type Principal struct {
-	User        *store.User
-	Method      string
-	SessionHash string       // set for dashboard sessions
-	Token       *store.Token // set for API tokens
+	user        *store.User
+	method      string
+	sessionHash string       // set for dashboard sessions
+	token       *store.Token // set for API tokens
 }
 
-func (p *Principal) IsToken() bool { return p.Method == MethodToken }
+func (p *Principal) UserID() string    { return p.user.ID }
+func (p *Principal) Username() string  { return p.user.Username }
+func (p *Principal) QuotaBytes() int64 { return p.user.QuotaBytes }
+func (p *Principal) Method() string    { return p.method }
+func (p *Principal) IsToken() bool     { return p.method == MethodToken }
+
+// Token returns the API token's ID and name ("" for dashboard sessions).
+func (p *Principal) Token() (id, name string) {
+	if p.token == nil {
+		return "", ""
+	}
+	return p.token.ID, p.token.Name
+}
 
 // CanAdmin reports whether admin operations are allowed for this principal.
 func (p *Principal) CanAdmin(requireSSO bool) bool {
-	if p.User.Role != api.RoleAdmin || p.IsToken() {
+	if p.user.Role != api.RoleAdmin || p.IsToken() {
 		return false
 	}
-	return !requireSSO || p.Method == MethodOIDC
+	return !requireSSO || p.method == MethodOIDC
 }
 
 // Session is a newly created dashboard session; Secret goes in the cookie.
 type Session struct {
 	Secret    string
 	ExpiresAt time.Time
-	User      *store.User
+	Principal *Principal
 }
 
 type Service struct {
@@ -74,7 +87,7 @@ type Service struct {
 	providers map[string]*provider
 }
 
-func New(ctx context.Context, db *store.Store, cfg *config.Config, secret []byte, log *slog.Logger) *Service {
+func New(db *store.Store, cfg *config.Config, secret []byte, log *slog.Logger) *Service {
 	s := &Service{
 		db: db, cfg: cfg, log: log,
 		loginLimiter:   security.NewLimiter(5, 5*time.Minute),
@@ -82,7 +95,7 @@ func New(ctx context.Context, db *store.Store, cfg *config.Config, secret []byte
 		linkLimiter:    security.NewLimiter(60, 10*time.Minute),
 		stateSigner:    security.NewSigner(secret, "oidc-state"),
 	}
-	s.initProviders(ctx)
+	s.initProviders()
 	return s
 }
 
@@ -103,7 +116,7 @@ func (s *Service) AuthenticateToken(ctx context.Context, raw string) (*Principal
 		return nil, err
 	}
 	s.db.TouchToken(ctx, t.ID)
-	return &Principal{User: u, Method: MethodToken, Token: t}, nil
+	return &Principal{user: u, method: MethodToken, token: t}, nil
 }
 
 // AuthenticateSession resolves a session cookie secret.
@@ -121,7 +134,7 @@ func (s *Service) AuthenticateSession(ctx context.Context, secret string) (*Prin
 		return nil, err
 	}
 	s.db.TouchSession(ctx, hash)
-	return &Principal{User: u, Method: se.Method, SessionHash: hash}, nil
+	return &Principal{user: u, method: se.Method, sessionHash: hash}, nil
 }
 
 func (s *Service) activeUser(ctx context.Context, id string) (*store.User, error) {
@@ -137,7 +150,7 @@ func (s *Service) newSession(ctx context.Context, u *store.User, method string) 
 	if err := s.db.CreateSession(ctx, ids.Hash(secret), u.ID, method, SessionTTL); err != nil {
 		return nil, apperr.Internal(err)
 	}
-	return &Session{Secret: secret, ExpiresAt: time.Now().Add(SessionTTL), User: u}, nil
+	return &Session{Secret: secret, ExpiresAt: time.Now().Add(SessionTTL), Principal: &Principal{user: u, method: method, sessionHash: ids.Hash(secret)}}, nil
 }
 
 // Login verifies a password (and TOTP when enabled) and opens a session.
@@ -176,18 +189,14 @@ func (s *Service) Logout(ctx context.Context, secret string) {
 	}
 }
 
-// --- usage ---
-
-// Usage is a user's storage and artifact counts.
-type Usage struct {
-	UsedBytes int64
-	Artifacts int
-}
-
-func (s *Service) Usage(ctx context.Context, userID string) Usage {
-	used, _ := s.db.UsedBytes(ctx, userID)
-	n, _ := s.db.CountUserArtifacts(ctx, userID)
-	return Usage{UsedBytes: used, Artifacts: n}
+// Me describes the caller, including storage usage.
+func (s *Service) Me(ctx context.Context, p *Principal) (Me, error) {
+	usage, err := s.db.UserUsage(ctx, p.user.ID)
+	if err != nil {
+		return Me{}, apperr.Internal(err)
+	}
+	_, tokenName := p.Token()
+	return Me{User: userView(p.user, usage), AuthMethod: p.method, TokenName: tokenName, CanAdmin: p.CanAdmin(s.cfg.AdminRequiresSSO)}, nil
 }
 
 // --- validation helpers ---

@@ -9,16 +9,9 @@ import (
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
-	"github.com/mrRedSun/redrop/internal/store"
 )
 
 const uploadTTL = 24 * time.Hour
-
-// Upload is a resumable upload in progress.
-type Upload struct {
-	*store.Upload
-	ChunkSize int64
-}
 
 func (s *Service) stagedPath(id string) string { return filepath.Join(s.uploadDir, id) }
 
@@ -52,7 +45,7 @@ func (s *Service) CreateUpload(ctx context.Context, actor Actor, size int64) (*U
 		return nil, apperr.Internal(err)
 	}
 	f.Close()
-	return &Upload{Upload: u, ChunkSize: s.cfg.ChunkSize}, nil
+	return s.uploadView(u), nil
 }
 
 func (s *Service) GetUpload(ctx context.Context, actor Actor, id string) (*Upload, error) {
@@ -60,7 +53,7 @@ func (s *Service) GetUpload(ctx context.Context, actor Actor, id string) (*Uploa
 	if err != nil {
 		return nil, apperr.NotFound("upload not found or expired")
 	}
-	return &Upload{Upload: u, ChunkSize: s.cfg.ChunkSize}, nil
+	return s.uploadView(u), nil
 }
 
 // OffsetMismatchError tells clients where to resume. It unwraps to a

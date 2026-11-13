@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/ids"
@@ -25,10 +26,12 @@ const userCols = `id, username, display_name, password_hash, totp_secret, totp_e
 
 type scanner interface{ Scan(...any) error }
 
-func scanUser(r scanner) (*User, error) {
+// scanUser reads userCols, followed by any extra selected columns.
+func scanUser(r scanner, extra ...any) (*User, error) {
 	var u User
 	var created int64
-	if err := r.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Role, &u.QuotaBytes, &u.Disabled, &created); err != nil {
+	dest := append([]any{&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Role, &u.QuotaBytes, &u.Disabled, &created}, extra...)
+	if err := r.Scan(dest...); err != nil {
 		return nil, notFound(err)
 	}
 	u.CreatedAt = ts(created)
@@ -70,23 +73,6 @@ func (s *Store) UsernameTaken(ctx context.Context, username string) (bool, error
 	return n > 0, err
 }
 
-func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*User
-	for rows.Next() {
-		u, err := scanUser(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
-}
-
 func (s *Store) SetPassword(ctx context.Context, userID, hash string) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, hash, userID)
 	return err
@@ -116,10 +102,48 @@ func (s *Store) UsedBytes(ctx context.Context, userID string) (int64, error) {
 	return n, err
 }
 
-func (s *Store) CountUserArtifacts(ctx context.Context, userID string) (int, error) {
-	var n int
-	err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM artifacts WHERE user_id = ?`, userID).Scan(&n)
-	return n, err
+// Usage is a user's storage use and artifact count.
+type Usage struct {
+	UsedBytes int64
+	Artifacts int
+}
+
+// UserWithUsage pairs a user with their usage.
+type UserWithUsage struct {
+	*User
+	Usage
+}
+
+// usageJoin aggregates bytes and artifact counts per user in two subqueries,
+// so artifacts are never counted once per version.
+const usageJoin = ` LEFT JOIN (SELECT a.user_id, sum(v.size) AS used FROM versions v JOIN artifacts a ON a.id = v.artifact_id GROUP BY a.user_id) ub ON ub.user_id = users.id
+	LEFT JOIN (SELECT user_id, count(*) AS n FROM artifacts GROUP BY user_id) ac ON ac.user_id = users.id`
+
+// UserUsage returns one user's usage.
+func (s *Store) UserUsage(ctx context.Context, userID string) (Usage, error) {
+	var u Usage
+	err := s.DB.QueryRowContext(ctx, `SELECT coalesce(ub.used,0), coalesce(ac.n,0) FROM users`+usageJoin+` WHERE users.id = ?`, userID).Scan(&u.UsedBytes, &u.Artifacts)
+	return u, notFound(err)
+}
+
+// ListUsersWithUsage returns every user with usage in one query.
+func (s *Store) ListUsersWithUsage(ctx context.Context) ([]UserWithUsage, error) {
+	cols := strings.ReplaceAll("users."+userCols, ", ", ", users.")
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+cols+`, coalesce(ub.used,0), coalesce(ac.n,0) FROM users`+usageJoin+` ORDER BY users.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserWithUsage
+	for rows.Next() {
+		var usage Usage
+		u, err := scanUser(rows, &usage.UsedBytes, &usage.Artifacts)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, UserWithUsage{User: u, Usage: usage})
+	}
+	return out, rows.Err()
 }
 
 // --- identities ---

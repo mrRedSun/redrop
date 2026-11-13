@@ -56,23 +56,6 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 	return s, nil
 }
 
-// URL returns the public link of an artifact.
-func (s *Service) URL(a *store.Artifact) string { return s.cfg.ArtifactURL(a.Slug) }
-
-// PurgeAt returns when an expired or used-up artifact's content is deleted.
-func (s *Service) PurgeAt(a *store.Artifact, status string) *time.Time {
-	var t time.Time
-	switch {
-	case status == "expired" && a.ExpiresAt != nil:
-		t = a.ExpiresAt.Add(s.cfg.ExpiredRetention)
-	case status == "exhausted" && a.ExhaustedAt != nil:
-		t = a.ExhaustedAt.Add(s.cfg.ViewWindowLimited)
-	default:
-		return nil
-	}
-	return &t
-}
-
 func mapStore(err error) error {
 	switch {
 	case err == nil:

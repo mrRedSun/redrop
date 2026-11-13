@@ -316,3 +316,8 @@ type Stats struct {
 type OK struct {
 	OK bool `json:"ok"`
 }
+
+// AdminArtifactUpdate is the only change admins may make to others' artifacts.
+type AdminArtifactUpdate struct {
+	Revoked bool `json:"revoked"`
+}

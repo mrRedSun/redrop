@@ -23,6 +23,7 @@ var Version = "dev"
 type API struct {
 	accounts *accounts.Service
 	sharing  *sharing.Service
+	admin    adminAPI
 	cfg      *config.Config
 	clients  *netutil.ClientResolver
 	log      *slog.Logger
@@ -31,7 +32,7 @@ type API struct {
 }
 
 func New(acc *accounts.Service, sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger) *API {
-	a := &API{accounts: acc, sharing: sh, cfg: cfg, clients: clients, log: log, cookies: cookies{insecure: cfg.Insecure}}
+	a := &API{accounts: acc, sharing: sh, admin: adminAPI{users: acc.Administration(), moderation: sh.Moderation()}, cfg: cfg, clients: clients, log: log, cookies: cookies{insecure: cfg.Insecure}}
 	a.server = fuego.NewServer(
 		fuego.WithoutStartupMessages(),
 		fuego.WithoutLogger(),

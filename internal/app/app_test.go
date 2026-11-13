@@ -35,7 +35,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(context.Background(), cfg, slog.New(slog.DiscardHandler), Options{})
+	a, err := New(cfg, slog.New(slog.DiscardHandler), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,5 +270,39 @@ func TestBundleTraversalRejected(t *testing.T) {
 	}
 	for path, want := range map[string]int{"/": 200, "/docs/a.txt": 200, "/docs": 301, "/docs/": 200, "/client/route": 200, "/missing.js": 404} {
 		expectStatus(t, h.content("GET", a.URL, path, nil, ""), want, "bundle "+path)
+	}
+}
+
+func TestAdminUsersAndInvites(t *testing.T) {
+	h := newHarness(t)
+	token := h.setupAdmin()
+	c := client.New(h.srv.URL, token)
+	f := filepath.Join(t.TempDir(), "notes.txt")
+	os.WriteFile(f, []byte("hello"), 0o600)
+	if _, err := c.Share(context.Background(), &client.Source{Path: f}, client.PublishOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	r := h.do("GET", "/api/v1/admin/users", nil, false)
+	expectStatus(t, r, 200, "admin users")
+	users := decode[api.UserList](t, r)
+	if len(users.Items) != 1 || users.Items[0].UsedBytes != 5 || users.Items[0].Artifacts != 1 {
+		t.Fatalf("usage not aggregated: %+v", users.Items)
+	}
+	self := users.Items[0].ID
+	role := api.RoleUser
+	expectStatus(t, h.do("PATCH", "/api/v1/admin/users/"+self, api.AdminUpdateUserRequest{Role: &role}, true), 409, "self-demotion")
+
+	expectStatus(t, h.do("POST", "/api/v1/admin/invites", api.CreateInviteRequest{TTL: "never"}, true), 400, "never-expiring invite")
+	r = h.do("POST", "/api/v1/admin/invites", api.CreateInviteRequest{Note: "bob", TTL: "1d"}, true)
+	expectStatus(t, r, 201, "create invite")
+	inv := decode[api.Invite](t, r)
+	if !strings.Contains(inv.URL, "/invite/") || inv.Role != api.RoleUser {
+		t.Fatalf("invite: %+v", inv)
+	}
+	r = h.do("GET", "/api/v1/admin/invites", nil, false)
+	list := decode[api.InviteList](t, r)
+	if len(list.Items) != 1 || list.Items[0].URL != "" {
+		t.Fatalf("invite list must not repeat the secret URL: %+v", list.Items)
 	}
 }
