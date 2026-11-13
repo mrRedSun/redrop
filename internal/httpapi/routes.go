@@ -88,16 +88,17 @@ func (a *API) routes() {
 
 	// Administration.
 	adm := fuego.Group(v1, "/admin", option.Tags("admin"))
-	fuego.Get(adm, "/stats", a.adminStats, with(adminOpts, op("adminStats", "Server usage")...)...)
-	fuego.Get(adm, "/users", a.adminListUsers, with(adminOpts, op("adminListUsers", "List users")...)...)
-	fuego.Patch(adm, "/users/{id}", a.adminUpdateUser, with(adminOpts, op("adminUpdateUser", "Change quota, role, or disable a user")...)...)
-	fuego.Post(adm, "/users/{id}/reset", a.adminResetLink, with(adminOpts, op("adminResetLink", "Create a password reset link")...)...)
-	fuego.Get(adm, "/invites", a.adminListInvites, with(adminOpts, op("adminListInvites", "List invites")...)...)
-	fuego.Post(adm, "/invites", a.adminCreateInvite, with(adminOpts, append(op("adminCreateInvite", "Create an invite link"), option.DefaultStatusCode(http.StatusCreated))...)...)
-	fuego.Delete(adm, "/invites/{id}", a.adminDeleteInvite, with(adminOpts, op("adminDeleteInvite", "Revoke an invite")...)...)
-	fuego.Get(adm, "/artifacts", a.adminListArtifacts, with(adminOpts, append(op("adminListArtifacts", "All artifacts (metadata only)"), option.Query("q", "Search"))...)...)
-	fuego.Patch(adm, "/artifacts/{id}", a.adminUpdateArtifact, with(adminOpts, op("adminUpdateArtifact", "Revoke or restore any artifact")...)...)
-	fuego.Delete(adm, "/artifacts/{id}", a.adminDeleteArtifact, with(adminOpts, op("adminDeleteArtifact", "Delete any artifact")...)...)
+	fuego.Get(adm, "/stats", a.admin.stats, with(adminOpts, op("adminStats", "Server usage")...)...)
+	fuego.Get(adm, "/users", a.admin.listUsers, with(adminOpts, op("adminListUsers", "List users")...)...)
+	fuego.Patch(adm, "/users/{id}", a.admin.updateUser, with(adminOpts, op("adminUpdateUser", "Change quota, role, or disable a user")...)...)
+	fuego.Post(adm, "/users/{id}/reset", a.admin.resetLink, with(adminOpts, op("adminResetLink", "Create a password reset link")...)...)
+	fuego.Get(adm, "/invites", a.admin.listInvites, with(adminOpts, op("adminListInvites", "List invites")...)...)
+	fuego.Post(adm, "/invites", a.admin.createInvite, with(adminOpts, append(op("adminCreateInvite", "Create an invite link"), option.DefaultStatusCode(http.StatusCreated))...)...)
+	fuego.Delete(adm, "/invites/{id}", a.admin.deleteInvite, with(adminOpts, op("adminDeleteInvite", "Revoke an invite")...)...)
+	fuego.Get(adm, "/artifacts", a.admin.listArtifacts, with(adminOpts, append(op("adminListArtifacts", "All artifacts (metadata only)"),
+		option.Query("q", "Search"), option.Query("status", "active, expired, exhausted, revoked, or all"))...)...)
+	fuego.Patch(adm, "/artifacts/{id}", a.admin.updateArtifact, with(adminOpts, op("adminUpdateArtifact", "Revoke or restore any artifact")...)...)
+	fuego.Delete(adm, "/artifacts/{id}", a.admin.deleteArtifact, with(adminOpts, op("adminDeleteArtifact", "Delete any artifact")...)...)
 
 	fuego.GetStd(s, "/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")

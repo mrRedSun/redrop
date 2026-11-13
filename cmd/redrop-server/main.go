@@ -9,15 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
-	"time"
 
+	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/app"
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/httpapi"
-	"github.com/mrRedSun/redrop/internal/ids"
-	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/internal/webui"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
@@ -77,7 +74,7 @@ func dashboard() fs.FS {
 	return sub
 }
 
-func newApp(ctx context.Context, log *slog.Logger) (*app.App, error) {
+func newApp(log *slog.Logger) (*app.App, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, err
@@ -86,13 +83,13 @@ func newApp(ctx context.Context, log *slog.Logger) (*app.App, error) {
 	if cliDir == "" {
 		cliDir = defaultCLIDir
 	}
-	return app.New(ctx, cfg, log, app.Options{Dashboard: dashboard(), CLIDir: cliDir})
+	return app.New(cfg, log, app.Options{Dashboard: dashboard(), CLIDir: cliDir})
 }
 
 func serve(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	a, err := newApp(ctx, log)
+	a, err := newApp(log)
 	if err != nil {
 		return err
 	}
@@ -111,7 +108,7 @@ func openapi() error {
 	if os.Getenv("REDROP_CONTENT_URL") == "" {
 		os.Setenv("REDROP_CONTENT_URL", "https://content.example")
 	}
-	a, err := newApp(context.Background(), slog.New(slog.DiscardHandler))
+	a, err := newApp(slog.New(slog.DiscardHandler))
 	if err != nil {
 		return err
 	}
@@ -124,13 +121,14 @@ func openapi() error {
 	return err
 }
 
-func openStore() (*store.Store, *config.Config, error) {
-	cfg, err := config.Load()
+// offlineAdmin opens the data directory without serving, for commands that
+// mint one-time links. The links follow the same rules as the dashboard's.
+func offlineAdmin() (*accounts.Administration, func(), error) {
+	a, err := newApp(slog.New(slog.DiscardHandler))
 	if err != nil {
 		return nil, nil, err
 	}
-	db, err := store.Open(filepath.Join(cfg.DataDir, "redrop.db"))
-	return db, cfg, err
+	return a.Accounts.Administration(), func() { a.Close() }, nil
 }
 
 func invite(args []string) error {
@@ -138,21 +136,20 @@ func invite(args []string) error {
 	admin := fl.Bool("admin", false, "invite an administrator")
 	note := fl.String("note", "", "note shown in the admin list")
 	fl.Parse(args)
-	db, cfg, err := openStore()
+	adm, done, err := offlineAdmin()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer done()
 	role := api.RoleUser
 	if *admin {
 		role = api.RoleAdmin
 	}
-	secret := ids.Secret()
-	o := &store.OneTime{Purpose: store.PurposeInvite, Role: role, QuotaBytes: cfg.DefaultQuotaBytes, Note: *note, ExpiresAt: time.Now().Add(7 * 24 * time.Hour)}
-	if err := db.CreateOneTime(context.Background(), o, ids.Hash(secret)); err != nil {
+	inv, err := adm.CreateInvite(context.Background(), "", accounts.InviteRequest{Note: *note, Role: role})
+	if err != nil {
 		return err
 	}
-	fmt.Println(cfg.PublicOrigin() + "/invite/" + secret)
+	fmt.Println(inv.URL)
 	return nil
 }
 
@@ -160,21 +157,21 @@ func reset(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: redrop-server reset USERNAME")
 	}
-	db, cfg, err := openStore()
+	adm, done, err := offlineAdmin()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	u, err := db.UserByUsername(context.Background(), args[0])
+	defer done()
+	ctx := context.Background()
+	id, err := adm.UserIDByUsername(ctx, args[0])
 	if err != nil {
-		return fmt.Errorf("user %q not found", args[0])
-	}
-	secret := ids.Secret()
-	o := &store.OneTime{Purpose: store.PurposeReset, UserID: u.ID, ClearTOTP: true, ExpiresAt: time.Now().Add(24 * time.Hour)}
-	if err := db.CreateOneTime(context.Background(), o, ids.Hash(secret)); err != nil {
 		return err
 	}
-	fmt.Println(cfg.PublicOrigin() + "/reset/" + secret)
+	link, err := adm.CreateResetLink(ctx, "", id, true)
+	if err != nil {
+		return err
+	}
+	fmt.Println(link.URL)
 	return nil
 }
 

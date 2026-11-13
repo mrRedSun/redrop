@@ -7,7 +7,11 @@ import (
 )
 
 func (a *API) getMe(c fuego.ContextNoBody) (api.Me, error) {
-	return a.meDTO(c.Request(), principalFrom(c.Context())), nil
+	me, err := a.accounts.Me(c.Context(), principalFrom(c.Context()))
+	if err != nil {
+		return api.Me{}, err
+	}
+	return meDTO(me), nil
 }
 
 func (a *API) updateMe(c fuego.ContextWithBody[api.UpdateMeRequest]) (api.Me, error) {
@@ -15,11 +19,11 @@ func (a *API) updateMe(c fuego.ContextWithBody[api.UpdateMeRequest]) (api.Me, er
 	if err != nil {
 		return api.Me{}, err
 	}
-	p := principalFrom(c.Context())
-	if err := a.accounts.UpdateDisplayName(c.Context(), p, body.DisplayName); err != nil {
+	me, err := a.accounts.UpdateDisplayName(c.Context(), principalFrom(c.Context()), body.DisplayName)
+	if err != nil {
 		return api.Me{}, err
 	}
-	return a.meDTO(c.Request(), p), nil
+	return meDTO(me), nil
 }
 
 func (a *API) changePassword(c fuego.ContextWithBody[api.ChangePasswordRequest]) (api.OK, error) {
@@ -58,15 +62,11 @@ func (a *API) totpDisable(c fuego.ContextWithBody[api.TOTPCode]) (api.OK, error)
 }
 
 func (a *API) listIdentities(c fuego.ContextNoBody) (api.IdentityList, error) {
-	list, err := a.accounts.Identities(c.Context(), principalFrom(c.Context()).User.ID)
+	list, err := a.accounts.Identities(c.Context(), principalFrom(c.Context()))
 	if err != nil {
 		return api.IdentityList{}, err
 	}
-	out := api.IdentityList{Items: make([]api.Identity, 0, len(list))}
-	for _, i := range list {
-		out.Items = append(out.Items, api.Identity{ID: i.ID, Provider: i.Provider, Label: i.Label, Email: i.Email, CreatedAt: i.CreatedAt})
-	}
-	return out, nil
+	return api.IdentityList{Items: mapItems(list, identityDTO)}, nil
 }
 
 func (a *API) unlinkIdentity(c fuego.ContextNoBody) (api.OK, error) {
@@ -75,15 +75,11 @@ func (a *API) unlinkIdentity(c fuego.ContextNoBody) (api.OK, error) {
 }
 
 func (a *API) listTokens(c fuego.ContextNoBody) (api.TokenList, error) {
-	list, err := a.accounts.Tokens(c.Context(), principalFrom(c.Context()).User.ID)
+	list, err := a.accounts.Tokens(c.Context(), principalFrom(c.Context()))
 	if err != nil {
 		return api.TokenList{}, err
 	}
-	out := api.TokenList{Items: make([]api.Token, 0, len(list))}
-	for _, t := range list {
-		out.Items = append(out.Items, tokenDTO(t))
-	}
-	return out, nil
+	return api.TokenList{Items: mapItems(list, tokenDTO)}, nil
 }
 
 func (a *API) createToken(c fuego.ContextWithBody[api.CreateTokenRequest]) (api.CreatedToken, error) {
@@ -91,14 +87,14 @@ func (a *API) createToken(c fuego.ContextWithBody[api.CreateTokenRequest]) (api.
 	if err != nil {
 		return api.CreatedToken{}, err
 	}
-	t, err := a.accounts.CreateToken(c.Context(), principalFrom(c.Context()).User.ID, body.Name, body.TTL)
+	t, err := a.accounts.CreateToken(c.Context(), principalFrom(c.Context()), body.Name, body.TTL)
 	if err != nil {
 		return api.CreatedToken{}, err
 	}
-	return api.CreatedToken{Token: tokenDTO(*t.Token), Secret: t.Secret}, nil
+	return api.CreatedToken{Token: tokenDTO(t.Token), Secret: t.Secret}, nil
 }
 
 func (a *API) deleteToken(c fuego.ContextNoBody) (api.OK, error) {
-	err := a.accounts.RevokeToken(c.Context(), principalFrom(c.Context()).User.ID, c.PathParam("id"))
+	err := a.accounts.RevokeToken(c.Context(), principalFrom(c.Context()), c.PathParam("id"))
 	return api.OK{OK: err == nil}, err
 }

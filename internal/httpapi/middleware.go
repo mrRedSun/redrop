@@ -8,6 +8,7 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"github.com/mrRedSun/redrop/internal/sharing"
 )
 
@@ -26,10 +27,8 @@ func principalFrom(ctx context.Context) *accounts.Principal {
 // actorFrom adapts the principal for the sharing service.
 func actorFrom(ctx context.Context) sharing.Actor {
 	p := principalFrom(ctx)
-	a := sharing.Actor{UserID: p.User.ID, Username: p.User.Username, Quota: p.User.QuotaBytes}
-	if p.Token != nil {
-		a.TokenID, a.TokenName = p.Token.ID, p.Token.Name
-	}
+	a := sharing.Actor{UserID: p.UserID(), Username: p.Username(), Quota: p.QuotaBytes()}
+	a.TokenID, a.TokenName = p.Token()
 	return a
 }
 
@@ -98,7 +97,13 @@ func (a *API) requireAuth(level access) func(http.Handler) http.Handler {
 	}
 }
 
-func authorize(p *accounts.Principal, level access, requireSSO bool) error {
+// caller is what authorization needs to know about a principal.
+type caller interface {
+	IsToken() bool
+	CanAdmin(requireSSO bool) bool
+}
+
+func authorize(p caller, level access, requireSSO bool) error {
 	switch level {
 	case sessionOnly:
 		if p.IsToken() {
@@ -167,11 +172,8 @@ func (w *statusRecorder) Write(b []byte) (int, error) {
 }
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// secretPathPrefixes carry one-time link tokens that must not reach logs.
-var secretPathPrefixes = []string{"/api/v1/invites/", "/api/v1/reset/", "/invite/", "/reset/", "/setup/"}
-
 func redactPath(p string) string {
-	for _, pre := range secretPathPrefixes {
+	for _, pre := range dashpaths.SecretPrefixes {
 		if rest, ok := strings.CutPrefix(p, pre); ok {
 			if _, tail, found := strings.Cut(rest, "/"); found {
 				return pre + "…/" + tail

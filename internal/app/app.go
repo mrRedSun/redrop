@@ -47,7 +47,7 @@ type App struct {
 }
 
 // New opens storage and builds every component.
-func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
+func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -69,7 +69,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		db.Close()
 		return nil, err
 	}
-	acc := accounts.New(ctx, db, cfg, secret, log)
+	acc := accounts.New(db, cfg, secret, log)
 	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader}
 
 	site := web.New(opts.Dashboard, opts.CLIDir, cfg.PublicOrigin())
@@ -117,6 +117,7 @@ func (a *App) Run(ctx context.Context) error {
 	} else if url != "" {
 		a.log.Warn("no users exist yet; open this one-time link to create the admin account (valid 24h)", "url", url)
 	}
+	go a.Accounts.WarmUp(ctx)
 	go a.janitor.Run(ctx)
 	srv := &http.Server{
 		Addr:              a.cfg.Listen,

@@ -10,6 +10,9 @@ DATA=${REDROP_DEV_DATA:-/root/redrop-dev/data}
 CLI=${REDROP_DEV_CLI:-/root/redrop-dev/cli}
 mkdir -p "$DATA" "$CLI" /root/redrop-dev/bin
 
+# Build before embedding, retaining dist/.gitkeep (Vite empties only its assets).
+(cd web && npm run build)
+
 VERSION="dev-$(git rev-parse --short HEAD 2>/dev/null || echo local)"
 LDFLAGS="-s -w -X github.com/mrRedSun/redrop/internal/httpapi.Version=$VERSION"
 go build -trimpath -ldflags "$LDFLAGS" -o /root/redrop-dev/bin/redrop-server ./cmd/redrop-server
@@ -32,5 +35,7 @@ systemd-run --unit=redrop-dev --collect --quiet \
   -E REDROP_CONTENT_URL="http://$DASHED.sslip.io:8080" \
   /root/redrop-dev/bin/redrop-server serve
 sleep 1
-systemctl --no-pager --lines=5 status redrop-dev | tail -6
+# Do not echo the bootstrap URL or other journal lines containing one-time secrets.
+systemctl --quiet is-active redrop-dev
+echo "redrop-dev is active"
 echo "Dashboard: http://$IP:8080"
