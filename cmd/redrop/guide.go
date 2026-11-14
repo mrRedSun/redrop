@@ -93,7 +93,9 @@ chunked and resume automatically after network errors.
   --no-info on share, update, or set serves pages directly instead (no button,
   no frame); --info turns it back on (the server default is usually on).
   Append ?redrop-info=0 to a link for a direct, frameless view, e.g. for
-  screenshots; it lasts for that browser's visit (30 minutes), and
+  screenshots. It is remembered for 30 minutes when the link is opened
+  directly (typed, bookmarked, opened from another app) or from the same page;
+  when it is clicked on another website, only that page is direct.
   ?redrop-info=1 goes back to the viewer. The address bar does not follow
   clicks made in a frame nested inside your page or in an older tab of the
   same link, nor Back and Forward inside the frame. In the frame, popups lose

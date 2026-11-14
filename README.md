@@ -16,7 +16,9 @@ cross-platform CLI that agents drive.
   expiry countdown, and remaining views, never who shared them. HTML opens in
   redrop's viewer, with the artifact untouched in a frame from its own origin,
   and the address bar follows the frame. Turn it off per artifact (`--no-info`,
-  or in the dashboard), or for a visit with `?redrop-info=0`. Owners can let
+  or in the dashboard), or with `?redrop-info=0` (remembered for 30 minutes
+  when the link is opened directly; when it's clicked on another website,
+  only that page is direct). Owners can let
   viewers open older versions (`--old-versions`). Change notes on new
   versions are shown to viewers; notes written before this release stay
   private.
@@ -90,6 +92,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
 | `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
+| `REDROP_CONTENT_FRAME_ENTRIES` | `200`: viewer frames one client network (IPv4 address, IPv6 /64) may open per 2 minutes before getting `429`; raise it for large NATs |
 
 ## Reverse proxy
 

@@ -230,16 +230,24 @@ lives on redrop's own pages instead.
     redeemed frame ids for 2 minutes, in a set bounded at 100,000, so a
     copy from the page source or a proxy log is useless once the frame has
     loaded.
-    * **Per-client quota:** one client (keyed like the miss budget: the
-      trusted-proxy-resolved address, IPv6 by /64) may redeem at most 200
-      frames per 2 minutes. Over that, a valid token gets `429` with
-      `Retry-After`. That is not a miss, so it spends no miss budget, and
-      other clients are unaffected.
-    * **When the set is full** (more than 500 clients at their quota at
-      once), the oldest ids are forgotten early, so a new frame always
-      enters. Under an attack that keeps the set full, the single-use
-      guarantee therefore degrades to the 2-minute replay window (a copied
-      token works until it expires), rather than to an outage.
+    * **Per-client quota:** one client may redeem at most
+      `REDROP_CONTENT_FRAME_ENTRIES` (Q, default 200) frames per 2 minutes.
+      Clients are keyed like the miss budget: the trusted-proxy-resolved
+      address, IPv6 by /64. Raise Q for large NATs.
+      * Over the quota, a valid token gets the "Too many requests" page
+        with `429` and `Retry-After: 120`.
+      * That is not a miss, so it spends no miss budget, and other clients
+        are unaffected.
+    * **When the set is full** (more than 100,000 / Q clients at their
+      quota at once, 500 at the default), the oldest ids are forgotten
+      early, so a new frame always enters. Under an attack that keeps the
+      set full, the single-use guarantee therefore degrades to the 2-minute
+      replay window (a copied token works until it expires), rather than to
+      an outage.
+    * **Observability:** at most once a minute, the server logs a warning
+      with the number of unexpired ids forgotten early and of quota
+      refusals since the last warning. It logs counts only: never tokens,
+      frame ids, or client addresses.
   * **Raw cookie** (`__Host-rd_raw`): the same claim, valid for an hour.
     **Sliding refresh:** an admitted raw request renews it once less than
     half its life is left, so a page left open keeps loading. The renewal
@@ -284,21 +292,28 @@ lives on redrop's own pages instead.
 * **Direct views.** `?redrop-info=0` on a framed artifact, and every page of
   an artifact with the info button off, are served directly on the shared
   link, as before.
-  * **The choice lasts for the visit.** `?redrop-info=0` sets a signed,
-    host-only cookie (30 minutes, bound to the artifact and its access
-    generation), so the pages and frames a direct view loads stay direct.
-    `?redrop-info=1` returns to the viewer and clears it.
-  * **Only the visitor makes the choice.** The cookie is set or cleared only
-    by a top-level navigation the visitor started: `Sec-Fetch-Dest:
-    document` with `Sec-Fetch-Site: none` (typed, bookmarked) or
-    `same-origin`. It is never set without Fetch Metadata.
-    * A subresource, fetch, or page load from another artifact on the same
-      site still gets a direct response for itself, but can't switch this
+  * **When the choice is remembered.** `?redrop-info=0` is remembered for
+    30 minutes in a signed, host-only cookie (bound to the artifact and its
+    access generation) when the link is opened directly (typed, bookmarked,
+    opened from another app) or from the same page. The pages and frames
+    that direct view loads then stay direct. `?redrop-info=1` returns to the
+    viewer and clears it.
+  * **Clicked on another website, only that page is direct.** The cookie is
+    set or cleared only by a top-level navigation from the address bar or
+    from this origin: `Sec-Fetch-Dest: document` with `Sec-Fetch-Site:
+    none` or `same-origin`. A link clicked on another website arrives as
+    `cross-site`: that page is direct, and the next page opened from it gets
+    the viewer again. The cookie is never set without Fetch Metadata.
+    * Allowing `cross-site` would let any page anywhere switch the viewer
+      off. Allowing `same-site` would let another artifact on the content
+      domain do it, with an image, a fetch, or a page load. Such requests
+      still get a direct response for themselves, but can't switch this
       link's viewer off for the visitor's later visits.
     * A cookie that is already set is honoured on every request.
   * **Isolation.** These pages run on the same origin as the viewer page, so
-    four measures keep them from reaching it. Another site's pages can't
-    turn the viewer off for a visitor, because of the rule above:
+    four measures keep them from reaching it. Another artifact on the
+    content domain can't turn the viewer off for a visitor, because of the
+    rule above:
     * the viewer page's `Cross-Origin-Opener-Policy: same-origin` (no window
       reference);
     * `frame-ancestors 'none'` (they can't frame it);

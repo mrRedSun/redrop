@@ -125,6 +125,13 @@ func (h *Handler) tooManyMisses(w http.ResponseWriter) {
 	h.pages.message(w, http.StatusTooManyRequests, "Too many requests", "Too many links from your network did not work. Wait a minute and try again.")
 }
 
+// tooManyFrames refuses a frame over its network's quota
+// (REDROP_CONTENT_FRAME_ENTRIES per sharing.EnterWindow). It is not a miss.
+func (h *Handler) tooManyFrames(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(sharing.EnterWindow.Seconds())))
+	h.pages.message(w, http.StatusTooManyRequests, "Too many requests", "Too many pages were opened from your network. Wait a few minutes and reload.")
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
 	if h.serveServerIcon(w, r) || serveViewerAsset(w, r) {
@@ -459,10 +466,6 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 // frame entry, viewer assets, icons. Artifacts can't upload under it.
 const reservedPrefix = "/" + sharing.ReservedPrefix + "/"
 
-// iconPrefix is where server-rendered pages on the content domain link their
-// icons. It is reserved, so it can never collide with artifact files.
-const iconPrefix = reservedPrefix
-
 // fallbackIcons are the paths browsers request without being told to. On an
 // artifact origin they fall back to the redrop icon when the artifact has none.
 var fallbackIcons = map[string]bool{"/favicon.ico": true, "/apple-touch-icon.png": true}
@@ -479,7 +482,7 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
-	name, reserved := strings.CutPrefix(r.URL.Path, iconPrefix)
+	name, reserved := strings.CutPrefix(r.URL.Path, reservedPrefix)
 	if !reserved {
 		if label, ok := h.label(r); !ok || label != "" {
 			return false

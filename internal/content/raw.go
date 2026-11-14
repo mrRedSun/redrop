@@ -59,15 +59,14 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 		h.miss(w, r)
 		return
 	}
-	if g, next, err, isEntry := h.redeemRaw(r, a, host); isEntry {
+	if g, next, isEntry, err := h.redeemRaw(r, a, host); isEntry {
 		switch {
 		case errors.Is(err, sharing.ErrEnterQuota):
 			// A valid token over this client's share: refused, but not a
 			// miss, so no miss budget is spent.
-			w.Header().Set("Retry-After", "120")
-			http.Error(w, "too many pages opened from your network; try again in a few minutes", http.StatusTooManyRequests)
+			h.tooManyFrames(w)
 			return
-		case g == nil:
+		case err != nil:
 			h.miss(w, r)
 			return
 		}
@@ -95,19 +94,22 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 }
 
 // redeemRaw handles the raw host's two ways in: the viewer frame's enter
-// token and the dashboard's preview token. isEntry is false for other paths;
-// g is nil when the token is refused.
-func (h *Handler) redeemRaw(r *http.Request, a *store.Artifact, host ids.Host) (g *sharing.Grant, next string, err error, isEntry bool) {
+// token and the dashboard's preview token. isEntry is false for other paths.
+// On an entry path, g is set exactly when err is nil.
+func (h *Handler) redeemRaw(r *http.Request, a *store.Artifact, host ids.Host) (g *sharing.Grant, next string, isEntry bool, err error) {
 	t := r.URL.Query().Get("t")
 	switch r.URL.Path {
 	case reservedPrefix + "enter":
 		g, err = h.sharing.RedeemEnter(a, host, t, h.missKey(r))
-		return g, safeNext(r.URL.Query().Get("next")), err, true
+		return g, safeNext(r.URL.Query().Get("next")), true, err
 	case reservedPrefix + "preview":
-		g, _ = h.sharing.RedeemRawPreview(a, host, t)
-		return g, "/", nil, true
+		g, ok := h.sharing.RedeemRawPreview(a, host, t)
+		if !ok {
+			return nil, "", true, sharing.ErrEnterRefused
+		}
+		return g, "/", true, nil
 	}
-	return nil, "", nil, false
+	return nil, "", false, nil
 }
 
 // rawAccess admits a raw-host request by its cookie, or reports false.

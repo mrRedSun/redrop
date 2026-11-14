@@ -20,9 +20,6 @@ var schemaV1 string
 // server default (REDROP_INFO_BUTTON_DEFAULT), so existing rows keep it.
 const schemaV2 = `ALTER TABLE artifacts ADD COLUMN info_button INTEGER;`
 
-// schemaV3 was extended (note_public) before its first release; a
-// development database that ran an earlier draft of it must be recreated.
-//
 // schemaV3 adds whether viewers may open older versions (off unless the owner
 // enables it); a version high-water mark, so each version number is used
 // once per artifact and a deleted version's raw origin never serves other
@@ -32,6 +29,9 @@ const schemaV3 = `ALTER TABLE artifacts ADD COLUMN viewer_old_versions INTEGER N
 ALTER TABLE versions ADD COLUMN note_public INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE artifacts ADD COLUMN last_version INTEGER NOT NULL DEFAULT 0;
 UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = artifacts.id), 0));`
+
+// (schemaV3 was extended with note_public before its first release. A
+// development database that ran an earlier draft of it must be recreated.)
 
 var migrations = []string{schemaV1, schemaV2, schemaV3}
 

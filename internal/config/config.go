@@ -56,6 +56,9 @@ type Config struct {
 	// per client network: a burst, then a steady refill per minute.
 	ContentMissBurst     int
 	ContentMissPerMinute int
+	// ContentFrameEntries is how many viewer frames one client network may
+	// open (redeem an enter token for) per 2-minute window.
+	ContentFrameEntries int
 
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
@@ -226,6 +229,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ContentMissPerMinute, err = envPositiveInt("REDROP_CONTENT_MISS_PER_MINUTE", "5"); err != nil {
+		return nil, err
+	}
+	if c.ContentFrameEntries, err = envPositiveInt("REDROP_CONTENT_FRAME_ENTRIES", "200"); err != nil {
 		return nil, err
 	}
 

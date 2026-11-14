@@ -54,8 +54,8 @@ type pageData struct {
 
 // Icon links for server-rendered pages.
 const (
-	serverIcons   = iconPrefix // redrop's own pages: always the redrop icon
-	artifactIcons = ""         // pages showing artifact content: /favicon.ico decides
+	serverIcons   = reservedPrefix // redrop's own pages: always the redrop icon (reserved, so never an artifact file)
+	artifactIcons = ""             // pages showing artifact content: /favicon.ico decides
 )
 
 // render writes a server page. csp replaces the default policy when set.

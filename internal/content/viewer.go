@@ -58,7 +58,7 @@ func serveViewerAsset(w http.ResponseWriter, r *http.Request) bool {
 
 // viewerPage renders the viewer for snap and mints the frame's grants.
 func (h *Handler) viewerPage(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, g sharing.Grants) {
-	f := h.sharing.Frame(a, snap, g, time.Now())
+	f := h.sharing.Frame(a, snap, g)
 	info := h.sharing.ViewerInfo(r.Context(), a, snap)
 	self := h.viewerOrigin(a)
 	target := withoutParams(r.URL, paramVersion, paramInfo)

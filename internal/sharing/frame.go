@@ -97,8 +97,8 @@ func rawHostFor(a *store.Artifact, snap Snapshot) ids.Host {
 }
 
 const (
-	enterTTL     = 2 * time.Minute // enter tokens live only in the viewer page and one redirect
-	rawCookieMax = time.Hour       // one raw cookie; admitted requests renew it (sliding)
+	enterTTL     = EnterWindow // enter tokens live only in the viewer page and one redirect
+	rawCookieMax = time.Hour   // one raw cookie; admitted requests renew it (sliding)
 	// streamMax is how long an address-bar stream token lasts when no visit
 	// or preview grant bounds it (an open link). A viewer page open longer
 	// keeps its frame working (sliding raw cookie) but its address bar stops
@@ -165,10 +165,16 @@ type Frame struct {
 	Stream    string // address-bar relay token for the shared link's /__redrop/location
 }
 
+// EnterWindow is how long an enter token is valid, and the window of the
+// per-client frame quota (REDROP_CONTENT_FRAME_ENTRIES). A client refused by
+// the quota can retry after it.
+const EnterWindow = 2 * time.Minute
+
 // Frame mints the grants for one viewer page load of snap. Call it only
 // after Decide returned Serve or ServeOwnerPreview for g. The raw cookie it
 // leads to expires within rawCookieMax and never after the visit grant.
-func (s *Service) Frame(a *store.Artifact, snap Snapshot, g Grants, now time.Time) Frame {
+func (s *Service) Frame(a *store.Artifact, snap Snapshot, g Grants) Frame {
+	now := s.clock()
 	kind, limit := rawOpen, time.Time{}
 	if visitExp, ok := grantExpiry(s.accessSigner, g.Visit, a, "visit"); ok && Gated(a) {
 		kind, limit = rawVisit, visitExp
@@ -199,7 +205,9 @@ func grantExpiry(signer *security.Signer, value string, a *store.Artifact, kind 
 }
 
 // SetClock replaces the clock of the viewer-frame grants and their signers.
-// For tests only: it lets them move past cookie lifetimes.
+// Tests only: it lets them move past cookie lifetimes. It is exported because
+// the integration tests in internal/app need it; production code never calls
+// it. Signers not yet built are skipped.
 func (s *Service) SetClock(now func() time.Time) {
 	s.now = now
 	for _, sg := range []*security.Signer{s.enterSigner, s.rawSigner, s.streamSigner, s.directSigner, s.accessSigner, s.previewSigner} {
@@ -224,38 +232,65 @@ func minTime(a, b time.Time) time.Time {
 	return a
 }
 
-// ErrEnterQuota refuses a valid enter token because its client redeemed
-// more than its share recently. It is not a miss: callers answer without
-// spending the client's miss budget.
-var ErrEnterQuota = errors.New("too many frames from this client")
+// Why RedeemEnter refused a token. It returns a raw cookie exactly when it
+// returns no error.
+var (
+	// ErrEnterRefused: not a valid, unused enter token for this artifact
+	// and host. Callers answer with the identical miss.
+	ErrEnterRefused = errors.New("enter token refused")
+	// ErrEnterQuota: a valid token, but its client opened more frames than
+	// REDROP_CONTENT_FRAME_ENTRIES within EnterWindow. Not a miss: callers
+	// refuse without spending the client's miss budget.
+	ErrEnterQuota = errors.New("too many frames from this client")
+)
 
 // RedeemEnter turns an enter token into the raw cookie for host. client
 // identifies the visitor's network for the per-client quota (the content
-// transport's miss key). A refused or replayed token is (nil, nil).
+// transport's miss key).
 func (s *Service) RedeemEnter(a *store.Artifact, host ids.Host, token, client string) (*Grant, error) {
 	p, ok := s.enterSigner.Verify(token)
 	if !ok {
-		return nil, nil
+		return nil, ErrEnterRefused
 	}
 	c, ok := parseRawClaim(p)
 	if !ok || !host.IsRaw() || c.ID != a.ID || c.Gen != a.AccessGen || c.Version != host.Version() {
-		return nil, nil
+		return nil, ErrEnterRefused
 	}
-	switch s.entered.use(c.Frame, client, s.clock()) {
+	now := s.clock()
+	res := s.entered.use(c.Frame, client, now, s.cfg.ContentFrameEntries)
+	s.reportEntryPressure(now)
+	switch res {
 	case enterReplay:
-		return nil, nil
+		return nil, ErrEnterRefused
 	case enterOverQuota:
 		return nil, ErrEnterQuota
 	}
-	g, _ := s.rawCookie(c, s.clock())
-	return g, nil
+	if g, ok := s.rawCookie(c, now); ok {
+		return g, nil
+	}
+	return nil, ErrEnterRefused
+}
+
+// pressureReportEvery is how often, at most, entry pressure is logged.
+const pressureReportEvery = time.Minute
+
+// reportEntryPressure logs, at most once per pressureReportEvery, how many
+// unexpired ids the full set forgot early (single use degraded to the
+// replay window) and how many redemptions the quota refused. Counts only:
+// never tokens, frame ids, or client addresses.
+func (s *Service) reportEntryPressure(now time.Time) {
+	if evicted, refused, ok := s.entered.pressure(now, pressureReportEvery); ok {
+		s.log.Warn("viewer frame entry pressure",
+			"evicted_unexpired", evicted, "quota_refusals", refused, "since", pressureReportEvery.String())
+	}
 }
 
 // usedFrames makes enter tokens single-use: it remembers the frame ids
 // redeemed within the last enterTTL (a token can't be valid longer).
 //
-//   - Fair: one client (network) may redeem at most enterQuota frames per
-//     enterTTL, so it alone can't fill the set.
+//   - Fair: one client (network) may redeem at most quota frames
+//     (REDROP_CONTENT_FRAME_ENTRIES) per enterTTL, so it alone can't fill the
+//     set: filling it takes maxUsedFrames/quota clients at once.
 //   - Bounded: at most maxUsedFrames ids. When full, the oldest ids are
 //     forgotten early, so a new frame always enters. Under an attack that
 //     keeps the set full (many clients at once), the guarantee degrades to
@@ -269,6 +304,10 @@ type usedFrames struct {
 	seen      map[string]struct{}
 	order     []usedFrame
 	perClient map[string]int
+
+	// Pressure since the last report (see pressure).
+	evictedEarly, quotaRefused int
+	lastReport                 time.Time
 }
 
 type usedFrame struct {
@@ -276,10 +315,7 @@ type usedFrame struct {
 	until         time.Time
 }
 
-const (
-	maxUsedFrames = 100_000
-	enterQuota    = 200 // frames per client per enterTTL
-)
+const maxUsedFrames = 100_000
 
 type enterResult int
 
@@ -289,7 +325,7 @@ const (
 	enterOverQuota
 )
 
-func (u *usedFrames) use(frame, client string, now time.Time) enterResult {
+func (u *usedFrames) use(frame, client string, now time.Time, quota int) enterResult {
 	if frame == "" {
 		return enterReplay
 	}
@@ -304,16 +340,32 @@ func (u *usedFrames) use(frame, client string, now time.Time) enterResult {
 	switch _, used := u.seen[frame]; {
 	case used:
 		return enterReplay
-	case u.perClient[client] >= enterQuota:
+	case u.perClient[client] >= quota:
+		u.quotaRefused++
 		return enterOverQuota
 	}
 	for len(u.order) >= maxUsedFrames { // full: forget the oldest early
 		u.dropOldestLocked()
+		u.evictedEarly++
 	}
 	u.seen[frame] = struct{}{}
 	u.perClient[client]++
 	u.order = append(u.order, usedFrame{frame: frame, client: client, until: now.Add(enterTTL)})
 	return enterOK
+}
+
+// pressure returns the early evictions and quota refusals counted since the
+// last report, and resets them, when there are some and at least every has
+// passed since that report.
+func (u *usedFrames) pressure(now time.Time, every time.Duration) (evicted, refused int, report bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.evictedEarly+u.quotaRefused == 0 || (!u.lastReport.IsZero() && now.Sub(u.lastReport) < every) {
+		return 0, 0, false
+	}
+	evicted, refused = u.evictedEarly, u.quotaRefused
+	u.evictedEarly, u.quotaRefused, u.lastReport = 0, 0, now
+	return evicted, refused, true
 }
 
 func (u *usedFrames) dropOldestLocked() {

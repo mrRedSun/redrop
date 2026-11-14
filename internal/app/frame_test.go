@@ -599,8 +599,32 @@ func TestDirectChoiceOnlyByVisitor(t *testing.T) {
 			t.Errorf("%s did not record the direct choice", name)
 		}
 	}
+	// Documented expectation (owner decision N1): a ?redrop-info=0 link
+	// clicked on another website is direct for that page only. The next page
+	// the visitor opens from it, from the same origin, gets the viewer again.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte(`<a href="/page.html">p</a>`), 0o600)
+	os.WriteFile(filepath.Join(dir, "page.html"), []byte("<p>page</p>"), 0o600)
+	b, err := c.Share(context.Background(), &client.Source{Path: dir}, client.PublishOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clicked := map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-User": "?1"}
+	r, got := h.page("GET", b.URL, "/?redrop-info=0", clicked)
+	recorded := false
+	for _, ck := range r.Cookies() {
+		recorded = recorded || ck.Name == "rd_direct"
+	}
+	if r.StatusCode != 200 || strings.Contains(got, `id="rd-frame"`) || recorded {
+		t.Fatalf("cross-site click: %d, direct=%v, choice recorded=%v", r.StatusCode, !strings.Contains(got, `id="rd-frame"`), recorded)
+	}
+	sameOrigin := map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1"}
+	if _, got := h.page("GET", b.URL, "/page.html", sameOrigin, r.Cookies()...); !strings.Contains(got, `id="rd-frame"`) {
+		t.Fatal("after a cross-site direct link, the next same-origin page should get the viewer")
+	}
+
 	// A same-site page can't clear a visitor's choice either.
-	r, _ := h.page("GET", a.URL, "/?redrop-info=1", map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-site"})
+	r, _ = h.page("GET", a.URL, "/?redrop-info=1", map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-site"})
 	for _, ck := range r.Cookies() {
 		if ck.Name == "rd_direct" {
 			t.Error("a same-site navigation cleared the direct choice")

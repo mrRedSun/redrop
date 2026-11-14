@@ -1,9 +1,13 @@
 package sharing
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +26,7 @@ func frameService(t *testing.T) *Service {
 	s.streamSigner = security.NewSigner(secret, "frame-stream")
 	s.cfg.ContentURL, _ = url.Parse("https://usercontent.example")
 	s.cfg.InfoButtonDefault = true
+	s.cfg.ContentFrameEntries = testQuota
 	return s
 }
 
@@ -35,7 +40,7 @@ func framedArtifact() *store.Artifact {
 // enter runs the frame bootstrap: a viewer load's grants redeemed on host.
 func enter(t *testing.T, s *Service, a *store.Artifact, g Grants, host ids.Host) (*Grant, bool) {
 	t.Helper()
-	f := s.Frame(a, CurrentSnapshot(a), g, time.Now())
+	f := s.Frame(a, CurrentSnapshot(a), g)
 	if want := "https://" + testSlug + "--raw.usercontent.example"; f.RawOrigin != want {
 		t.Fatalf("raw origin %q, want %q", f.RawOrigin, want)
 	}
@@ -66,7 +71,7 @@ func TestRawGrants(t *testing.T) {
 	}
 	other := framedArtifact()
 	other.ID = "a2"
-	f := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now())
+	f := s.Frame(a, CurrentSnapshot(a), Grants{})
 	if _, ok := redeem(s, other, raw, f.Enter); ok {
 		t.Error("enter token accepted for another artifact")
 	}
@@ -175,7 +180,7 @@ func TestRawPreview(t *testing.T) {
 func TestStreamFrame(t *testing.T) {
 	s := frameService(t)
 	a := framedArtifact()
-	f := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now())
+	f := s.Frame(a, CurrentSnapshot(a), Grants{})
 	frame, exp, ok := s.StreamFrame(a, f.Stream)
 	if !ok || frame == "" || time.Until(exp) > 12*time.Hour {
 		t.Fatalf("stream: %v %q %v", ok, frame, exp)
@@ -193,7 +198,7 @@ func TestStreamFrame(t *testing.T) {
 	if _, _, ok := s.StreamFrame(a, f.Stream); ok {
 		t.Error("stream token survived a generation change")
 	}
-	if f2 := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now()); f2.Stream == f.Stream {
+	if f2 := s.Frame(a, CurrentSnapshot(a), Grants{}); f2.Stream == f.Stream {
 		t.Error("two viewer loads share a frame id")
 	}
 }
@@ -205,10 +210,16 @@ func fakeClock(s *Service, start time.Time) *time.Time {
 	return &now
 }
 
+// testQuota is the per-client frame quota in these tests (the default).
+const testQuota = 200
+
 // redeem is RedeemEnter for one test client; ok reports a raw cookie.
 func redeem(s *Service, a *store.Artifact, host ids.Host, token string) (*Grant, bool) {
 	g, err := s.RedeemEnter(a, host, token, "client")
-	return g, err == nil && g != nil
+	if (g != nil) != (err == nil) {
+		panic("RedeemEnter: a grant must come exactly without an error")
+	}
+	return g, err == nil
 }
 
 // TestRawCookieSlidingRefresh: a page left open keeps working past one
@@ -269,7 +280,7 @@ func TestEnterTokenExpiry(t *testing.T) {
 	t0 := time.Now().Truncate(time.Second)
 	now := fakeClock(s, t0)
 	a := framedArtifact()
-	f := s.Frame(a, CurrentSnapshot(a), Grants{}, t0)
+	f := s.Frame(a, CurrentSnapshot(a), Grants{})
 	*now = t0.Add(enterTTL + time.Second)
 	if _, ok := redeem(s, a, ids.RawHost(testSlug, 0), f.Enter); ok {
 		t.Fatal("expired enter token redeemed")
@@ -282,7 +293,7 @@ func TestEnterTokenSingleUse(t *testing.T) {
 	s := frameService(t)
 	a := framedArtifact()
 	raw := ids.RawHost(testSlug, 0)
-	f := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now())
+	f := s.Frame(a, CurrentSnapshot(a), Grants{})
 	other := framedArtifact()
 	other.ID = "a2"
 	if _, ok := redeem(s, other, raw, f.Enter); ok {
@@ -295,26 +306,26 @@ func TestEnterTokenSingleUse(t *testing.T) {
 		t.Fatal("enter token replayed")
 	}
 
-	// One client gets enterQuota frames per enterTTL; others are unaffected,
+	// One client gets testQuota frames per enterTTL; others are unaffected,
 	// and the refusal is not a miss.
 	var u usedFrames
 	t0 := time.Now()
-	for i := range enterQuota {
-		if u.use("f"+strconv.Itoa(i), "greedy", t0) != enterOK {
+	for i := range testQuota {
+		if u.use("f"+strconv.Itoa(i), "greedy", t0, testQuota) != enterOK {
 			t.Fatalf("frame %d refused", i)
 		}
 	}
-	if got := u.use("one-more", "greedy", t0); got != enterOverQuota {
+	if got := u.use("one-more", "greedy", t0, testQuota); got != enterOverQuota {
 		t.Fatalf("over quota: %v", got)
 	}
-	if got := u.use("fresh", "someone-else", t0); got != enterOK {
+	if got := u.use("fresh", "someone-else", t0, testQuota); got != enterOK {
 		t.Fatalf("another client was refused: %v", got)
 	}
-	if got := u.use("f0", "someone-else", t0); got != enterReplay {
+	if got := u.use("f0", "someone-else", t0, testQuota); got != enterReplay {
 		t.Fatalf("replay by another client: %v", got)
 	}
 	// The window slides: after enterTTL the client's share is back.
-	if got := u.use("later", "greedy", t0.Add(enterTTL)); got != enterOK || len(u.order) != 1 {
+	if got := u.use("later", "greedy", t0.Add(enterTTL), testQuota); got != enterOK || len(u.order) != 1 {
 		t.Fatalf("after the window: %v, %d kept", got, len(u.order))
 	}
 }
@@ -326,22 +337,69 @@ func TestEnterSetFull(t *testing.T) {
 	var u usedFrames
 	t0 := time.Now()
 	for i := range maxUsedFrames {
-		u.use("f"+strconv.Itoa(i), "c"+strconv.Itoa(i/enterQuota), t0)
+		u.use("f"+strconv.Itoa(i), "c"+strconv.Itoa(i/testQuota), t0, testQuota)
 	}
-	if got := u.use("fresh", "new-client", t0); got != enterOK {
+	if got := u.use("fresh", "new-client", t0, testQuota); got != enterOK {
 		t.Fatalf("a fresh frame from another client was refused: %v", got)
 	}
 	if len(u.order) != maxUsedFrames || len(u.seen) != maxUsedFrames {
 		t.Fatalf("set grew past its bound: %d/%d", len(u.order), len(u.seen))
 	}
-	if got := u.use("f1", "new-client", t0); got != enterReplay {
+	if got := u.use("f1", "new-client", t0, testQuota); got != enterReplay {
 		t.Fatalf("a recent id was forgotten: %v", got)
 	}
-	if got := u.use("f0", "new-client", t0); got != enterOK {
+	if got := u.use("f0", "new-client", t0, testQuota); got != enterOK {
 		t.Fatalf("the oldest id should have made room (replayable within enterTTL): %v", got)
 	}
 	// f0 and then f1 (both c0's) were evicted to make room.
-	if u.perClient["c0"] != enterQuota-2 {
+	if u.perClient["c0"] != testQuota-2 {
 		t.Fatalf("eviction did not release the evicted client's share: %d", u.perClient["c0"])
+	}
+}
+
+// TestEntryPressureReported: early evictions and quota refusals are logged,
+// as counts only, at most once per pressureReportEvery.
+func TestEntryPressureReported(t *testing.T) {
+	s := frameService(t)
+	var logs bytes.Buffer
+	s.log = slog.New(slog.NewTextHandler(&logs, nil))
+	t0 := time.Now()
+	now := fakeClock(s, t0)
+	s.cfg.ContentFrameEntries = 1
+	a := framedArtifact()
+	raw := ids.RawHost(testSlug, 0)
+
+	if _, err := s.RedeemEnter(a, raw, s.Frame(a, CurrentSnapshot(a), Grants{}).Enter, "10.0.0.7"); err != nil {
+		t.Fatal(err)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("logged without pressure: %s", logs.String())
+	}
+	f := s.Frame(a, CurrentSnapshot(a), Grants{})
+	if _, err := s.RedeemEnter(a, raw, f.Enter, "10.0.0.7"); !errors.Is(err, ErrEnterQuota) {
+		t.Fatalf("over quota: %v", err)
+	}
+	line := logs.String()
+	if !strings.Contains(line, "quota_refusals=1") || !strings.Contains(line, "evicted_unexpired=0") ||
+		strings.Contains(line, "10.0.0.7") || strings.Contains(line, f.Enter) {
+		t.Fatalf("pressure log: %q", line)
+	}
+	// Within the minute: counted, not logged again.
+	logs.Reset()
+	s.RedeemEnter(a, raw, s.Frame(a, CurrentSnapshot(a), Grants{}).Enter, "10.0.0.7")
+	if logs.Len() != 0 {
+		t.Fatalf("logged twice within a minute: %s", logs.String())
+	}
+	// A full set's early evictions are counted too.
+	s.cfg.ContentFrameEntries = maxUsedFrames
+	for i := range maxUsedFrames {
+		s.entered.use("x"+strconv.Itoa(i), "c", *now, maxUsedFrames)
+	}
+	*now = t0.Add(pressureReportEvery)
+	if _, err := s.RedeemEnter(a, raw, s.Frame(a, CurrentSnapshot(a), Grants{}).Enter, "10.0.0.8"); err != nil {
+		t.Fatal(err)
+	}
+	if line := logs.String(); !strings.Contains(line, "quota_refusals=1") || !strings.Contains(line, "evicted_unexpired=") || strings.Contains(line, "evicted_unexpired=0 ") {
+		t.Fatalf("eviction not reported: %q", line)
 	}
 }
