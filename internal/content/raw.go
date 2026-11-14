@@ -67,10 +67,6 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 			w.Header().Set("Retry-After", "120")
 			http.Error(w, "too many pages opened from your network; try again in a few minutes", http.StatusTooManyRequests)
 			return
-		case errors.Is(err, sharing.ErrEnterBusy):
-			w.Header().Set("Retry-After", "120")
-			http.Error(w, "too many pages opened recently; try again in a few minutes", http.StatusServiceUnavailable)
-			return
 		case g == nil:
 			h.miss(w, r)
 			return

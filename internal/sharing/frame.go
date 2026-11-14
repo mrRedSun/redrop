@@ -224,13 +224,10 @@ func minTime(a, b time.Time) time.Time {
 	return a
 }
 
-// Refusals of a valid enter token that are not misses: the token is fine,
-// the server just won't admit this redemption now. Callers answer without
+// ErrEnterQuota refuses a valid enter token because its client redeemed
+// more than its share recently. It is not a miss: callers answer without
 // spending the client's miss budget.
-var (
-	ErrEnterQuota = errors.New("too many frames from this client")
-	ErrEnterBusy  = errors.New("too many frames opened recently")
-)
+var ErrEnterQuota = errors.New("too many frames from this client")
 
 // RedeemEnter turns an enter token into the raw cookie for host. client
 // identifies the visitor's network for the per-client quota (the content
@@ -249,8 +246,6 @@ func (s *Service) RedeemEnter(a *store.Artifact, host ids.Host, token, client st
 		return nil, nil
 	case enterOverQuota:
 		return nil, ErrEnterQuota
-	case enterFull:
-		return nil, ErrEnterBusy
 	}
 	g, _ := s.rawCookie(c, s.clock())
 	return g, nil
@@ -261,9 +256,11 @@ func (s *Service) RedeemEnter(a *store.Artifact, host ids.Host, token, client st
 //
 //   - Fair: one client (network) may redeem at most enterQuota frames per
 //     enterTTL, so it alone can't fill the set.
-//   - Bounded: at most maxUsedFrames ids. When it is full of unexpired ids it
-//     refuses new redemptions (ErrEnterBusy) rather than forgetting ids that
-//     could then be replayed.
+//   - Bounded: at most maxUsedFrames ids. When full, the oldest ids are
+//     forgotten early, so a new frame always enters. Under an attack that
+//     keeps the set full (many clients at once), the guarantee degrades to
+//     the pre-single-use one: a token is replayable for at most enterTTL.
+//     That is chosen over failing closed, which would be an outage.
 //
 // Entries are kept in redemption order; all expire enterTTL after
 // redemption, so the oldest are always at the front.
@@ -290,7 +287,6 @@ const (
 	enterOK enterResult = iota
 	enterReplay
 	enterOverQuota
-	enterFull
 )
 
 func (u *usedFrames) use(frame, client string, now time.Time) enterResult {
@@ -303,26 +299,31 @@ func (u *usedFrames) use(frame, client string, now time.Time) enterResult {
 		u.seen, u.perClient = map[string]struct{}{}, map[string]int{}
 	}
 	for len(u.order) > 0 && !now.Before(u.order[0].until) { // expired
-		e := u.order[0]
-		u.order[0] = usedFrame{}
-		u.order = u.order[1:]
-		delete(u.seen, e.frame)
-		if u.perClient[e.client]--; u.perClient[e.client] <= 0 {
-			delete(u.perClient, e.client)
-		}
+		u.dropOldestLocked()
 	}
 	switch _, used := u.seen[frame]; {
 	case used:
 		return enterReplay
 	case u.perClient[client] >= enterQuota:
 		return enterOverQuota
-	case len(u.order) >= maxUsedFrames:
-		return enterFull
+	}
+	for len(u.order) >= maxUsedFrames { // full: forget the oldest early
+		u.dropOldestLocked()
 	}
 	u.seen[frame] = struct{}{}
 	u.perClient[client]++
 	u.order = append(u.order, usedFrame{frame: frame, client: client, until: now.Add(enterTTL)})
 	return enterOK
+}
+
+func (u *usedFrames) dropOldestLocked() {
+	e := u.order[0]
+	u.order[0] = usedFrame{}
+	u.order = u.order[1:]
+	delete(u.seen, e.frame)
+	if u.perClient[e.client]--; u.perClient[e.client] <= 0 {
+		delete(u.perClient, e.client)
+	}
 }
 
 // rawCookie signs c as a raw cookie issued at now.

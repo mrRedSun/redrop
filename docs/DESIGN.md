@@ -235,10 +235,11 @@ lives on redrop's own pages instead.
       frames per 2 minutes. Over that, a valid token gets `429` with
       `Retry-After`. That is not a miss, so it spends no miss budget, and
       other clients are unaffected.
-    * **When the set is full** of unexpired ids (more than 500 clients at
-      their quota at once), a valid token gets `503` with `Retry-After`,
-      also not a miss. Ids are never forgotten early, because that would
-      reopen replay.
+    * **When the set is full** (more than 500 clients at their quota at
+      once), the oldest ids are forgotten early, so a new frame always
+      enters. Under an attack that keeps the set full, the single-use
+      guarantee therefore degrades to the 2-minute replay window (a copied
+      token works until it expires), rather than to an outage.
   * **Raw cookie** (`__Host-rd_raw`): the same claim, valid for an hour.
     **Sliding refresh:** an admitted raw request renews it once less than
     half its life is left, so a page left open keeps loading. The renewal

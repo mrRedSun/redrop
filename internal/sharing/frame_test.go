@@ -319,21 +319,29 @@ func TestEnterTokenSingleUse(t *testing.T) {
 	}
 }
 
-// TestEnterSetFull: the set never forgets an unexpired id. When it is full
-// the redemption is refused as busy (not a miss); expired ids make room.
+// TestEnterSetFull: when the set is full, the oldest ids are forgotten
+// early, so a fresh frame from another client still enters. (Under such a
+// flood a forgotten token is replayable until it expires: enterTTL.)
 func TestEnterSetFull(t *testing.T) {
 	var u usedFrames
 	t0 := time.Now()
 	for i := range maxUsedFrames {
 		u.use("f"+strconv.Itoa(i), "c"+strconv.Itoa(i/enterQuota), t0)
 	}
-	if got := u.use("fresh", "new-client", t0); got != enterFull {
-		t.Fatalf("full set: %v", got)
+	if got := u.use("fresh", "new-client", t0); got != enterOK {
+		t.Fatalf("a fresh frame from another client was refused: %v", got)
+	}
+	if len(u.order) != maxUsedFrames || len(u.seen) != maxUsedFrames {
+		t.Fatalf("set grew past its bound: %d/%d", len(u.order), len(u.seen))
 	}
 	if got := u.use("f1", "new-client", t0); got != enterReplay {
-		t.Fatalf("an id was forgotten early: %v", got)
+		t.Fatalf("a recent id was forgotten: %v", got)
 	}
-	if got := u.use("fresh", "new-client", t0.Add(enterTTL)); got != enterOK {
-		t.Fatalf("expired ids did not make room: %v", got)
+	if got := u.use("f0", "new-client", t0); got != enterOK {
+		t.Fatalf("the oldest id should have made room (replayable within enterTTL): %v", got)
+	}
+	// f0 and then f1 (both c0's) were evicted to make room.
+	if u.perClient["c0"] != enterQuota-2 {
+		t.Fatalf("eviction did not release the evicted client's share: %d", u.perClient["c0"])
 	}
 }
