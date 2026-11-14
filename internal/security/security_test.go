@@ -57,10 +57,33 @@ func TestSigner(t *testing.T) {
 
 func TestLimiter(t *testing.T) {
 	l := NewLimiter(2, time.Minute)
+	t.Cleanup(l.Close)
 	if !l.Allow("k") || !l.Allow("k") || l.Allow("k") {
 		t.Error("limiter did not cap at 2")
 	}
 	if !l.Allow("other") {
 		t.Error("keys are not independent")
+	}
+}
+
+// Close returns only after the sweeper goroutine has exited, so done is
+// already closed when it returns. A long window keeps the ticker from
+// firing during the test.
+func TestLimiterCloseStopsSweeper(t *testing.T) {
+	l := NewLimiter(1, time.Hour)
+	select {
+	case <-l.done:
+		t.Fatal("sweeper exited before Close")
+	default:
+	}
+	l.Close()
+	select {
+	case <-l.done:
+	default:
+		t.Fatal("Close returned while the sweeper was still running")
+	}
+	l.Close() // idempotent
+	if !l.Allow("k") || l.Allow("k") || !l.Blocked("k") {
+		t.Error("a closed limiter must still limit")
 	}
 }

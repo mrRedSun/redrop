@@ -99,6 +99,14 @@ func New(db *store.Store, cfg *config.Config, secret []byte, log *slog.Logger) *
 	return s
 }
 
+// Close stops the rate limiters' background sweepers. The service stays
+// usable; call it once requests have drained, at shutdown.
+func (s *Service) Close() {
+	s.loginLimiter.Close()
+	s.loginIPLimiter.Close()
+	s.linkLimiter.Close()
+}
+
 // --- authentication ---
 
 // AuthenticateToken resolves an "rdp_…" bearer token.

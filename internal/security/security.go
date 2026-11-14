@@ -131,11 +131,17 @@ func (s *Signer) Verify(v string) (string, bool) {
 
 // --- rate limiting (fixed window per key) ---
 
+// Limiter is a fixed-window counter per key. A background goroutine drops
+// expired windows once per window; Close stops it.
 type Limiter struct {
 	mu     sync.Mutex
 	limit  int
 	window time.Duration
 	hits   map[string]*bucket
+
+	stop      chan struct{} // closed by Close
+	done      chan struct{} // closed when the sweeper has returned
+	closeOnce sync.Once
 }
 
 type bucket struct {
@@ -144,19 +150,41 @@ type bucket struct {
 }
 
 func NewLimiter(limit int, window time.Duration) *Limiter {
-	l := &Limiter{limit: limit, window: window, hits: map[string]*bucket{}}
-	go func() {
-		for range time.Tick(window) {
+	l := &Limiter{
+		limit: limit, window: window, hits: map[string]*bucket{},
+		stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	go l.sweep()
+	return l
+}
+
+func (l *Limiter) sweep() {
+	defer close(l.done)
+	t := time.NewTicker(l.window)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-t.C:
 			l.mu.Lock()
 			for k, b := range l.hits {
-				if time.Since(b.start) > window {
+				if time.Since(b.start) > l.window {
 					delete(l.hits, k)
 				}
 			}
 			l.mu.Unlock()
 		}
-	}()
-	return l
+	}
+}
+
+// Close stops the sweeper and returns once it has exited. It is safe to
+// call more than once. Allow and Blocked keep working afterwards, without
+// expired windows being dropped, so a request that outlives shutdown is
+// still limited.
+func (l *Limiter) Close() {
+	l.closeOnce.Do(func() { close(l.stop) })
+	<-l.done
 }
 
 // Allow records a hit and reports whether the key is within its limit.
