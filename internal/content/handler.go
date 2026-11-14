@@ -160,7 +160,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveRaw(w, r, host)
 		return
 	}
-	reserved := "/" + sharing.ReservedPrefix + "/"
+	reserved := reservedPrefix
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == reserved+"open") {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -284,24 +284,41 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 		v := h.sharing.ViewerInfo(r.Context(), a, snap)
 		info = &v
 	}
-	h.serveContent(w, r, a, snap, info)
+	h.serveContent(w, r, a, snap, mode, info)
 }
 
 // directView reports whether this request gets the direct, frameless view:
 // ?redrop-info=0 chooses it for the visit (a signed host-only cookie, so the
 // pages and frames that view loads stay direct), ?redrop-info=1 goes back.
+//
+// The choice is only recorded (or cleared) by a top-level navigation the
+// visitor started: typed, bookmarked, or followed from the same origin. A
+// same-site subresource or page (another artifact on the content domain) can
+// still get a direct response for itself, but can't switch this link's
+// viewer off for the visitor's next visits.
 func (h *Handler) directView(w http.ResponseWriter, r *http.Request, a *store.Artifact) bool {
+	choose := r.Method == http.MethodGet && visitorNavigation(r)
 	switch r.URL.Query().Get(paramInfo) {
 	case "0":
-		if r.Method == http.MethodGet {
+		if choose {
 			h.setCookie(w, cookieDirect, h.sharing.DirectChoice(a), false)
 		}
 		return true
 	case "1":
-		http.SetCookie(w, &http.Cookie{Name: h.cookieName(cookieDirect), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !h.cfg.Insecure, SameSite: http.SameSiteLaxMode})
+		if choose {
+			h.clearCookie(w, cookieDirect)
+		}
 		return false
 	}
 	return h.sharing.Direct(a, h.cookieValue(r, cookieDirect))
+}
+
+// visitorNavigation reports a top-level page load the visitor started: from
+// the address bar or a bookmark (Sec-Fetch-Site: none) or from a page of the
+// same origin. Without Fetch Metadata it is never assumed.
+func visitorNavigation(r *http.Request) bool {
+	site := r.Header.Get("Sec-Fetch-Site")
+	return r.Header.Get("Sec-Fetch-Dest") == "document" && (site == "none" || site == "same-origin")
 }
 
 // pageNavigation reports a top-level page load: the only request that gets
@@ -330,14 +347,14 @@ func withoutParams(u *url.URL, names ...string) string {
 // serveContent answers from snap's files on the shared link: the direct view,
 // subresources of a direct view, and the file page. info is the file page's
 // panel, nil without one.
-func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, info *sharing.ViewerInfo) {
+func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, mode sharing.Mode, info *sharing.ViewerInfo) {
 	t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path)
 	switch {
 	case t.Kind == sharing.TargetViewer:
 		h.pages.fileViewer(w, h.sharing, t.File, h.viewerOrigin(a), snap, info, r.URL)
 		return
 	case t.Kind != sharing.TargetFile:
-	case h.sharing.Mode(a, snap) == sharing.ModeFilePage && scriptable(t.File.ContentType):
+	case mode == sharing.ModeFilePage && scriptable(t.File.ContentType):
 		// The file page carries trusted info on this origin; a shared SVG
 		// or HTML file opened here must not be able to script it.
 		w.Header().Set("Content-Security-Policy", "sandbox")
@@ -438,9 +455,13 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
+// reservedPrefix is redrop's own path space on every content host: gates,
+// frame entry, viewer assets, icons. Artifacts can't upload under it.
+const reservedPrefix = "/" + sharing.ReservedPrefix + "/"
+
 // iconPrefix is where server-rendered pages on the content domain link their
 // icons. It is reserved, so it can never collide with artifact files.
-const iconPrefix = "/" + sharing.ReservedPrefix + "/"
+const iconPrefix = reservedPrefix
 
 // fallbackIcons are the paths browsers request without being told to. On an
 // artifact origin they fall back to the redrop icon when the artifact has none.
@@ -478,32 +499,36 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 // icon requests cannot tell hits from misses. Icon requests never record or
 // consume a view.
 func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, host ids.Host) {
-	if host.IsRaw() {
-		if acc, ok := h.rawAccess(r, host); ok {
-			if t := h.sharing.ResolvePath(r.Context(), acc.Snapshot, r.URL.Path); t.Kind == sharing.TargetFile {
-				h.sendFile(w, r, t.File, false)
-				return
-			}
-		}
-		brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)
-		return
-	}
-	slug := host.Slug()
-	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
-	seen := h.cookieValue(r, cookieSeen)
-	if slug != "" && (grants.Visit != "" || grants.Preview != "" || seen != "") {
-		if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
-			d := h.sharing.Decide(a, grants, time.Now())
-			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
-			if proven {
-				if t := h.sharing.ResolvePath(r.Context(), sharing.CurrentSnapshot(a), r.URL.Path); t.Kind == sharing.TargetFile {
-					h.sendFile(w, r, t.File, false)
-					return
-				}
-			}
+	if snap, ok := h.provenIconSource(r, host); ok {
+		if t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind == sharing.TargetFile {
+			h.sendFile(w, r, t.File, false)
+			return
 		}
 	}
 	brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)
+}
+
+// provenIconSource returns the version whose own icon this visitor may get:
+// on a raw host, the one its raw cookie admits; on the shared link, the
+// current one when the visitor holds a visit or preview grant or the "seen"
+// cookie of an ungated link. Without such proof no lookup is made.
+func (h *Handler) provenIconSource(r *http.Request, host ids.Host) (sharing.Snapshot, bool) {
+	if host.IsRaw() {
+		acc, ok := h.rawAccess(r, host)
+		return acc.Snapshot, ok
+	}
+	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
+	seen := h.cookieValue(r, cookieSeen)
+	if host.Slug() == "" || (grants.Visit == "" && grants.Preview == "" && seen == "") {
+		return sharing.Snapshot{}, false
+	}
+	a, err := h.sharing.Lookup(r.Context(), host.Slug())
+	if err != nil {
+		return sharing.Snapshot{}, false
+	}
+	d := h.sharing.Decide(a, grants, time.Now())
+	proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
+	return sharing.CurrentSnapshot(a), proven
 }
 
 // safeNext only allows same-host relative paths outside the reserved space.

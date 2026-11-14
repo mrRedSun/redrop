@@ -16,7 +16,7 @@ cross-platform CLI that agents drive.
   expiry countdown, and remaining views, never who shared them. HTML opens in
   redrop's viewer, with the artifact untouched in a frame from its own origin,
   and the address bar follows the frame. Turn it off per artifact (`--no-info`,
-  or in the dashboard), or for one load with `?redrop-info=0`. Owners can let
+  or in the dashboard), or for a visit with `?redrop-info=0`. Owners can let
   viewers open older versions (`--old-versions`). Change notes on new
   versions are shown to viewers; notes written before this release stay
   private.

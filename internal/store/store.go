@@ -20,6 +20,9 @@ var schemaV1 string
 // server default (REDROP_INFO_BUTTON_DEFAULT), so existing rows keep it.
 const schemaV2 = `ALTER TABLE artifacts ADD COLUMN info_button INTEGER;`
 
+// schemaV3 was extended (note_public) before its first release; a
+// development database that ran an earlier draft of it must be recreated.
+//
 // schemaV3 adds whether viewers may open older versions (off unless the owner
 // enables it); a version high-water mark, so each version number is used
 // once per artifact and a deleted version's raw origin never serves other

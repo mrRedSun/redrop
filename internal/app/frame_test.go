@@ -223,7 +223,8 @@ func TestDirectViews(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _ := h.page("GET", b.URL, "/?redrop-info=0", nav)
+	typed := map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none", "Accept": "text/html"}
+	r, _ := h.page("GET", b.URL, "/?redrop-info=0", typed)
 	var choice *http.Cookie
 	for _, ck := range r.Cookies() {
 		if ck.Name == "rd_direct" {
@@ -245,7 +246,7 @@ func TestDirectViews(t *testing.T) {
 	if _, got := h.page("GET", b.URL, "/page.html", nav, forged); !strings.Contains(got, `id="rd-frame"`) {
 		t.Fatal("a forged direct choice skipped the viewer")
 	}
-	r, got := h.page("GET", b.URL, "/page.html?redrop-info=1", nav, choice)
+	r, got := h.page("GET", b.URL, "/page.html?redrop-info=1", typed, choice)
 	cleared := false
 	for _, ck := range r.Cookies() {
 		cleared = cleared || (ck.Name == "rd_direct" && ck.MaxAge < 0)
@@ -558,5 +559,119 @@ func TestFramedPreview(t *testing.T) {
 	}
 	if r, _ := h.page("GET", raw, "/__redrop/preview?t=bogus", inFrame); r.StatusCode != 404 {
 		t.Errorf("bad preview token: %d, want the miss", r.StatusCode)
+	}
+}
+
+// TestDirectChoiceOnlyByVisitor: ?redrop-info=0 is recorded for the visit
+// only on a top-level navigation the visitor started. Another artifact on the
+// same site can't switch this link's viewer off with an image, a fetch, or a
+// navigation of its own.
+func TestDirectChoiceOnlyByVisitor(t *testing.T) {
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	a := shareFile(t, c, "a.html", "<p>a</p>", client.PublishOptions{})
+	sets := func(hdr map[string]string) bool {
+		r, _ := h.page("GET", a.URL, "/?redrop-info=0", hdr)
+		for _, ck := range r.Cookies() {
+			if ck.Name == "rd_direct" && ck.MaxAge > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	for name, hdr := range map[string]map[string]string{
+		"same-site image":     {"Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Site": "same-site"},
+		"same-site fetch":     {"Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site"},
+		"same-site document":  {"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-site"},
+		"cross-site document": {"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "cross-site"},
+		"same-origin frame":   {"Sec-Fetch-Dest": "iframe", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin"},
+		"no Fetch Metadata":   {"Accept": "text/html"},
+	} {
+		if sets(hdr) {
+			t.Errorf("%s recorded the direct choice", name)
+		}
+	}
+	for name, hdr := range map[string]map[string]string{
+		"typed or bookmarked": {"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"},
+		"same-origin link":    {"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin"},
+	} {
+		if !sets(hdr) {
+			t.Errorf("%s did not record the direct choice", name)
+		}
+	}
+	// A same-site page can't clear a visitor's choice either.
+	r, _ := h.page("GET", a.URL, "/?redrop-info=1", map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-site"})
+	for _, ck := range r.Cookies() {
+		if ck.Name == "rd_direct" {
+			t.Error("a same-site navigation cleared the direct choice")
+		}
+	}
+}
+
+// TestEnterQuota: one network gets a bounded share of frame entries; over
+// it, a valid token is refused with 429 without spending miss budget.
+func TestEnterQuota(t *testing.T) {
+	t.Setenv("REDROP_CONTENT_MISS_BURST", "3")
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	a := shareFile(t, c, "q.html", "<p>q</p>", client.PublishOptions{})
+	var src string
+	for i := 0; ; i++ {
+		_, _, src, _ = h.viewerLoad(a.URL, "/")
+		u, _ := url.Parse(src)
+		r, _ := h.page("GET", src, u.RequestURI(), inFrame)
+		if r.StatusCode == http.StatusTooManyRequests {
+			if i != 200 || r.Header.Get("Retry-After") == "" {
+				t.Fatalf("refused after %d entries (Retry-After %q)", i, r.Header.Get("Retry-After"))
+			}
+			break
+		}
+		if r.StatusCode != http.StatusSeeOther || i > 200 {
+			t.Fatalf("entry %d: %d", i, r.StatusCode)
+		}
+	}
+	// Refusals are not misses: the client's miss budget is untouched.
+	for range 5 {
+		u, _ := url.Parse(src)
+		h.page("GET", src, u.RequestURI(), inFrame)
+	}
+	if r, _ := h.page("GET", a.URL, "/", nav); r.StatusCode != 200 {
+		t.Fatalf("quota refusals spent miss budget: %d", r.StatusCode)
+	}
+}
+
+// TestRawCookieRefreshOverHTTP: a raw response renews the cookie once half
+// its life is gone, and the renewed cookie works past the original hour.
+func TestRawCookieRefreshOverHTTP(t *testing.T) {
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	a := shareFile(t, c, "r.html", "<p>r</p>", client.PublishOptions{})
+	now := time.Now()
+	h.app.Sharing.SetClock(func() time.Time { return now })
+	_, _, src, _ := h.viewerLoad(a.URL, "/")
+	cookie, _ := h.enterFrame(src)
+	raw := rawURL(a.URL, "raw")
+
+	now = now.Add(10 * time.Minute)
+	if r, _ := h.page("GET", raw, "/", inFrame, cookie); r.StatusCode != 200 || len(r.Cookies()) != 0 {
+		t.Fatalf("early: %d, %d cookies", r.StatusCode, len(r.Cookies()))
+	}
+	now = now.Add(40 * time.Minute)
+	r, _ := h.page("GET", raw, "/", inFrame, cookie)
+	var renewed *http.Cookie
+	for _, ck := range r.Cookies() {
+		if ck.Name == "rd_raw" {
+			renewed = ck
+		}
+	}
+	if r.StatusCode != 200 || renewed == nil || renewed.MaxAge != 3600 || !renewed.HttpOnly {
+		t.Fatalf("no renewed raw cookie at 50 minutes: %d %+v", r.StatusCode, renewed)
+	}
+	now = now.Add(50 * time.Minute) // 100 minutes: past the original hour
+	if r, _ := h.page("GET", raw, "/", inFrame, cookie); r.StatusCode != 404 {
+		t.Errorf("original cookie at 100 minutes: %d", r.StatusCode)
+	}
+	if r, b := h.page("GET", raw, "/", inFrame, renewed); r.StatusCode != 200 || b != "<p>r</p>" {
+		t.Errorf("renewed cookie at 100 minutes: %d", r.StatusCode)
 	}
 }

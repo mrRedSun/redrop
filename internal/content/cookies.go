@@ -43,6 +43,11 @@ func (h *Handler) setCookie(w http.ResponseWriter, base string, g *sharing.Grant
 	http.SetCookie(w, c)
 }
 
+// clearCookie removes a cookie set by setCookie (non-cross-site).
+func (h *Handler) clearCookie(w http.ResponseWriter, base string) {
+	http.SetCookie(w, &http.Cookie{Name: h.cookieName(base), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !h.cfg.Insecure, SameSite: http.SameSiteLaxMode})
+}
+
 // setRawCookie writes a raw-host grant. The raw host is framed by the viewer
 // (or the dashboard preview), so its cookie is a cookie in a frame:
 //

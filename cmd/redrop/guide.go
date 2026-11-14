@@ -95,9 +95,10 @@ chunked and resume automatically after network errors.
   Append ?redrop-info=0 to a link for a direct, frameless view, e.g. for
   screenshots; it lasts for that browser's visit (30 minutes), and
   ?redrop-info=1 goes back to the viewer. The address bar does not follow
-  clicks made in a frame nested inside your page, or in an older tab of the
-  same link. In the frame, popups lose window.opener, so sign-in popups that
-  report back through it need the direct view.
+  clicks made in a frame nested inside your page or in an older tab of the
+  same link, nor Back and Forward inside the frame. In the frame, popups lose
+  window.opener, so sign-in popups that report back through it need the direct
+  view.
 - Service workers are not available to shared pages, and an SVG or HTML file
   shared as a file is sandboxed when opened from its file page.
 - Older versions: --old-versions lets viewers open earlier versions from the

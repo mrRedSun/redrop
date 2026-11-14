@@ -40,7 +40,7 @@ type relaySub struct {
 
 const (
 	relayMaxFrames    = 10_000
-	relayFrameTTL     = time.Hour // the longest a raw cookie, and so a frame id, is valid
+	relayFrameTTL     = time.Hour // a frame's last path is kept this long after its last navigation
 	relayMaxPerClient = 4
 	relayMaxStreams   = 1_000
 	relayMaxPath      = 2048

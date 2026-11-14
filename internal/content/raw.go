@@ -1,11 +1,11 @@
 package content
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/sharing"
@@ -35,7 +35,7 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 	// nothing about whether the artifact exists.
 	if r.Header.Get("Sec-Fetch-Dest") == "document" {
 		target := r.URL.EscapedPath()
-		if strings.HasPrefix(target, "/"+sharing.ReservedPrefix+"/") {
+		if strings.HasPrefix(target, reservedPrefix) {
 			target = "/"
 		} else if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
@@ -59,8 +59,19 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 		h.miss(w, r)
 		return
 	}
-	if g, next, isEntry := h.redeemRaw(r, a, host); isEntry {
-		if g == nil {
+	if g, next, err, isEntry := h.redeemRaw(r, a, host); isEntry {
+		switch {
+		case errors.Is(err, sharing.ErrEnterQuota):
+			// A valid token over this client's share: refused, but not a
+			// miss, so no miss budget is spent.
+			w.Header().Set("Retry-After", "120")
+			http.Error(w, "too many pages opened from your network; try again in a few minutes", http.StatusTooManyRequests)
+			return
+		case errors.Is(err, sharing.ErrEnterBusy):
+			w.Header().Set("Retry-After", "120")
+			http.Error(w, "too many pages opened recently; try again in a few minutes", http.StatusServiceUnavailable)
+			return
+		case g == nil:
 			h.miss(w, r)
 			return
 		}
@@ -69,11 +80,11 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 		http.Redirect(w, r, next, http.StatusSeeOther)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/"+sharing.ReservedPrefix+"/") {
+	if strings.HasPrefix(r.URL.Path, reservedPrefix) {
 		h.miss(w, r)
 		return
 	}
-	acc, ok := h.sharing.AuthorizeRaw(r.Context(), a, host, h.cookieValue(r, cookieRaw), time.Now())
+	acc, ok := h.sharing.AuthorizeRaw(r.Context(), a, host, h.cookieValue(r, cookieRaw))
 	if !ok {
 		h.miss(w, r)
 		return
@@ -90,17 +101,17 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 // redeemRaw handles the raw host's two ways in: the viewer frame's enter
 // token and the dashboard's preview token. isEntry is false for other paths;
 // g is nil when the token is refused.
-func (h *Handler) redeemRaw(r *http.Request, a *store.Artifact, host ids.Host) (g *sharing.Grant, next string, isEntry bool) {
+func (h *Handler) redeemRaw(r *http.Request, a *store.Artifact, host ids.Host) (g *sharing.Grant, next string, err error, isEntry bool) {
 	t := r.URL.Query().Get("t")
 	switch r.URL.Path {
-	case "/" + sharing.ReservedPrefix + "/enter":
-		g, _ = h.sharing.RedeemEnter(a, host, t)
-		return g, safeNext(r.URL.Query().Get("next")), true
-	case "/" + sharing.ReservedPrefix + "/preview":
+	case reservedPrefix + "enter":
+		g, err = h.sharing.RedeemEnter(a, host, t, h.missKey(r))
+		return g, safeNext(r.URL.Query().Get("next")), err, true
+	case reservedPrefix + "preview":
 		g, _ = h.sharing.RedeemRawPreview(a, host, t)
-		return g, "/", true
+		return g, "/", nil, true
 	}
-	return nil, "", false
+	return nil, "", nil, false
 }
 
 // rawAccess admits a raw-host request by its cookie, or reports false.
@@ -113,7 +124,7 @@ func (h *Handler) rawAccess(r *http.Request, host ids.Host) (sharing.RawAccess, 
 	if err != nil {
 		return sharing.RawAccess{}, false
 	}
-	return h.sharing.AuthorizeRaw(r.Context(), a, host, cookie, time.Now())
+	return h.sharing.AuthorizeRaw(r.Context(), a, host, cookie)
 }
 
 // frameNavigation reports a navigation the visitor made inside a frame: a

@@ -36,7 +36,7 @@ var viewerAssets = func() map[string]viewerAsset {
 			panic(err)
 		}
 		sum := sha256.Sum256(b)
-		out["/"+sharing.ReservedPrefix+"/"+name] = viewerAsset{body: b, contentType: ct, etag: `"` + hex.EncodeToString(sum[:8]) + `"`}
+		out[reservedPrefix+name] = viewerAsset{body: b, contentType: ct, etag: `"` + hex.EncodeToString(sum[:8]) + `"`}
 	}
 	return out
 }()
@@ -62,10 +62,10 @@ func (h *Handler) viewerPage(w http.ResponseWriter, r *http.Request, a *store.Ar
 	info := h.sharing.ViewerInfo(r.Context(), a, snap)
 	self := h.viewerOrigin(a)
 	target := withoutParams(r.URL, paramVersion, paramInfo)
-	frameSrc := f.RawOrigin + "/" + sharing.ReservedPrefix + "/enter?t=" + url.QueryEscape(f.Enter) + "&next=" + url.QueryEscape(target)
+	frameSrc := f.RawOrigin + reservedPrefix + "enter?t=" + url.QueryEscape(f.Enter) + "&next=" + url.QueryEscape(target)
 	data := viewerData{
 		Info: panelFor(info, r.URL), FrameSrc: frameSrc, RawOrigin: f.RawOrigin,
-		Stream: "/" + sharing.ReservedPrefix + "/location?s=" + url.QueryEscape(f.Stream),
+		Stream: reservedPrefix + "location?s=" + url.QueryEscape(f.Stream),
 		Latest: withoutParams(r.URL, paramVersion),
 	}
 	if snap.Version != a.CurrentVersion {

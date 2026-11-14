@@ -230,7 +230,9 @@ curl -fsS -H 'Sec-Fetch-Dest: document' "$NURL" | grep -q 'rd-frame' || die "fra
 curl -fsS "${URL}?redrop-info=0" | cmp -s - "$WORK/page-v1.html" || die "redrop-info=0 direct view"
 curl -fsS -H 'Sec-Fetch-Dest: iframe' "${BURL}index.html" | grep -q spa || die "a frame on the shared link gets content, not the viewer"
 J6="$WORK/c6"
-curl -fsS -c "$J6" -o /dev/null "${BURL}?redrop-info=0"
+curl -fsS -c "$J6" -o /dev/null -H 'Sec-Fetch-Dest: document' -H 'Sec-Fetch-Site: none' "${BURL}?redrop-info=0"
+curl -fsS -c "$WORK/c7" -o /dev/null -H 'Sec-Fetch-Dest: image' -H 'Sec-Fetch-Site: same-site' "${BURL}?redrop-info=0"
+grep -q rd_direct "$WORK/c7" && die "a same-site image recorded the direct choice"
 curl -fsS -b "$J6" -H 'Sec-Fetch-Dest: document' "${BURL}some/route" | grep -q 'rd-frame' && die "direct choice not kept for the visit"
 fp=$(curl -fsS "$FURL")
 echo "$fp" | grep -q 'id="rd-info"' && echo "$fp" | grep -q 'Download' || die "file page with the info panel"
