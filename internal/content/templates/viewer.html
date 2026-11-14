@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<title>{{.Title}}</title>
+<link rel="icon" href="/__redrop/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/__redrop/viewer.css">
+<script src="/__redrop/viewer.js" defer></script>
+</head>
+<body class="rd-viewer">
+{{with .Data}}{{if .OldVersion}}<div class="rd-bar" role="status">Viewing version {{.OldVersion}} of {{.Info.Latest}} · <a href="{{.Latest}}">Back to latest</a></div>
+{{end}}<iframe id="rd-frame" class="rd-frame" src="{{.FrameSrc}}" title="{{.Info.Title}}" allow="fullscreen; clipboard-write"></iframe>
+{{template "panel" .Info}}{{end}}
+</body>
+</html>

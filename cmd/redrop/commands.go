@@ -190,6 +190,16 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		views += fmt.Sprintf(" (+%d link previews)", a.Previews)
 	}
 	fmt.Fprintf(w, "views:\t%s\n", views)
+	info := "shown"
+	if !a.InfoButton {
+		info = "hidden (direct view)"
+	}
+	fmt.Fprintf(w, "info button:\t%s\n", info)
+	old := "viewers see the list only"
+	if a.OldVersions {
+		old = "viewers can open them"
+	}
+	fmt.Fprintf(w, "older versions:\t%s\n", old)
 	if a.PurgeAt != nil {
 		fmt.Fprintf(w, "deleted at:\t%s\n", fmtTime(a.PurgeAt))
 	}
@@ -207,19 +217,59 @@ func plural(n int) string {
 
 type contentFlags struct {
 	as, name, entry, note string
+	render                string
 	spa                   bool
 }
 
 func (f *contentFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.as, "as", "", "force the kind: html (render the page), file (viewer + download), bundle (folder/static site)")
 	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin; not valid with watch)")
-	cmd.Flags().StringVar(&f.entry, "entry", "", "start page inside a bundle (default index.html; without one a file listing is shown)")
+	cmd.Flags().StringVar(&f.render, "render", "auto", "render mode: auto (.md files unless --as is set), markdown, or none (raw)")
+	cmd.Flags().StringVar(&f.entry, "entry", "", "bundle start page (default index.html; without one a file listing is shown), or Markdown source with --render markdown")
 	cmd.Flags().BoolVar(&f.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
-	cmd.Flags().StringVar(&f.note, "note", "", "short note stored with this version")
+	cmd.Flags().StringVar(&f.note, "note", "", "note stored with this version; viewers see it in the info panel's version list")
+}
+
+// viewerFlags are the viewer settings: --info / --no-info (the info button,
+// and the viewer frame for HTML) and --old-versions / --no-old-versions.
+type viewerFlags struct{ info, noInfo, old, noOld bool }
+
+func (f *viewerFlags) register(cmd *cobra.Command) {
+	fl := cmd.Flags()
+	fl.BoolVar(&f.info, "info", false, "show the info button (expiry, versions, size); HTML opens in redrop's viewer frame")
+	fl.BoolVar(&f.noInfo, "no-info", false, "hide the info button; HTML is served directly, without the viewer frame")
+	fl.BoolVar(&f.old, "old-versions", false, "let viewers open older versions from the info panel")
+	fl.BoolVar(&f.noOld, "no-old-versions", false, "viewers see the version list only (the default)")
+}
+
+// values are nil for a pair when neither flag was given (keep the current
+// setting, or for new shares use the default).
+func (f *viewerFlags) values() (info, old *bool, err error) {
+	if info, err = pair(f.info, f.noInfo, "--info", "--no-info"); err != nil {
+		return nil, nil, err
+	}
+	old, err = pair(f.old, f.noOld, "--old-versions", "--no-old-versions")
+	return info, old, err
+}
+
+func pair(on, off bool, onName, offName string) (*bool, error) {
+	if on && off {
+		return nil, withCode(exitUsage, "%s conflicts with %s", onName, offName)
+	}
+	if !on && !off {
+		return nil, nil
+	}
+	return &on, nil
 }
 
 func (f *contentFlags) source(arg string) (*client.Source, error) {
-	src := &client.Source{Kind: f.as, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, OnSkipped: reportSkippedFiles}
+	mode, err := client.ParseRenderMode(f.render)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	src := &client.Source{Kind: f.as, Render: mode, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, OnSkipped: reportSkippedFiles, Warn: func(warning string) {
+		fmt.Fprintln(os.Stderr, "warning: "+warning)
+	}}
 	if arg == "-" {
 		if f.name == "" {
 			return nil, withCode(exitUsage, "--name is required when reading from stdin (e.g. --name report.html)")
@@ -240,6 +290,7 @@ func reportSkippedFiles(n int) {
 
 func shareCmd() *cobra.Command {
 	var cf contentFlags
+	var vf viewerFlags
 	var title, ttl, password, passwordFile string
 	var genPassword, once, quiet bool
 	var maxViews int
@@ -250,6 +301,7 @@ func shareCmd() *cobra.Command {
 		Long: `Upload PATH and print a private link.
 
 What gets shared depends on PATH (override with --as):
+  *.md             styled Markdown document plus downloadable original
   *.html / *.htm   rendered as a web page (inline JS/CSS and CDN scripts work)
   a directory      a bundle: a static site served from its index.html, or a
                    browsable file listing when there is no index.html
@@ -258,6 +310,14 @@ What gets shared depends on PATH (override with --as):
   -                read stdin; requires --name to pick the kind and file name
 
 Use --as bundle with a .zip or .tar.gz to publish an archived site.
+Markdown renders locally before upload. --render markdown forces rendering for
+other extensions; --render none or --as file keeps the raw file. A directory
+with --render markdown --entry docs/notes.md keeps relative images and links.
+Raw HTML is escaped as text. HTTP/HTTPS and mailto links permit deliberate
+navigation with no opener/referrer; images stay local-only. Missing local assets
+in single-file uploads produce a warning. Documents have no hosting-specific
+branding, policy meta tags, or download queries.
+Markdown sources are limited to 8 MiB. Archives are not rendered: unpack first.
 
 Access control (combine freely):
   --ttl 2d                 expire after 2 days ("never" if the server allows)
@@ -266,15 +326,25 @@ Access control (combine freely):
   --once / --max-views N   link stops working after N opens; viewers click
                            "Open" first, so chat link previews don't use it up
 
+Shared pages get a small "i" button with the title, version history,
+expiry, remaining views and size; HTML opens in redrop's viewer with the
+artifact untouched in a frame. --no-info serves pages directly instead;
+--old-versions lets viewers open earlier versions. curl, scripts and very
+old browsers (no Fetch Metadata) always get the artifact directly. Inside an
+older version, a root-absolute link (/x.html) leads to the current version.
+
 The link is printed on the first line; it is the only way in, so share it
 deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 		Example: `  redrop share report.html
   redrop share ./dist --spa --ttl 30d --title "Dashboard prototype"
   redrop share data.csv --once
   redrop share notes.md --password-generate --ttl 12h
+  redrop share notes.md --render none
+  redrop share ./report --render markdown --entry docs/notes.md
   echo '<h1>Hello</h1>' | redrop share - --name hello.html
   redrop share site.zip --as bundle
-  redrop share report.html --json | jq -r .url`,
+  redrop share report.html --json | jq -r .url
+  redrop share slides.html --no-info`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
@@ -282,6 +352,10 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 				return err
 			}
 			src, err := cf.source(args[0])
+			if err != nil {
+				return err
+			}
+			info, old, err := vf.values()
 			if err != nil {
 				return err
 			}
@@ -316,7 +390,7 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 				password = generatePassword()
 				extra["password"] = password
 			}
-			a, err := c.Share(cmd.Context(), src, client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews}, progressFn())
+			a, err := c.Share(cmd.Context(), src, client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old}, progressFn())
 			if err != nil {
 				return mapErr(err)
 			}
@@ -331,8 +405,9 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 		},
 	}
 	cf.register(cmd)
+	vf.register(cmd)
 	f := cmd.Flags()
-	f.StringVarP(&title, "title", "t", "", "title shown in the dashboard (default: the page <title> or file name)")
+	f.StringVarP(&title, "title", "t", "", "title shown in the dashboard and the info button (default: the page <title> or file name)")
 	f.StringVar(&ttl, "ttl", "", "lifetime such as 30m, 12h, 7d, 2w, or never (default: server default, usually 7d)")
 	f.StringVarP(&password, "password", "p", "", "require this password (visible in process lists; prefer --password-file or --password-generate)")
 	f.StringVar(&passwordFile, "password-file", "", "read the password from FILE (- for stdin)")
@@ -345,12 +420,15 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 
 func updateCmd() *cobra.Command {
 	var cf contentFlags
+	var vf viewerFlags
 	cmd := &cobra.Command{
 		Use:   "update ID|URL PATH",
 		Short: "Publish a new version of an artifact at the same link",
 		Long: `Upload PATH as a new version of an existing artifact. The link, expiry,
 password, and view limit stay the same; previous versions are kept and can be
-restored with "redrop rollback".`,
+restored with "redrop rollback". --info / --no-info and --old-versions /
+--no-old-versions also change those viewer settings; they are saved before
+the upload.`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
   redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa`,
 		Args: cobra.ExactArgs(2),
@@ -367,7 +445,12 @@ restored with "redrop rollback".`,
 			if err != nil {
 				return err
 			}
-			a, err := c.Update(cmd.Context(), id, src, progressFn())
+			info, old, err := vf.values()
+			if err != nil {
+				return err
+			}
+			// The settings are saved before the upload (see UpdateWithOptions).
+			a, err := c.UpdateWithOptions(cmd.Context(), id, src, client.VersionOptions{InfoButton: info, OldVersions: old}, progressFn())
 			if err != nil {
 				return mapErr(err)
 			}
@@ -375,6 +458,7 @@ restored with "redrop rollback".`,
 		},
 	}
 	cf.register(cmd)
+	vf.register(cmd)
 	return cmd
 }
 
@@ -456,19 +540,21 @@ func infoCmd() *cobra.Command {
 }
 
 func setCmd() *cobra.Command {
+	var vf viewerFlags
 	var title, ttl, password, passwordFile string
 	var genPassword, noPassword, resetViews, unlimited, spa, noSPA bool
 	var maxViews int
 	cmd := &cobra.Command{
 		Use:   "set ID|URL",
-		Short: "Change title, expiry, password, or view limit",
+		Short: "Change title, expiry, password, view limit, or viewer settings",
 		Long: `Change settings of an existing artifact. Only the flags you pass change.
 Changing the password signs out everyone who already unlocked the link.`,
 		Example: `  redrop set k2j4m9qx7d4a --ttl 30d
   redrop set k2j4m9qx7d4a --ttl never
   redrop set k2j4m9qx7d4a --password-generate
   redrop set k2j4m9qx7d4a --no-password --unlimited
-  redrop set k2j4m9qx7d4a --max-views 5 --reset-views`,
+  redrop set k2j4m9qx7d4a --max-views 5 --reset-views
+  redrop set k2j4m9qx7d4a --no-info`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
@@ -528,7 +614,10 @@ Changing the password signs out everyone who already unlocked the link.`,
 				v := spa
 				req.SPA = &v
 			}
-			if req.Title == nil && req.TTL == nil && req.Password == nil && req.MaxViews == nil && !req.ResetViews && req.SPA == nil {
+			if req.InfoButton, req.OldVersions, err = vf.values(); err != nil {
+				return err
+			}
+			if req.Title == nil && req.TTL == nil && req.Password == nil && req.MaxViews == nil && !req.ResetViews && req.SPA == nil && req.InfoButton == nil && req.OldVersions == nil {
 				return withCode(exitUsage, "nothing to change; see `redrop set --help`")
 			}
 			id, err := resolveID(cmd.Context(), c, args[0])
@@ -554,6 +643,7 @@ Changing the password signs out everyone who already unlocked the link.`,
 	f.BoolVar(&resetViews, "reset-views", false, "reset the view counter to zero")
 	f.BoolVar(&spa, "spa", false, "enable single-page-app fallback")
 	f.BoolVar(&noSPA, "no-spa", false, "disable single-page-app fallback")
+	vf.register(cmd)
 	return cmd
 }
 
@@ -677,14 +767,18 @@ func versionsCmd() *cobra.Command {
 				return printJSON(list)
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "VERSION\tCURRENT\tKIND\tFILES\tSIZE\tCREATED\tNOTE")
+			fmt.Fprintln(w, "VERSION\tCURRENT\tKIND\tFILES\tSIZE\tCREATED\tNOTE (* shown to viewers)")
 			for _, v := range list {
 				cur := ""
 				if v.Current {
 					cur = "*"
 				}
 				t := v.CreatedAt
-				fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n", v.Number, cur, v.Kind, v.Files, human(v.Size), fmtTime(&t), v.Note)
+				note := v.Note
+				if note != "" && v.NotePublic {
+					note = "* " + note
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n", v.Number, cur, v.Kind, v.Files, human(v.Size), fmtTime(&t), note)
 			}
 			return w.Flush()
 		},

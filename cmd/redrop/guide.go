@@ -41,13 +41,16 @@ Flags --url/--token override the environment, which overrides the saved login.
 ## Share
 
     redrop share PATH [--ttl 7d] [--title T] [--once | --max-views N]
-                      [--password-generate | --password-file F] [--json]
+                      [--password-generate | --password-file F]
+                      [--no-info] [--old-versions] [--json]
 
 PATH decides the kind (override with --as html|file|bundle):
 
 - *.html / *.htm  -> "html": rendered as a live web page. Inline <script> and
   CDN libraries (e.g. React/ESM from a CDN) work. Each artifact has its own
   origin, so localStorage etc. are isolated.
+- *.md           -> "bundle": a styled Markdown document, with the exact
+  original kept for download. Rendering happens locally before upload.
 - directory      -> "bundle": a static site. index.html is the start page
   (change with --entry); without one, visitors get a file listing. Use --spa
   for client-side routers.
@@ -75,14 +78,57 @@ Share and update print one stderr line with the number of excluded file
 entries encountered, when nonzero. Files inside excluded directory trees
 are not counted. No skipped-file line is printed when the count is zero.
 A folder with no files to upload fails with exit code 2. A PATH that is a
-symlink is resolved once: a link to a folder uploads that folder, and a
-link to a file uploads the target's bytes under the link's name.
+symlink is resolved once: a link to a folder uploads that folder, walked
+with the symlink rules below, and a link to a file uploads the target's
+bytes under the link's name.
 
 Supplied .zip/.tar.gz bundle entries are not editor-filtered. A .zip is
 converted to tar.gz using the existing archive conventions: strip a common
 top-level folder and omit ._* files, __MACOSX/ entries, and non-regular
 entries. A .tar.gz is passed through. The server still validates archive
 paths and entry types.
+
+Markdown options (also available on update):
+
+    redrop share notes.md                         # auto-render .md
+    redrop share notes.txt --render markdown       # force Markdown
+    redrop share notes.md --render none            # raw file, as before
+    redrop share ./report --render markdown --entry docs/notes.md
+    cat notes.md | redrop share - --name notes.md
+
+--render auto is the default. An explicit --as disables auto-rendering;
+--as file keeps Markdown raw. Forced --render markdown requires no --as or
+--as bundle. Directory rendering requires --entry and preserves bundle assets;
+relative image/link paths are rebased from that source to the root index.html.
+A single .md file does not upload siblings. Use a directory for local images.
+Archives are not rendered: unpack them into a directory first. Existing
+index.html files are never overwritten. --spa is not supported with rendering.
+Ordinary and Markdown directories share one confined packer, and watch hashes
+with the same walk. Relative symlinks
+within the directory are followed; outside-root, absolute, and cyclic links are
+usage errors. Broken asset symlinks and non-regular bundle entries are skipped
+with stderr warnings. Explicitly named single files follow symlinks normally,
+including absolute links or links into other directories. Only directory walks
+and --entry are root-confined. Sources and entries must resolve to regular files;
+Unix opens use nonblocking mode and re-check the descriptor before reading.
+Missing local references in single-file uploads produce a stderr warning
+suggesting directory publishing. Rejected image sources produce a warning for
+both files and directories, once per distinct source, naming it and the local-image
+rule. Empty sources have an explicit warning. Invalid options, missing sources
+or entries, and symlink cycles exit with 2.
+
+The page has heading anchors, a TOC at four headings, offline syntax highlighting,
+copy buttons, GFM tables/task lists, blockquotes, and responsive light/dark styles.
+Unknown languages and code blocks over 64 KiB stay plain. Sources over 8 MiB must
+use --render none. HTML comments are omitted while visible text after them stays.
+Comment-only blocks emit nothing. Other raw HTML becomes escaped
+inline text or normal paragraphs, not Copy-enabled code; List<String> stays intact. There is no raw-HTML opt-in. HTTP/HTTPS and mailto
+navigation links use a new tab with no opener/referrer. Images stay local-only;
+active schemes, data URIs and unsafe attributes are rejected. A page CSP blocks
+automatic external requests. The document has no hosting-specific branding, icon,
+policy meta tags, or download-query convention. The original is intentionally
+unmodified, so treat downloaded sources and other bundle files as untrusted
+content, not sanitized documents.
 
 The first line of normal output is "url: <link>". With --quiet, only the URL
 (and a generated password on the next line) is printed. With --json you get
@@ -108,6 +154,32 @@ the upload, share and update start over once, then fail with exit code 1.
   words (about 52 bits), so they can be read out or typed. Older links are 26
   random letters and digits and keep working. Rotate replaces either kind
   with a new four-word link.
+- Info button and viewer: shared pages show a small "i" button in the
+  bottom-right corner with the title, version and publish time, the expiry
+  countdown, remaining views, whether a password is set, the size, and the
+  list of versions with their --note text. Notes you add from now on are shown
+  to viewers; notes written before this release stay private ("redrop
+  versions" marks public notes with *). It never shows who shared the page.
+  HTML artifacts open in redrop's viewer: the artifact itself loads, byte for
+  byte as uploaded, in a full-page frame on the same link. The address bar
+  follows the frame, including #fragments and Back/Forward inside it, but not
+  single-page-app route changes made with pushState. Files keep redrop's own
+  file page. Your artifact needs nothing redrop-specific. Because the frame
+  is on the same origin, the info panel is a convenience, not a security
+  boundary: a page could draw a fake one.
+  --no-info on share, update, or set serves pages directly instead (no button,
+  no frame); --info turns it back on (the server default is usually on).
+  Append ?redrop-info=0 to a link for a direct, frameless view, e.g. for
+  screenshots. It is remembered for 30 minutes when the link is opened
+  directly (typed, bookmarked, opened from another app) or from the same page;
+  when it is clicked on another website, only that page is direct.
+  ?redrop-info=1 goes back to the viewer. curl, scripts and very old browsers
+  (no Fetch Metadata headers) always get the artifact directly.
+- Service workers are not available to shared pages.
+- Older versions: --old-versions lets viewers open earlier versions from the
+  info panel (?redrop-version=N); --no-old-versions (the default) shows them
+  the list only. Inside an older version, a root-absolute link (/x.html)
+  leads to the current version; relative links stay in the older one.
 - Links are unguessable, not indexed (noindex + robots.txt), and send no
   Referer to third parties. Unknown, expired, used-up and revoked links all
   answer the same "Not found", and clients that hit many of them are
@@ -120,7 +192,8 @@ the upload, share and update start over once, then fail with exit code 1.
     redrop list [--status active|expired|exhausted|revoked] [--search TEXT]
     redrop info ID|URL
     redrop set ID|URL --ttl 30d | --password-generate | --no-password |
-                     --max-views 3 | --unlimited | --reset-views | --title T
+                     --max-views 3 | --unlimited | --reset-views | --title T |
+                     --info | --no-info | --old-versions | --no-old-versions
     redrop revoke ID|URL      # disable now (restore with: redrop restore ID)
     redrop rotate ID|URL      # new link; the old one stops working
     redrop versions ID|URL    # history
@@ -128,6 +201,9 @@ the upload, share and update start over once, then fail with exit code 1.
     redrop files ID|URL       # files in a bundle
     redrop views ID|URL       # opens, link previews, failed passwords
     redrop delete ID|URL --yes
+
+Updating an artifact first shared raw with a .md source now renders the new
+version by default. Add --render none to keep that version raw.
 
 Anywhere an ID is accepted, the artifact link (or just its four-word part,
 e.g. amber-otter-quilt-river) works too.
@@ -189,7 +265,8 @@ With --json, errors are written to stderr as {"error": "...", "exit_code": N}.
 
 ## Good practice for agents
 
-- Prefer sharing one self-contained HTML file for reports and visualizations.
+- Share Markdown directly for documents and reports. Use self-contained HTML
+  for custom layouts and visualizations.
 - Pick a TTL that matches the purpose; use --once for secrets or sensitive
   files and pass the password through a different channel than the link.
 - Give the artifact a clear --title; it is what the owner sees in the

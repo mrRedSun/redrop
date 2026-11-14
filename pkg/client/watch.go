@@ -200,8 +200,16 @@ func Watch(ctx context.Context, up Uploader, artifactID string, src *Source, opt
 	// tree being watched even if the link is retargeted later. The
 	// resolved path is also clean, which parent/child comparisons and
 	// event filtering need for "./site", "site/", and similar spellings.
+	// It is absolute, so every path error from a publish outside the
+	// root-confined walk names an absolute path (see publishError).
+	if _, err := os.Stat(src.Path); err != nil {
+		return filePathError(src.Path, err, os.Lstat)
+	}
 	root, err := filepath.EvalSymlinks(src.Path)
 	if err != nil {
+		return err
+	}
+	if root, err = filepath.Abs(root); err != nil {
 		return err
 	}
 	if root != filepath.Clean(src.Path) {
@@ -423,11 +431,13 @@ func (w *watcher) onCreate(name string) {
 		case filepath.Dir(w.root):
 			// The parent changed; nothing to do beyond the dirty mark.
 		default:
-			if !skipEntryName(filepath.Base(name), true) {
+			if !w.ignored(name) {
 				// Directories the packer skips (.git, node_modules, ...)
 				// are not watched either. Best effort: racing with a
 				// removal surfaces as a watch error, which is logged.
-				_ = watchTree(w.fw, name)
+				if rel, err := filepath.Rel(w.root, name); err == nil {
+					_ = w.watchTree(filepath.ToSlash(rel))
+				}
 			}
 		}
 	}
@@ -508,17 +518,14 @@ func (w *watcher) publishError(err error) error {
 	return sourceChanged(err)
 }
 
-// inRoot reports whether p is the watch root or a path inside it.
+// inRoot reports whether p is the watch root or a path inside it. A
+// relative p comes from the walk confined to the (absolute) root, so it is
+// relative to the root.
 func (w *watcher) inRoot(p string) bool {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(w.root, p)
 	}
-	root, err := filepath.Abs(w.root)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(root, abs)
+	rel, err := filepath.Rel(w.root, filepath.Clean(p))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
 }
 
@@ -643,23 +650,21 @@ func (w *watcher) registerAll() error {
 			return err
 		}
 	}
-	return watchTree(w.fw, w.root)
+	return w.watchTree(".")
 }
 
-// watchTree adds dir and every packable subdirectory to w.
-func watchTree(w *fsnotify.Watcher, dir string) error {
-	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		if p != dir && skipEntryName(d.Name(), true) {
-			return filepath.SkipDir
-		}
-		return w.Add(p)
-	})
+// watchTree adds the directory start (relative to the root) and every
+// directory below it that the bundle walk would pack to the watcher.
+func (w *watcher) watchTree(start string) error {
+	root, err := os.OpenRoot(w.root)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	walk := &bundleWalk{fsys: root.FS(), dir: func(name string) error {
+		return w.fw.Add(filepath.Join(w.root, filepath.FromSlash(name)))
+	}}
+	return walk.run(start)
 }
 
 // hashTree returns a deterministic digest of the content under root: the
@@ -684,16 +689,21 @@ func scanTree(root string) (string, int, error) {
 		sum, err := hashFile(root)
 		return sum, 1, err
 	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return "", 0, err
+	}
+	defer dir.Close()
 	db := &treeDigestBuilder{}
-	_, err = walkPackable(root, nil, func(rel, abs string, info fs.FileInfo) error {
-		sum, err := hashFile(abs)
-		if err != nil {
+	walk := &bundleWalk{fsys: dir.FS(), file: func(name string, content io.Reader, size int64) error {
+		h := sha256.New()
+		if _, err := io.CopyN(h, content, size); err != nil {
 			return err
 		}
-		db.add(rel, sum)
+		db.add(name, hex.EncodeToString(h.Sum(nil)))
 		return nil
-	})
-	if err != nil {
+	}}
+	if err := walk.run("."); err != nil {
 		return "", 0, err
 	}
 	return db.digest(), len(db.entries), nil

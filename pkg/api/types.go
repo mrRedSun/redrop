@@ -4,6 +4,9 @@ package api
 
 import "time"
 
+// ReservedPrefix is the server-owned URL path segment that uploads cannot use.
+const ReservedPrefix = "__redrop"
+
 // Artifact kinds.
 const (
 	KindHTML   = "html"
@@ -138,38 +141,43 @@ type PublishRequest struct {
 	Filename string `json:"filename,omitempty" description:"Original file name for html/file kinds"`
 	Entry    string `json:"entry,omitempty" description:"Entry page for bundles (default index.html)"`
 	SPA      bool   `json:"spa,omitempty" description:"Serve the entry page for unknown extension-less paths"`
-	Note     string `json:"note,omitempty"`
+	Note     string `json:"note,omitempty" description:"Change note; viewers see it in the info panel's version list"`
 }
 
 type CreateArtifactRequest struct {
 	PublishRequest
-	Title    string `json:"title,omitempty"`
-	TTL      string `json:"ttl,omitempty" description:"Lifetime like 30m, 12h, 7d, 2w, or never; empty uses the server default"`
-	Password string `json:"password,omitempty"`
-	MaxViews int    `json:"max_views,omitempty" description:"0 for unlimited; 1 for a one-time link"`
+	Title       string `json:"title,omitempty"`
+	TTL         string `json:"ttl,omitempty" description:"Lifetime like 30m, 12h, 7d, 2w, or never; empty uses the server default"`
+	Password    string `json:"password,omitempty"`
+	MaxViews    int    `json:"max_views,omitempty" description:"0 for unlimited; 1 for a one-time link"`
+	InfoButton  *bool  `json:"info_button,omitempty" description:"Show the info button (and the viewer frame for HTML); omitted uses the server default"`
+	OldVersions bool   `json:"viewer_old_versions,omitempty" description:"Let viewers open older versions from the info panel (default false)"`
 }
 
 type UpdateArtifactRequest struct {
-	Title      *string `json:"title,omitempty"`
-	TTL        *string `json:"ttl,omitempty" description:"New lifetime counted from now, or never"`
-	Password   *string `json:"password,omitempty" description:"New password; empty string removes it"`
-	MaxViews   *int    `json:"max_views,omitempty" description:"New total view limit; 0 removes it"`
-	ResetViews bool    `json:"reset_views,omitempty"`
-	Revoked    *bool   `json:"revoked,omitempty"`
-	SPA        *bool   `json:"spa,omitempty"`
+	Title       *string `json:"title,omitempty"`
+	TTL         *string `json:"ttl,omitempty" description:"New lifetime counted from now, or never"`
+	Password    *string `json:"password,omitempty" description:"New password; empty string removes it"`
+	MaxViews    *int    `json:"max_views,omitempty" description:"New total view limit; 0 removes it"`
+	ResetViews  bool    `json:"reset_views,omitempty"`
+	Revoked     *bool   `json:"revoked,omitempty"`
+	SPA         *bool   `json:"spa,omitempty"`
+	InfoButton  *bool   `json:"info_button,omitempty" description:"Show the info button (and the viewer frame for HTML)"`
+	OldVersions *bool   `json:"viewer_old_versions,omitempty" description:"Let viewers open older versions from the info panel"`
 }
 
 type Version struct {
-	Number    int       `json:"number"`
-	Kind      string    `json:"kind"`
-	Size      int64     `json:"size"`
-	Files     int       `json:"files"`
-	Entry     string    `json:"entry"`
-	SPA       bool      `json:"spa"`
-	Note      string    `json:"note"`
-	CreatedAt time.Time `json:"created_at"`
-	TokenName string    `json:"token_name,omitempty"`
-	Current   bool      `json:"current"`
+	Number     int       `json:"number"`
+	Kind       string    `json:"kind"`
+	Size       int64     `json:"size"`
+	Files      int       `json:"files"`
+	Entry      string    `json:"entry"`
+	SPA        bool      `json:"spa"`
+	Note       string    `json:"note"`
+	NotePublic bool      `json:"note_public" description:"Viewers see this note in the info panel (false for notes written before notes were shown)"`
+	CreatedAt  time.Time `json:"created_at"`
+	TokenName  string    `json:"token_name,omitempty"`
+	Current    bool      `json:"current"`
 }
 
 type Artifact struct {
@@ -194,6 +202,8 @@ type Artifact struct {
 	PurgeAt       *time.Time `json:"purge_at" description:"When content is permanently removed"`
 	TokenName     string     `json:"token_name,omitempty" description:"API token that created it"`
 	OwnerUsername string     `json:"owner_username,omitempty" description:"Only in admin listings"`
+	InfoButton    bool       `json:"info_button" description:"Whether pages show the info button and HTML opens in the viewer frame (the artifact's setting or the server default)"`
+	OldVersions   bool       `json:"viewer_old_versions" description:"Whether viewers can open older versions from the info panel"`
 }
 
 type ArtifactList struct {

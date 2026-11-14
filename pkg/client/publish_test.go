@@ -366,9 +366,10 @@ func TestPreparedDigestMatchesPackedBytes(t *testing.T) {
 func TestHashTreeUsesSameSymlinkAndMtimeRulesAsPacking(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "page")
-	outside := t.TempDir()
+	// An in-root relative link: packing and hashing follow it the same way.
+	outside := filepath.Join(dir, "assets")
 	write(t, outside, "shared.css", "before")
-	if err := os.Symlink(filepath.Join(outside, "shared.css"), filepath.Join(dir, "shared.css")); err != nil {
+	if err := os.Symlink(filepath.Join("assets", "shared.css"), filepath.Join(dir, "shared.css")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	before, err := hashTree(dir)
@@ -724,5 +725,90 @@ func TestUploadFileResumedChunkEdit(t *testing.T) {
 				t.Fatalf("resume: err=%v got=%q", err, got)
 			}
 		})
+	}
+}
+
+// Rendered Markdown reports a digest in the hashTree domain: the source
+// file's hash for a single file, and the tree digest of the directory (with
+// the rendered snapshot standing in for the entry) for a directory.
+func TestMarkdownDigestMatchesHashTree(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "docs/notes.md", "# Notes\n\n![chart](chart.png)\n")
+	write(t, dir, "docs/chart.png", "png")
+	write(t, dir, "docs/.notes.md.swp", "swap")
+
+	single := filepath.Join(dir, "docs", "notes.md")
+	p, err := Prepare(&Source{Path: single})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	if want, _ := hashTree(single); p.Digest == "" || p.Digest != want {
+		t.Fatalf("single-file Markdown digest %q; want %q", p.Digest, want)
+	}
+
+	var skipped int
+	p, err = Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: "docs/notes.md", OnSkipped: func(n int) { skipped = n }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if want, _ := hashTree(dir); p.Digest == "" || p.Digest != want {
+		t.Fatalf("directory Markdown digest %q; want %q", p.Digest, want)
+	}
+	files, err := readPack(p.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, swap := files["docs/.notes.md.swp"]; swap || files["docs/chart.png"] != "png" || files["index.html"] == "" || p.skipped != 1 {
+		t.Fatalf("pack=%v skipped=%d (callback %d)", sortedKeys(files), p.skipped, skipped)
+	}
+}
+
+// hashTree uses the packer's walk, so a tree the packer rejects (an
+// absolute symlink inside the folder) is rejected by the hash too, with
+// the same usage error.
+func TestHashTreeSharesPackSymlinkRules(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "page")
+	outside := t.TempDir()
+	write(t, outside, "secret.txt", "outside")
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "secret.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	var usage *UsageError
+	if _, err := hashTree(dir); !errors.As(err, &usage) {
+		t.Fatalf("hashTree err=%v; want a usage error", err)
+	}
+	if _, err := Prepare(&Source{Path: dir}); !errors.As(err, &usage) {
+		t.Fatalf("Prepare err=%v; want a usage error", err)
+	}
+}
+
+// A symlinked root is resolved once, then walked with the confined rules:
+// in-root relative links are followed, relative to the resolved folder.
+func TestSymlinkRootIsConfinedToResolvedFolder(t *testing.T) {
+	base := t.TempDir()
+	site := filepath.Join(base, "site")
+	write(t, site, "index.html", "page")
+	write(t, site, "assets/app.css", "css")
+	if err := os.Symlink(filepath.Join("assets", "app.css"), filepath.Join(site, "app.css")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(site, link); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Prepare(&Source{Path: link})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	files, err := readPack(p.File)
+	if err != nil || files["app.css"] != "css" || p.Filename != "link" {
+		t.Fatalf("files=%v filename=%s err=%v", sortedKeys(files), p.Filename, err)
+	}
+	if want, _ := hashTree(site); p.Digest != want {
+		t.Fatal("symlinked root digest differs from the resolved folder's")
 	}
 }

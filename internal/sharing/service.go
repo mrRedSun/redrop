@@ -35,6 +35,7 @@ type Service struct {
 	accessSigner  *security.Signer // visit grants after Open/unlock
 	previewSigner *security.Signer // owner preview links and cookies
 	seenSigner    *security.Signer // de-duplicates ungated views
+	directSigner  *security.Signer // a visitor's choice of the direct, frameless view
 
 	unlockLimiter   *security.Limiter // per IP + artifact
 	unlockIPLimiter *security.Limiter // per IP across artifacts
@@ -47,6 +48,7 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		accessSigner:    security.NewSigner(secret, "access"),
 		previewSigner:   security.NewSigner(secret, "preview"),
 		seenSigner:      security.NewSigner(secret, "seen"),
+		directSigner:    security.NewSigner(secret, "direct-view"),
 		unlockLimiter:   security.NewLimiter(5, 5*time.Minute),
 		unlockIPLimiter: security.NewLimiter(60, time.Hour),
 	}

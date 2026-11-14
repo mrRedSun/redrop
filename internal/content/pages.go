@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 //go:embed templates/*.html templates/style.css
@@ -21,6 +23,33 @@ type pages struct {
 	tmpl *template.Template
 	css  template.CSS
 	csp  string
+	// pageDirectives are the default policy's directives after style-src,
+	// shared with the file page's policy (see pagePolicy).
+	pageDirectives []string
+}
+
+// The viewer's static files, served on every content host.
+const (
+	viewerJS  = reservedPrefix + "viewer.js"
+	viewerCSS = reservedPrefix + "viewer.css"
+)
+
+// pagePolicy builds the Content-Security-Policy of a server page: nothing
+// by default, style-src from styles, then directives. With self (this
+// origin) set, it also allows the viewer's script and stylesheet, pinned to
+// their paths on that origin.
+func pagePolicy(self, styles string, directives ...string) string {
+	parts := []string{"default-src 'none'"}
+	if self != "" {
+		styles = strings.TrimSpace(styles + " " + self + viewerCSS)
+	}
+	if styles != "" {
+		parts = append(parts, "style-src "+styles)
+	}
+	if self != "" {
+		parts = append(parts, "script-src "+self+viewerJS)
+	}
+	return strings.Join(append(parts, directives...), "; ")
 }
 
 func newPages(cfg *config.Config) *pages {
@@ -28,11 +57,17 @@ func newPages(cfg *config.Config) *pages {
 	if err != nil {
 		panic(err)
 	}
-	t := template.Must(template.New("").Funcs(template.FuncMap{"bytes": humanBytes}).ParseFS(templateFS, "templates/*.html"))
+	t := template.Must(template.New("").Funcs(template.FuncMap{
+		"bytes": humanBytes,
+		"iso":   func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+		"utc":   func(t time.Time) string { return t.UTC().Format("2 Jan 2006, 15:04 UTC") },
+	}).ParseFS(templateFS, "templates/*.html"))
+	directives := []string{"img-src 'self'", "media-src 'self'", "frame-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'self' " + cfg.PublicOrigin()}
 	return &pages{
-		tmpl: t,
-		css:  template.CSS(css),
-		csp:  "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'self' " + cfg.PublicOrigin(),
+		tmpl:           t,
+		css:            template.CSS(css),
+		csp:            pagePolicy("", "'unsafe-inline'", directives...),
+		pageDirectives: directives,
 	}
 }
 
@@ -45,11 +80,17 @@ type pageData struct {
 
 // Icon links for server-rendered pages.
 const (
-	serverIcons   = iconPrefix // redrop's own pages: always the redrop icon
-	artifactIcons = ""         // pages showing artifact content: /favicon.ico decides
+	serverIcons   = reservedPrefix // redrop's own pages: always the redrop icon (reserved, so never an artifact file)
+	artifactIcons = ""             // pages showing artifact content: /favicon.ico decides
 )
 
+// render writes a server page with the default policy.
 func (p *pages) render(w http.ResponseWriter, status int, name, title, icons string, data any) {
+	p.renderWithCSP(w, status, name, title, icons, data, p.csp)
+}
+
+// renderWithCSP writes a server page with its own policy.
+func (p *pages) renderWithCSP(w http.ResponseWriter, status int, name, title, icons string, data any, csp string) {
 	var buf bytes.Buffer
 	if err := p.tmpl.ExecuteTemplate(&buf, name, pageData{Title: title, CSS: p.css, IconBase: icons, Data: data}); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -57,7 +98,7 @@ func (p *pages) render(w http.ResponseWriter, status int, name, title, icons str
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Content-Security-Policy", p.csp)
+	h.Set("Content-Security-Policy", csp)
 	w.WriteHeader(status)
 	w.Write(buf.Bytes())
 }
@@ -78,21 +119,29 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	}
 	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
-		"Action": "/" + sharing.ReservedPrefix + "/open",
+		"Action": "/" + api.ReservedPrefix + "/open",
 	})
 }
 
-type viewerData struct {
-	Name, Type, Raw          string
-	Size                     int64
-	Image, Video, Audio, PDF bool
-	Text                     string
-	Truncated                bool
+type fileData struct {
+	Name, Type, Raw, Download string
+	Size                      int64
+	Image, Video, Audio, PDF  bool
+	Text                      string
+	Truncated                 bool
+	Info                      *panelData // nil without the info button
+	OldVersion                int        // the older version shown, 0 for the current one
+	Latest                    string
 }
 
-func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File) {
+// fileViewer renders redrop's own page for a file artifact, with the info
+// panel rendered natively when info is set. base is where the shown
+// version's files are served ("" for the current version); self is this
+// origin, for the policy that allows the viewer's script and stylesheet.
+func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo) {
 	ct := f.ContentType
-	d := viewerData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: "/" + url.PathEscape(f.Path), Size: f.Size}
+	raw := selfRef(base + "/" + url.PathEscape(f.Path))
+	d := fileData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: raw, Download: raw + "?download", Size: f.Size, Latest: "/"}
 	switch {
 	case strings.HasPrefix(ct, "image/"):
 		d.Image = true
@@ -107,7 +156,17 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 			d.Text, d.Truncated = text, truncated
 		}
 	}
-	p.render(w, http.StatusOK, "file.html", f.Path, artifactIcons, d)
+	csp := p.csp
+	if info != nil {
+		// The file page lives at "/" only; its version links point there.
+		panel := panelFor(*info, &url.URL{Path: "/"})
+		d.Info = &panel
+		if info.Version != info.Current {
+			d.OldVersion = info.Version
+		}
+		csp = pagePolicy(self, "'unsafe-inline'", p.pageDirectives...)
+	}
+	p.renderWithCSP(w, http.StatusOK, "file.html", f.Path, artifactIcons, d, csp)
 }
 
 type listItem struct {

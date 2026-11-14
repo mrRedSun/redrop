@@ -15,7 +15,7 @@ const ttlLabels = { keep: 'Keep current expiry', '1h': '1 hour from now', '1d': 
 const passwordLabels = { keep: 'Keep current setting', set: 'Set a new password', remove: 'Remove password' } as const
 
 /**
- * Title, expiry, password, view limit, SPA. No request shape here: the atom
+ * Title, expiry, password, view limit, SPA, and the viewer settings. No request shape here: the atom
  * maps form values to the PATCH body (toUpdateRequest) and declares the toast
  * and refresh; server failures render on the form.
  */
@@ -26,6 +26,7 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
     onSuccess: (saved, values) => form.reset(settingsDefaults(saved, values.spa)),
   })
   const passwordAction = useWatch({ control: form.control, name: 'passwordAction' })
+  const infoButton = useWatch({ control: form.control, name: 'infoButton' })
   return (
     <Form {...form}>
       <form onSubmit={onSubmit} className="max-w-xl space-y-6">
@@ -101,6 +102,27 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             </FormItem>
           )} />
         )}
+        <FormField control={form.control} name="infoButton" render={({ field }) => (
+          <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <FormLabel>Show info button</FormLabel>
+              <FormDescription>
+                A small "i" in the corner shows viewers the title, version, expiry, remaining views, size, and the version list with the change notes of new versions. Never who shared it.
+                {artifact.kind !== 'file' && ' Pages open in redrop\'s viewer, with the content in a frame; off serves them directly.'}
+              </FormDescription>
+            </div>
+            <FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl>
+          </FormItem>
+        )} />
+        <FormField control={form.control} name="oldVersions" render={({ field }) => (
+          <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <FormLabel>Viewers can open older versions</FormLabel>
+              <FormDescription>{infoButton ? 'The info panel links each kept version. Off: viewers see the list only.' : 'Needs the info button.'}</FormDescription>
+            </div>
+            <FormControl><Switch checked={field.value} disabled={!infoButton} onCheckedChange={field.onChange} /></FormControl>
+          </FormItem>
+        )} />
         <FormRootError control={form.control} />
         <div className="flex gap-2">
           <Button type="submit" disabled={form.formState.isSubmitting || !form.formState.isDirty}>Save changes</Button>

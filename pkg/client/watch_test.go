@@ -642,13 +642,15 @@ func TestWatchSkippedDirectoriesNotRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fw.Close()
-	if err := watchTree(fw, dir); err != nil {
+	w := &watcher{root: dir, fw: fw}
+	if err := w.watchTree("."); err != nil {
 		t.Fatal(err)
 	}
 	if paths := fw.WatchList(); len(paths) != 1 || paths[0] != dir {
 		t.Fatalf("registered skipped dirs: %v", paths)
 	}
 }
+
 func TestWatchOverflowRewalksAndHashesLostChanges(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")
@@ -1013,5 +1015,44 @@ func TestRealClientWatchFileRootDeletedBeforeUpload(t *testing.T) {
 	receive(t, h.published)
 	if got, versions := state.lastFiles()["page.html"], state.versionCount(); got != "v2" || versions != 1 {
 		t.Fatalf("published %q in %d versions; want v2 once", got, versions)
+	}
+}
+
+// A watched Markdown file publishes a re-rendered bundle on each change,
+// and its digest is the file's own hash, so an identical rewrite does not
+// publish.
+func TestWatchMarkdownFileRerenders(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "notes.md", "# One\n")
+	up := &fakeUploader{}
+	h := newHarness(t, up, filepath.Join(dir, "notes.md"))
+	write(t, dir, "notes.md", "# Two\n")
+	h.event(filepath.Join(dir, "notes.md"), fsnotify.Write)
+	h.advance(time.Second)
+	receive(t, h.published)
+	if got := up.lastPack(); fmt.Sprint(got) != "[index.html notes.md]" {
+		t.Fatalf("pack=%v; want a rendered bundle", got)
+	}
+	write(t, dir, "notes.md", "# Two\n")
+	h.event(filepath.Join(dir, "notes.md"), fsnotify.Write)
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatalf("identical rewrite published: %d uploads", up.calls())
+	}
+}
+
+// Paths in errors from the root-confined walk are relative to the root, so
+// publishError classifies them as inside it: a Markdown entry removed by a
+// rebuild is a tree change, not a fatal error.
+func TestWatchClassifiesRootRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "other.txt", "x")
+	_, err := Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: "README.md"})
+	if err == nil {
+		t.Fatal("missing entry accepted")
+	}
+	w := &watcher{root: dir}
+	if got := w.publishError(err); !errors.Is(got, ErrSourceChanged) {
+		t.Fatalf("publishError(%v) = %v; want a tree change", err, got)
 	}
 }

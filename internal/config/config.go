@@ -43,6 +43,11 @@ type Config struct {
 	ChunkSize         int64
 	KeepVersions      int // 0 = unlimited
 
+	// InfoButtonDefault shows the info button (and, for HTML artifacts and
+	// bundles, the viewer frame) on artifacts that have no explicit setting
+	// of their own; file pages show the panel natively.
+	InfoButtonDefault bool
+
 	ViewWindowLimited  time.Duration
 	ViewWindowPassword time.Duration
 
@@ -205,6 +210,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ChunkSize, err = envBytes("REDROP_CHUNK_SIZE", "32MiB"); err != nil {
+		return nil, err
+	}
+	if c.InfoButtonDefault, err = envBool("REDROP_INFO_BUTTON_DEFAULT", true); err != nil {
 		return nil, err
 	}
 	if c.MaxFiles, err = strconv.Atoi(env("REDROP_MAX_FILES", "20000")); err != nil {

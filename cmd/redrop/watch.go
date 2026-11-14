@@ -45,7 +45,8 @@ password, and view limit stay the same.
 
 Edits are debounced (--debounce, default 500ms). Directory uploads use the
 skip rule listed under Share in "redrop guide"; explicitly named files are
-always uploaded. Identical content never publishes a version. Each publish
+always uploaded. A watched .md file is re-rendered on each change (see
+--render). Identical content never publishes a version. Each publish
 prints the version number and time. With --json, each publish or typed
 notice (retry, watch_error, root_vanished, rewatch_failed, tree_changed,
 empty_folder) is one JSON line; retries include the upcoming attempt number
@@ -60,7 +61,8 @@ honor Retry-After up to 10 minutes. Auth or not-found errors stop with the
 CLI's usual exit codes.`,
 		Example: `  redrop watch k2j4m9qx7d4a report.html
   redrop watch https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
-  redrop watch k2j4m9qx7d4a ./site --debounce 1s --json`,
+  redrop watch k2j4m9qx7d4a ./site --debounce 1s --json
+  redrop watch k2j4m9qx7d4a notes.md`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if args[1] == "-" {

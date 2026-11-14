@@ -13,9 +13,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/mrRedSun/redrop/pkg/api"
+	"github.com/mrRedSun/redrop/pkg/client"
+	"github.com/spf13/cobra"
 )
 
 // captureCLIOutput is deliberately non-parallel: the CLI writes to process
@@ -170,6 +173,59 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestRenderFlag(t *testing.T) {
+	for _, mode := range []string{"auto", "markdown", "none", "invalid"} {
+		t.Run(mode, func(t *testing.T) {
+			var f contentFlags
+			cmd := &cobra.Command{}
+			f.register(cmd)
+			if err := cmd.ParseFlags([]string{"--render", mode}); err != nil {
+				t.Fatal(err)
+			}
+			src, err := f.source("notes.md")
+			if mode == "invalid" {
+				var ee *exitError
+				if !errors.As(err, &ee) || ee.code != exitUsage {
+					t.Errorf("invalid mode should return a usage error, got %v", err)
+				}
+			} else if err != nil || src.Render != client.RenderMode(mode) {
+				t.Fatalf("render mode was not passed to the client: %+v, %v", src, err)
+			}
+		})
+	}
+	for _, cmd := range []*cobra.Command{shareCmd(), updateCmd()} {
+		flag := cmd.Flags().Lookup("render")
+		if flag == nil || flag.DefValue != "auto" {
+			t.Errorf("%s must default --render to auto", cmd.Name())
+		}
+	}
+	f := contentFlags{as: "file", render: "markdown"}
+	src, err := f.source("notes.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Prepare(src)
+	var ee *exitError
+	if !errors.As(mapErr(err), &ee) || ee.code != exitUsage {
+		t.Errorf("client conflict should map to usage exit code, got %v", err)
+	}
+}
+
+func TestMarkdownUsageExitCodes(t *testing.T) {
+	for _, src := range []client.Source{
+		{Render: client.RenderMarkdown, Path: t.TempDir()},
+		{Render: client.RenderMarkdown, Name: "notes.md", Reader: strings.NewReader("x"), SPA: true},
+		{Render: client.RenderMarkdown, Name: "site.zip", Reader: strings.NewReader("x")},
+		{Render: client.RenderMarkdown, Name: "../notes.md", Reader: strings.NewReader("x")},
+	} {
+		_, err := client.Prepare(&src)
+		var ee *exitError
+		if !errors.As(mapErr(err), &ee) || ee.code != exitUsage {
+			t.Errorf("invalid Markdown options must exit 2: %v", err)
 		}
 	}
 }
