@@ -141,7 +141,7 @@ func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
 			case client.NoticeRewatchFailed:
 				fmt.Fprintf(os.Stderr, "redrop: re-watching %s failed: %v\n", path, n.Err)
 			case client.NoticeTreeChanged:
-				fmt.Fprintf(os.Stderr, "redrop: %s changed while publishing; trying again once it settles\n", path)
+				fmt.Fprintf(os.Stderr, "redrop: %s changed while publishing; trying again once it settles: %v\n", path, n.Err)
 			case client.NoticeEmptyTree:
 				fmt.Fprintf(os.Stderr, "redrop: %s has no files to publish; waiting for files\n", path)
 			default:

@@ -235,9 +235,11 @@ stderr line with the number of excluded file entries encountered, when
 nonzero. They do not count files inside excluded directory trees, and print
 no skipped-file line when the count is zero. This notice never changes their
 stdout JSON. A folder with no files to upload fails locally (exit code 2)
-instead of uploading an empty bundle. A root that is a symlink to a folder is
-not followed (the walk does not descend into it), so it counts as empty; pass
-the resolved folder.
+instead of uploading an empty bundle. A root that is a symlink is resolved
+once with `filepath.EvalSymlinks`: a link to a folder uploads that folder, and
+a link to a file uploads the target's bytes under the link's name. `watch`
+resolves it at startup and watches the real path, so retargeting the link
+later does not change what is watched or published.
 
 `PATH` must be a regular file or a folder; pipes and devices (such as
 `<(cmd)`) are rejected rather than uploaded as zero bytes. Use `-` with
@@ -245,9 +247,13 @@ the resolved folder.
 
 A single file that is uploaded as is (`html`, `file`, or a `.tar.gz` bundle) is
 read from its own path, without a temporary copy. Its SHA-256 is taken before
-the upload and checked against the bytes sent. A mismatch means the file changed
-during the upload: `share` and `update` start over once and then fail, and
-`watch` waits for the next settled change. Directories, single files forced to
+the upload and checked against the bytes sent. When a failed chunk resumes
+below what was already sent, the hash is rebuilt from the file up to the resume
+offset, so the check still covers exactly the bytes the server holds. A
+mismatch means the file changed during the upload: `share` and `update` start
+over once and then fail, and `watch` waits for the next settled change. A
+retried upload abandons the first upload session; the server removes it when
+it expires (24h). Directories, single files forced to
 a bundle, and `.zip` input are packed into a temporary tar.gz first; stdin is
 spooled to a temporary file.
 
@@ -276,9 +282,17 @@ with jitter below the cap. Rate-limit responses honor `Retry-After` up to a
 ceiling of 10 minutes (10x the backoff cap), so a proxy that sends a huge
 value cannot park the watcher.
 
-Local races are not fatal. A file that vanishes or shrinks while a version is
-packed or uploaded (`ErrSourceChanged`) marks the tree dirty, emits
-`tree_changed`, and the publish runs again after the next debounce. A folder
+Local races are not fatal. Only errors that wrap `ErrSourceChanged` count as
+a tree change. The packer, the zip conversion, and the uploader produce
+them for a file that vanished, shrank, or was edited while being read. Such
+an error marks the tree dirty, emits `tree_changed`, and the publish runs
+again after the next debounce. At most 3 such retries run in a row without a
+filesystem event in between; the next one is returned as fatal, so a
+misclassified persistent error cannot loop. Other local errors (a missing
+`TMPDIR`, permissions, a full disk) are fatal at once. A root that vanishes
+between the scan and the publish emits `root_vanished` and waits for it to
+come back. The startup scan gets the same treatment: a file removed while it
+is scanned is waited out for up to 3 debounce intervals. A folder
 with no packable files emits `empty_folder` and publishes nothing; the last
 version stays live until the rebuilt content publishes as a normal change.
 Authentication and not-found errors use the normal CLI exit codes. Cancellation

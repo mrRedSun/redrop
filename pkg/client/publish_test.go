@@ -604,3 +604,125 @@ func TestClientPreservesRetryAfter(t *testing.T) {
 		t.Fatalf("header lost: %#v", err)
 	}
 }
+
+// A zip rewritten while it is converted is a source change, whether the
+// conversion then fails or succeeds; an unchanged bad zip stays an error.
+func TestZipChangedDuringConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name, rewrite string
+		changed       bool
+	}{
+		{"rewritten to garbage", "not a zip", true},
+		{"rewritten to another zip", "other", true},
+		{"unchanged", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "site.zip")
+			makeArchive(t, file, true, "v1")
+			src := &Source{Path: file, Kind: api.KindBundle, beforeRead: func(string) {
+				switch tc.rewrite {
+				case "":
+				case "other":
+					makeArchive(t, file, true, "v2")
+				default:
+					if err := os.WriteFile(file, []byte(tc.rewrite), 0600); err != nil {
+						t.Error(err)
+					}
+				}
+			}}
+			p, err := Prepare(src)
+			if tc.changed != errors.Is(err, ErrSourceChanged) {
+				t.Fatalf("err=%v; want ErrSourceChanged=%v", err, tc.changed)
+			}
+			if err == nil {
+				p.Close()
+			}
+		})
+	}
+	// A zip that was never valid fails as is, not as a change.
+	file := filepath.Join(t.TempDir(), "bad.zip")
+	write(t, filepath.Dir(file), "bad.zip", "not a zip")
+	if _, err := Prepare(&Source{Path: file, Kind: api.KindBundle}); err == nil || errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("bad zip: %v", err)
+	}
+}
+
+// A root that is a symlink is resolved once: a link to a folder is shared
+// as that folder, and a link to a file keeps the link's name.
+func TestSymlinkRootIsResolved(t *testing.T) {
+	dist := t.TempDir()
+	write(t, dist, "index.html", "page")
+	write(t, dist, "v3.html", "report")
+	links := t.TempDir()
+	if err := os.Symlink(dist, filepath.Join(links, "site")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dist, "v3.html"), filepath.Join(links, "report.html")); err != nil {
+		t.Fatal(err)
+	}
+	c, state := newUploadClient(t)
+	if _, err := c.Share(context.Background(), &Source{Path: filepath.Join(links, "site")}, PublishOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if names := sortedKeys(state.lastFiles()); fmt.Sprint(names) != "[index.html v3.html]" {
+		t.Fatalf("folder link shared %v", names)
+	}
+	if _, err := c.Update(context.Background(), "art", &Source{Path: filepath.Join(links, "report.html")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if files := state.lastFiles(); files["report.html"] != "report" {
+		t.Fatalf("file link published %v", files)
+	}
+}
+
+// An edit to bytes that are sent again after a failed chunk is caught by
+// UploadFile, not left for the server's checksum to reject.
+func TestUploadFileResumedChunkEdit(t *testing.T) {
+	for _, edit := range []bool{false, true} {
+		t.Run(fmt.Sprint("edit=", edit), func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "data.bin")
+			write(t, filepath.Dir(file), "data.bin", "0123456789")
+			var mu sync.Mutex
+			var got []byte
+			failed := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				switch r.Method {
+				case "POST":
+					json.NewEncoder(w).Encode(api.Upload{ID: "u", ChunkSize: 1 << 20})
+				case "PUT":
+					data, _ := io.ReadAll(r.Body)
+					if !failed {
+						// Keep half of the first attempt, then fail it.
+						failed = true
+						got = append(got, data[:5]...)
+						if edit {
+							if err := os.WriteFile(file, []byte("012345678X"), 0600); err != nil {
+								t.Error(err)
+							}
+						}
+						http.Error(w, `{"status":500,"detail":"try again"}`, 500)
+						return
+					}
+					got = append(got[:len(got):len(got)], data...)
+					json.NewEncoder(w).Encode(api.Upload{ID: "u", Received: int64(len(got))})
+				case "GET":
+					json.NewEncoder(w).Encode(api.Upload{ID: "u", Received: int64(len(got))})
+				}
+			}))
+			defer server.Close()
+			_, sum, err := New(server.URL, "").UploadFile(context.Background(), file, nil)
+			if edit {
+				if !errors.Is(err, ErrSourceChanged) {
+					t.Fatalf("err=%v; want ErrSourceChanged", err)
+				}
+				return
+			}
+			if err != nil || sum != sumBytes(got) || string(got) != "0123456789" {
+				t.Fatalf("resume: err=%v got=%q", err, got)
+			}
+		})
+	}
+}

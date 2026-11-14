@@ -284,7 +284,14 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 		if size-offset < n {
 			n = size - offset
 		}
-		body := &sentReader{r: io.NewSectionReader(f, offset, n), pos: offset, left: n, sent: sent}
+		if offset < sent.next {
+			// Resuming below what was already hashed: the bytes from
+			// offset on are sent again and may differ from those hashed.
+			if err := sent.rewind(f, offset); err != nil {
+				return "", "", fmt.Errorf("%s: %w", path, err)
+			}
+		}
+		body := &sentReader{r: io.NewSectionReader(f, offset, n), left: n, sent: sent}
 		req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/uploads/"+esc(up.ID)+"?offset="+strconv.FormatInt(offset, 10), body)
 		if err != nil {
 			return "", "", err
@@ -328,30 +335,42 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 	return up.ID, sum, nil
 }
 
-// sentHash hashes the uploaded bytes in file order. A resumed chunk
-// restarts at the server's received offset, at or before next; bytes
-// before next are already hashed and are not hashed again.
+// sentHash hashes the uploaded bytes in file order; next is the offset
+// hashed up to. Every chunk starts at next: when a chunk is resumed below
+// it, rewind re-hashes the file up to the resume offset, so the final
+// comparison covers exactly the bytes the server holds and an edit in the
+// re-sent range is caught here instead of by the server's checksum.
 type sentHash struct {
 	h    hash.Hash
 	next int64
+}
+
+func (s *sentHash) rewind(f io.ReaderAt, offset int64) error {
+	s.h.Reset()
+	n, err := io.Copy(s.h, io.NewSectionReader(f, 0, offset))
+	if err != nil {
+		return err
+	}
+	if n != offset {
+		return fmt.Errorf("%w: file shrank during upload", ErrSourceChanged)
+	}
+	s.next = offset
+	return nil
 }
 
 // sentReader is one chunk's request body. It feeds sentHash and turns a
 // file that ends before the chunk does into ErrSourceChanged, instead of
 // a transport error that would be retried as a network failure.
 type sentReader struct {
-	r         io.Reader
-	pos, left int64
-	sent      *sentHash
+	r    io.Reader
+	left int64
+	sent *sentHash
 }
 
 func (s *sentReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
-	if end := s.pos + int64(n); end > s.sent.next {
-		s.sent.h.Write(p[max(0, s.sent.next-s.pos):n])
-		s.sent.next = end
-	}
-	s.pos += int64(n)
+	s.sent.h.Write(p[:n])
+	s.sent.next += int64(n)
 	s.left -= int64(n)
 	if err == io.EOF && s.left > 0 {
 		err = fmt.Errorf("%w: file shrank during upload", ErrSourceChanged)

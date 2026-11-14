@@ -195,9 +195,27 @@ func Watch(ctx context.Context, up Uploader, artifactID string, src *Source, opt
 	if opts.Retrier == nil {
 		opts.Retrier = ExponentialRetrier{Base: RetryBase, Max: RetryMax}
 	}
-	// A clean root makes parent/child comparisons and event filtering
-	// correct for "./site", "site/", and tab-completed variants.
-	root := filepath.Clean(src.Path)
+	// Resolve a symlinked root once and watch its real path: fsnotify and
+	// the walks then see the folder itself, and every publish reads the
+	// tree being watched even if the link is retargeted later. The
+	// resolved path is also clean, which parent/child comparisons and
+	// event filtering need for "./site", "site/", and similar spellings.
+	root, err := filepath.EvalSymlinks(src.Path)
+	if err != nil {
+		return err
+	}
+	if root != filepath.Clean(src.Path) {
+		resolved := *src
+		resolved.Path = root
+		if resolved.Name == "" {
+			abs, err := filepath.Abs(src.Path)
+			if err != nil {
+				return err
+			}
+			resolved.Name = filepath.Base(abs) // publish under the name given
+		}
+		src = &resolved
+	}
 
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -225,7 +243,7 @@ func Watch(ctx context.Context, up Uploader, artifactID string, src *Source, opt
 type watcher struct {
 	up         Uploader
 	artifactID string
-	root       string // cleaned src.Path
+	root       string // src.Path, cleaned and with symlinks resolved
 	src        *Source
 	opts       WatchOptions
 	ctx        context.Context
@@ -237,7 +255,14 @@ type watcher struct {
 	dirty     bool      // a change is pending since the last publish
 	quietAt   time.Time // earliest moment the tree counts as settled
 	published string    // digest of the last successfully uploaded pack
+	// changeRetries counts tree_changed retries since the last fs event
+	// or publish, so a misclassified persistent error cannot loop.
+	changeRetries int
 }
+
+// maxChangeRetries bounds consecutive tree_changed retries without a
+// filesystem event in between; the next one is returned as fatal.
+const maxChangeRetries = 3
 
 // run is the only writer of the watcher state, so the invariants (at most
 // one upload at a time, exactly one trailing publish) hold by construction:
@@ -247,11 +272,9 @@ func (w *watcher) run() error {
 	// never uploads by itself. The server has no content-digest API to
 	// compare against, so a tree that already differs from the deployed
 	// version syncs on its next change (or via an explicit "redrop update").
-	sum, err := hashTree(w.root)
-	if err != nil {
-		return err
+	if err := w.seed(); err != nil {
+		return w.mapShutdown(err)
 	}
-	w.published = sum
 	if w.opts.OnReady != nil {
 		w.opts.OnReady()
 	}
@@ -261,6 +284,27 @@ func (w *watcher) run() error {
 		}
 		if err := w.publishIfChanged(); err != nil {
 			return w.mapShutdown(err)
+		}
+	}
+}
+
+// seed records the digest of the tree as found. A build that removes a
+// file mid-scan is waited out like a publish would be: up to
+// maxChangeRetries debounce intervals.
+func (w *watcher) seed() error {
+	for {
+		sum, _, err := scanTree(w.root)
+		if err == nil {
+			w.published = sum
+			w.changeRetries = 0
+			return nil
+		}
+		if err = w.changeRetry(w.scanError(err)); err != nil {
+			return err
+		}
+		w.dirty = false // the seed retries itself; nothing is pending
+		if !w.awaitRetry(w.opts.Debounce) {
+			return context.Canceled
 		}
 	}
 }
@@ -349,6 +393,7 @@ func (w *watcher) handle(ev fsnotify.Event) {
 	if w.ignored(ev.Name) {
 		return // skipped entries never affect published content
 	}
+	w.changeRetries = 0
 	switch {
 	case ev.Op.Has(fsnotify.Create):
 		w.onCreate(ev.Name)
@@ -431,21 +476,8 @@ func (w *watcher) notify(n Notice) {
 // packed, using the same digest domain as hashTree.
 func (w *watcher) publishIfChanged() error {
 	sum, files, err := scanTree(w.root)
-	if errors.Is(err, fs.ErrNotExist) {
-		if _, serr := os.Stat(w.root); errors.Is(serr, fs.ErrNotExist) {
-			// The root itself vanished. There is nothing to publish: the
-			// upload path needs the path on disk. The parent watch sees
-			// the root's recreation, registerAll rebuilds the watches,
-			// and the recreated content publishes as a normal change
-			// (an identical recreation publishes nothing, which is the
-			// content-hash rule working as specified).
-			w.notify(Notice{Kind: NoticeRootVanished, Err: err})
-			return nil
-		}
-		err = sourceChanged(err) // a member vanished between walk and read
-	}
 	if err != nil {
-		return w.sourceError(err)
+		return w.sourceError(w.scanError(err))
 	}
 	if files == 0 {
 		// A build tool cleaned the folder. Keep the last version; the
@@ -459,23 +491,62 @@ func (w *watcher) publishIfChanged() error {
 	return w.publishWithRetry()
 }
 
+// errRootVanished marks a scan or publish that failed because the root
+// itself is gone.
+var errRootVanished = errors.New("watched path disappeared")
+
+func (w *watcher) rootGone() bool {
+	_, err := os.Stat(w.root)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// scanError classifies a not-exist error from scanning the tree, which
+// only reads the tree: if the root is gone, it vanished; if it is still
+// there, a file inside vanished between the walk and its read.
+func (w *watcher) scanError(err error) error {
+	switch {
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	case w.rootGone():
+		return fmt.Errorf("%w: %w", errRootVanished, err)
+	}
+	return sourceChanged(err)
+}
+
 // sourceError keeps watching through local races with a tree that is
-// being rewritten: a tree that changed mid-read (or a file that vanished
-// before upload) is marked dirty and tried again once it settles, and a folder found empty while packing is
-// skipped. Other errors are returned (fatal).
+// being rewritten. Only errors that wrap ErrSourceChanged, which the
+// packer and uploader produce for a file that vanished, shrank, or was
+// edited while read, count as a tree change: the tree is marked dirty and
+// tried again once it settles, at most maxChangeRetries times in a row
+// without a filesystem event. A vanished root waits for its recreation,
+// and an empty folder is skipped. Any other error is fatal.
 func (w *watcher) sourceError(err error) error {
 	switch {
-	case errors.Is(err, ErrSourceChanged), errors.Is(err, fs.ErrNotExist):
-		// Not-exist here is local (no API error wraps it): the root or a
-		// file was replaced between the scan and the upload.
-		w.notify(Notice{Kind: NoticeTreeChanged, Err: err})
-		w.markDirty(w.root)
+	case errors.Is(err, errRootVanished):
+		// There is nothing to publish: the upload path needs the path on
+		// disk. The parent watch sees the root's recreation, registerAll
+		// rebuilds the watches, and the recreated content publishes as a
+		// normal change (an identical recreation publishes nothing, which
+		// is the content-hash rule working as specified).
+		w.notify(Notice{Kind: NoticeRootVanished, Err: err})
 		return nil
 	case errors.Is(err, ErrEmptyDirectory):
 		w.notify(Notice{Kind: NoticeEmptyTree, Err: err})
 		return nil
 	}
-	return err
+	return w.changeRetry(err)
+}
+
+// changeRetry reports a tree change and marks the tree dirty, or returns
+// err when it is not a tree change or the retry budget is spent.
+func (w *watcher) changeRetry(err error) error {
+	if !errors.Is(err, ErrSourceChanged) || w.changeRetries >= maxChangeRetries {
+		return err
+	}
+	w.changeRetries++
+	w.notify(Notice{Kind: NoticeTreeChanged, Err: err})
+	w.markDirty(w.root)
+	return nil
 }
 
 // publishWithRetry calls UpdateDigest until it succeeds, the error is
@@ -485,6 +556,7 @@ func (w *watcher) publishWithRetry() error {
 		sum, a, err := w.up.UpdateDigest(w.ctx, w.artifactID, w.src, w.opts.Progress)
 		if err == nil {
 			w.published = sum
+			w.changeRetries = 0
 			if w.opts.OnPublish != nil {
 				w.opts.OnPublish(WatchResult{Artifact: a, Version: a.Version, At: w.opts.Clock.Now()})
 			}
@@ -494,6 +566,10 @@ func (w *watcher) publishWithRetry() error {
 			return context.Canceled // clean shutdown, not the upload error
 		}
 		if !transient(err) {
+			if errors.Is(err, fs.ErrNotExist) && !errors.Is(err, ErrSourceChanged) && w.rootGone() {
+				// The root vanished between the scan and the publish.
+				err = fmt.Errorf("%w: %w", errRootVanished, err)
+			}
 			return w.sourceError(err)
 		}
 		delay := w.opts.Retrier.Next(attempt)
@@ -581,7 +657,7 @@ func scanTree(root string) (string, int, error) {
 		return sum, 1, err
 	}
 	db := &treeDigestBuilder{}
-	_, err = walkPackable(root, func(rel, abs string, info fs.FileInfo) error {
+	_, err = walkPackable(root, nil, func(rel, abs string, info fs.FileInfo) error {
 		sum, err := hashFile(abs)
 		if err != nil {
 			return err

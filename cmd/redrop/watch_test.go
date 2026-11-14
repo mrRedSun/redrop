@@ -165,7 +165,7 @@ func TestWatchTextNotices(t *testing.T) {
 	}{
 		{client.Notice{Kind: client.NoticeRetry, Attempt: 2, Delay: 1530 * time.Millisecond, Err: errors.New("offline")}, "redrop: retrying in 1.5s (attempt 2): offline\n"},
 		{client.Notice{Kind: client.NoticeRootVanished, Err: errors.New("stat site: no such file or directory")}, "redrop: site disappeared; waiting for it to come back\n"},
-		{client.Notice{Kind: client.NoticeTreeChanged, Err: client.ErrSourceChanged}, "redrop: site changed while publishing; trying again once it settles\n"},
+		{client.Notice{Kind: client.NoticeTreeChanged, Err: client.ErrSourceChanged}, "redrop: site changed while publishing; trying again once it settles: source changed while it was being read\n"},
 		{client.Notice{Kind: client.NoticeEmptyTree, Err: client.ErrEmptyDirectory}, "redrop: site has no files to publish; waiting for files\n"},
 		{client.Notice{Kind: client.NoticeKind("future"), Err: errors.New("new kind")}, "redrop: watch notice future: new kind\n"},
 	} {
@@ -259,5 +259,14 @@ func TestEmptyFolderExitCode(t *testing.T) {
 	var ee *exitError
 	if !errors.As(mapErr(err), &ee) || ee.code != exitUsage || !errors.Is(err, client.ErrEmptyDirectory) {
 		t.Fatalf("empty folder: %v", err)
+	}
+}
+
+// A fatal local error from watch, such as a missing temp directory, exits 1.
+func TestWatchLocalErrorExitCode(t *testing.T) {
+	var ee *exitError
+	err := mapErr(&os.PathError{Op: "open", Path: "/missing/redrop-source-1", Err: os.ErrNotExist})
+	if !errors.As(err, &ee) || ee.code != exitGeneral {
+		t.Fatalf("local error: %v", err)
 	}
 }

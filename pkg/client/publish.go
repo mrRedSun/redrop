@@ -38,6 +38,12 @@ type Source struct {
 	// file entries. Excluded directory subtrees are not traversed or
 	// counted as files.
 	OnSkipped func(n int)
+
+	// beforeRead, set only by tests, runs before a file is read for
+	// packing (between a folder walk's stat and read, and between a zip's
+	// first hash and its conversion) to reproduce a tree that changes
+	// mid-read.
+	beforeRead func(rel string)
 }
 
 // Prepared is a source ready to upload: the original file itself, or a
@@ -117,6 +123,20 @@ func Prepare(src *Source) (*Prepared, error) {
 			return nil, errors.New("a file name is required when reading from stdin (use --name)")
 		}
 	} else {
+		if name == "" {
+			abs, err := filepath.Abs(srcPath)
+			if err != nil {
+				return nil, err
+			}
+			name = filepath.Base(abs) // the name given, not a link target's
+		}
+		// Resolve a symlinked root once, so a link to a folder is walked
+		// as that folder (the walk does not follow a symlinked root).
+		resolved, err := filepath.EvalSymlinks(srcPath)
+		if err != nil {
+			return nil, err
+		}
+		srcPath = resolved
 		st, err := os.Stat(srcPath)
 		if err != nil {
 			return nil, err
@@ -124,13 +144,6 @@ func Prepare(src *Source) (*Prepared, error) {
 		isDir = st.IsDir()
 		if !isDir && !st.Mode().IsRegular() {
 			return nil, errors.New("source must be a regular file or directory")
-		}
-		if name == "" {
-			abs, err := filepath.Abs(srcPath)
-			if err != nil {
-				return nil, err
-			}
-			name = filepath.Base(abs)
 		}
 	}
 	kind := src.Kind
@@ -172,9 +185,9 @@ func Prepare(src *Source) (*Prepared, error) {
 	}
 	switch {
 	case isDir:
-		p.Digest, p.skipped, err = packDir(srcPath, packed)
+		p.Digest, p.skipped, err = packDir(srcPath, src.beforeRead, packed)
 	case strings.HasSuffix(lower, ".zip"):
-		p.Digest, err = zipToTarGz(srcPath, packed)
+		p.Digest, err = zipToTarGz(srcPath, src.beforeRead, packed)
 	default:
 		entry := name
 		if strings.EqualFold(path.Ext(name), ".html") || strings.EqualFold(path.Ext(name), ".htm") {
@@ -246,17 +259,13 @@ func vimSwapName(lower string) bool {
 	return strings.HasPrefix(ext, ".sw") && (ext[3] >= 'a' && ext[3] <= 'p' || ext[3] == 'x')
 }
 
-// walkTestHook, when set by a test, runs between a file's stat and its
-// read, to reproduce a tree that changes mid-walk. Always nil otherwise.
-var walkTestHook func(rel string)
-
 // walkPackable walks the regular files under dir that the packer packs —
 // applying the shared skip rules and following symlinks to their content,
 // exactly like packDir — and calls fn for each with the slash-separated
 // path relative to dir, the walked path, and the followed file info; a
 // non-nil return from fn aborts the walk. It is the one walk behind both
 // packing and the watch content digest.
-func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) (skipped int, err error) {
+func walkPackable(dir string, beforeRead func(string), fn func(rel, abs string, info fs.FileInfo) error) (skipped int, err error) {
 	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -280,8 +289,8 @@ func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) 
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		if walkTestHook != nil {
-			walkTestHook(rel)
+		if beforeRead != nil {
+			beforeRead(rel)
 		}
 		return fn(rel, p, info)
 	})
@@ -310,11 +319,11 @@ func (b *treeDigestBuilder) digest() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func packDir(dir string, w io.Writer) (string, int, error) {
+func packDir(dir string, beforeRead func(string), w io.Writer) (string, int, error) {
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 	db := &treeDigestBuilder{}
-	skipped, err := walkPackable(dir, func(rel, abs string, info fs.FileInfo) error {
+	skipped, err := walkPackable(dir, beforeRead, func(rel, abs string, info fs.FileInfo) error {
 		sum, err := addFile(tw, abs, rel, info.Size())
 		if err != nil {
 			return err
@@ -376,21 +385,28 @@ func packSingle(src, name string, w io.Writer) (string, error) {
 
 // zipToTarGz converts a zip to a tar.gz bundle and returns the zip's
 // SHA-256. Zip reads are random access, so the file is hashed before and
-// after the conversion; a difference means it changed in between.
-func zipToTarGz(src string, w io.Writer) (string, error) {
+// after the conversion; a difference means it changed in between. That
+// includes a conversion that failed because the zip was being rewritten:
+// it fails as ErrSourceChanged when the zip's hash changed.
+func zipToTarGz(src string, beforeRead func(string), w io.Writer) (string, error) {
 	before, err := hashFile(src)
-	if err != nil {
-		return "", err
-	}
-	if err := convertZip(src, w); err != nil {
-		return "", err
-	}
-	after, err := hashFile(src)
 	if err != nil {
 		return "", sourceChanged(err)
 	}
-	if after != before {
+	if beforeRead != nil {
+		beforeRead(filepath.Base(src))
+	}
+	convErr := convertZip(src, w)
+	after, err := hashFile(src)
+	switch {
+	case err != nil:
+		return "", sourceChanged(err)
+	case after != before && convErr != nil:
+		return "", fmt.Errorf("%w: %s was modified while converting it: %w", ErrSourceChanged, src, convErr)
+	case after != before:
 		return "", fmt.Errorf("%w: %s was modified while converting it", ErrSourceChanged, src)
+	case convErr != nil:
+		return "", convErr
 	}
 	return before, nil
 }
@@ -511,6 +527,11 @@ func (c *Client) prepareAndUpload(ctx context.Context, src *Source, progress Pro
 	defer p.Close()
 	id, blobSum, err := c.UploadFile(ctx, p.File, progress)
 	if err != nil {
+		if p.Digest == "" && src.Reader == nil && errors.Is(err, fs.ErrNotExist) {
+			// File is the source itself, found by Prepare a moment ago:
+			// it was deleted or replaced in between.
+			err = fmt.Errorf("%w: %w", ErrSourceChanged, err)
+		}
 		return nil, err
 	}
 	if p.skipped > 0 && src.OnSkipped != nil {
@@ -525,6 +546,9 @@ func (c *Client) prepareAndUpload(ctx context.Context, src *Source, progress Pro
 
 // retrySourceChange runs step again once if the source changed while it
 // was read, then gives up with an error that still wraps ErrSourceChanged.
+// A retried upload abandons the first upload session, possibly after all
+// of it was sent; the server deletes unfinished sessions when they expire
+// (24h), so until then an edited 500 MB share holds up to 1 GB of staging.
 func retrySourceChange(step func() (*upload, error)) (*upload, error) {
 	u, err := step()
 	if errors.Is(err, ErrSourceChanged) {

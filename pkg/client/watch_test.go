@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,8 +19,8 @@ import (
 // The fake uses the real preparation path. In particular its return value
 // is Prepared.Digest, not an independently hashed live tree or a blob hash.
 type fakeUploader struct {
-	// duringPack runs inside Prepare's walk, between each file's stat and
-	// read (see walkTestHook); hashTree's walks are not affected.
+	// duringPack runs inside Prepare, before each file is read for packing
+	// (Source.beforeRead); hashTree's walks are not affected.
 	duringPack            func(rel string)
 	beforePrepare         func() // runs once, before the next Prepare
 	mu                    sync.Mutex
@@ -32,7 +33,9 @@ type fakeUploader struct {
 
 func (f *fakeUploader) UpdateDigest(ctx context.Context, id string, src *Source, _ Progress) (string, *api.Artifact, error) {
 	f.mu.Lock()
-	walkTestHook = f.duringPack
+	hooked := *src
+	hooked.beforeRead = f.duringPack
+	src = &hooked
 	before := f.beforePrepare
 	f.beforePrepare = nil
 	f.mu.Unlock()
@@ -40,7 +43,6 @@ func (f *fakeUploader) UpdateDigest(ctx context.Context, id string, src *Source,
 		before()
 	}
 	p, err := Prepare(src)
-	walkTestHook = nil
 	if err != nil {
 		return "", nil, err
 	}
@@ -184,6 +186,14 @@ type watchHarness struct {
 	notices   chan Notice
 	cancel    context.CancelFunc
 	done      chan error
+	exited    bool
+}
+
+// exit waits for the watcher to return on its own (a fatal error).
+func (h *watchHarness) exit() error {
+	h.t.Helper()
+	h.exited = true
+	return receive(h.t, h.done)
 }
 
 func newHarness(t *testing.T, up Uploader, root string) *watchHarness {
@@ -206,8 +216,10 @@ func newHarness(t *testing.T, up Uploader, root string) *watchHarness {
 	receive(t, ready)
 	t.Cleanup(func() {
 		cancel()
-		if err := receive(t, h.done); err != nil {
-			t.Errorf("watcher exit: %v", err)
+		if !h.exited {
+			if err := receive(t, h.done); err != nil {
+				t.Errorf("watcher exit: %v", err)
+			}
 		}
 		fw.Close()
 	})
@@ -824,4 +836,99 @@ func TestRealClientWatchMidUploadEdit(t *testing.T) {
 		t.Fatalf("published %q in %d versions; want v2 once", got, state.versions)
 	}
 	receive(t, h.published)
+}
+
+// A tree change is retried at most maxChangeRetries times in a row without
+// a filesystem event; then the error is fatal instead of looping forever.
+func TestWatchTreeChangedRetriesAreBounded(t *testing.T) {
+	changed := fmt.Errorf("%w: test", ErrSourceChanged)
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	up := &fakeUploader{failures: []error{changed, changed, changed, changed}}
+	h := newHarness(t, up, dir)
+	write(t, dir, "index.html", "v1")
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	for i := 0; i < maxChangeRetries; i++ {
+		h.advance(time.Second)
+		if n := receive(t, h.notices); n.Kind != NoticeTreeChanged {
+			t.Fatalf("notice %d=%+v", i, n)
+		}
+	}
+	h.sync()
+	h.clk.advance(time.Second)
+	if err := h.exit(); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("exit=%v; want the tree-change error as fatal", err)
+	}
+}
+
+// A filesystem event resets the budget: a tree that keeps changing
+// because a build is running is not a stuck error.
+func TestWatchTreeChangedBudgetResetsOnEvent(t *testing.T) {
+	changed := fmt.Errorf("%w: test", ErrSourceChanged)
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	up := &fakeUploader{failures: []error{changed, changed, changed, changed, changed}}
+	h := newHarness(t, up, dir)
+	write(t, dir, "index.html", "v1")
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	for i := 0; i < 5; i++ {
+		h.advance(time.Second)
+		if n := receive(t, h.notices); n.Kind != NoticeTreeChanged {
+			t.Fatalf("notice %d=%+v", i, n)
+		}
+		if i == 1 {
+			h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+		}
+	}
+	h.advance(time.Second)
+	if r := receive(t, h.published); r.Version != 6 {
+		t.Fatalf("published version %d; want the sixth attempt", r.Version)
+	}
+}
+
+// A local not-found error that is not a tree race, such as a missing
+// TMPDIR, stops the watcher instead of being retried as tree_changed.
+func TestWatchMissingTempDirIsFatal(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	write(t, dir, "index.html", "v0")
+	t.Setenv("TMPDIR", missing)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{})
+	notices := make(chan Notice, 16)
+	done := make(chan error, 1)
+	opts := WatchOptions{Debounce: 10 * time.Millisecond, OnReady: func() { close(ready) }, OnNotice: func(n Notice) { notices <- n }}
+	go func() { done <- Watch(ctx, &fakeUploader{}, "art", &Source{Path: dir}, opts) }()
+	receive(t, ready)
+	write(t, dir, "index.html", "v1")
+	err := receive(t, done)
+	if err == nil || errors.Is(err, ErrSourceChanged) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("exit=%v; want the temp-dir error", err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("notices before exit: %+v", <-notices)
+	}
+}
+
+// A root that is a symlink to a folder is watched and published as that
+// folder.
+func TestWatchSymlinkRoot(t *testing.T) {
+	dist := t.TempDir()
+	write(t, dist, "index.html", "v0")
+	link := filepath.Join(t.TempDir(), "site")
+	if err := os.Symlink(dist, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	up := &fakeUploader{}
+	published, cancel, done := runFilesystemWatch(t, up, link)
+	write(t, dist, "index.html", "v1")
+	receive(t, published)
+	if names := up.lastPack(); fmt.Sprint(names) != "[index.html]" {
+		t.Fatalf("pack=%v", names)
+	}
+	cancel()
+	if err := receive(t, done); err != nil {
+		t.Fatal(err)
+	}
 }

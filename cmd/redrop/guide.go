@@ -75,8 +75,8 @@ Share and update print one stderr line with the number of excluded file
 entries encountered, when nonzero. Files inside excluded directory trees
 are not counted. No skipped-file line is printed when the count is zero.
 A folder with no files to upload fails with exit code 2. A PATH that is a
-symlink to a folder is not followed and counts as empty; pass the folder
-itself (for example "$(realpath dist)").
+symlink is resolved once: a link to a folder uploads that folder, and a
+link to a file uploads the target's bytes under the link's name.
 
 Supplied .zip/.tar.gz bundle entries are not editor-filtered. A .zip is
 converted to tar.gz using the existing archive conventions: strip a common
@@ -155,7 +155,11 @@ the first retry), and delay_ms, the wait before it.
 Build tools that clean and rebuild the folder are handled: if files change
 or vanish while a version is packed or uploaded, watch prints tree_changed
 and tries again once the folder settles; an empty folder prints
-empty_folder and publishes nothing until files appear.
+empty_folder and publishes nothing until files appear. After 3 tree_changed
+retries in a row with no new file event, the error is fatal (exit 1). Other
+local errors, such as a missing temp directory, stop watch at once. A PATH
+that is a symlink is resolved when watch starts, and the real folder or
+file is watched.
 
 Never two uploads at once; changes that land during an upload are published
 once more afterwards. Atomic editor saves (write temp file, rename) and
