@@ -245,32 +245,66 @@ type Target struct {
 	Location string
 }
 
-func (s *Service) fileAt(ctx context.Context, a *store.Artifact, p string) *store.File {
-	f, err := s.db.FileAt(ctx, a.ID, a.CurrentVersion, p)
+// Snapshot addresses one version's content: everything ResolvePath and
+// ListDir need. Old versions are just another Snapshot, so no other code
+// knows versions exist.
+type Snapshot struct {
+	ArtifactID string
+	Version    int
+	Kind       string
+	Entry      string
+	SPA        bool
+	Size       int64
+	Files      int
+	Published  time.Time
+}
+
+// CurrentSnapshot is a's current version.
+func CurrentSnapshot(a *store.Artifact) Snapshot {
+	return Snapshot{ArtifactID: a.ID, Version: a.CurrentVersion, Kind: a.Kind, Entry: a.Entry, SPA: a.SPA,
+		Size: a.Size, Files: a.Files, Published: a.Published}
+}
+
+// snapshotAt returns retained version v of a (the current one when v is 0
+// or the current number).
+func (s *Service) snapshotAt(ctx context.Context, a *store.Artifact, v int) (Snapshot, bool) {
+	if v == 0 || v == a.CurrentVersion {
+		return CurrentSnapshot(a), true
+	}
+	row, err := s.db.VersionAt(ctx, a.ID, v)
+	if err != nil {
+		return Snapshot{}, false
+	}
+	return Snapshot{ArtifactID: a.ID, Version: row.Number, Kind: row.Kind, Entry: row.Entry, SPA: row.SPA,
+		Size: row.Size, Files: row.Files, Published: row.CreatedAt}, true
+}
+
+func (s *Service) fileAt(ctx context.Context, snap Snapshot, p string) *store.File {
+	f, err := s.db.FileAt(ctx, snap.ArtifactID, snap.Version, p)
 	if err != nil {
 		return nil
 	}
 	return f
 }
 
-// ResolvePath maps a URL path onto the current version's content.
-func (s *Service) ResolvePath(ctx context.Context, a *store.Artifact, urlPath string) Target {
-	switch a.Kind {
+// ResolvePath maps a URL path onto one version's content.
+func (s *Service) ResolvePath(ctx context.Context, snap Snapshot, urlPath string) Target {
+	switch snap.Kind {
 	case api.KindHTML:
 		if urlPath == "/" || urlPath == "/index.html" {
-			if f := s.fileAt(ctx, a, "index.html"); f != nil {
+			if f := s.fileAt(ctx, snap, "index.html"); f != nil {
 				return Target{Kind: TargetFile, File: f}
 			}
 		}
 		return Target{}
 	case api.KindFile:
-		f := s.fileAt(ctx, a, a.Entry)
+		f := s.fileAt(ctx, snap, snap.Entry)
 		switch {
 		case f == nil:
 			return Target{}
 		case urlPath == "/":
 			return Target{Kind: TargetViewer, File: f}
-		case strings.TrimPrefix(urlPath, "/") == a.Entry:
+		case strings.TrimPrefix(urlPath, "/") == snap.Entry:
 			return Target{Kind: TargetFile, File: f}
 		}
 		return Target{}
@@ -279,30 +313,30 @@ func (s *Service) ResolvePath(ctx context.Context, a *store.Artifact, urlPath st
 	p := strings.TrimPrefix(path.Clean(urlPath), "/")
 	trailing := strings.HasSuffix(urlPath, "/")
 	if p == "" || p == "." {
-		if a.Entry != "" {
-			if f := s.fileAt(ctx, a, a.Entry); f != nil {
+		if snap.Entry != "" {
+			if f := s.fileAt(ctx, snap, snap.Entry); f != nil {
 				return Target{Kind: TargetFile, File: f}
 			}
 		}
 		return Target{Kind: TargetListing}
 	}
-	if f := s.fileAt(ctx, a, p); f != nil {
+	if f := s.fileAt(ctx, snap, p); f != nil {
 		return Target{Kind: TargetFile, File: f}
 	}
-	if f := s.fileAt(ctx, a, p+"/index.html"); f != nil {
+	if f := s.fileAt(ctx, snap, p+"/index.html"); f != nil {
 		if !trailing {
 			return Target{Kind: TargetRedirect, Location: "/" + p + "/"}
 		}
 		return Target{Kind: TargetFile, File: f}
 	}
-	if files, _ := s.db.DirFiles(ctx, a.ID, a.CurrentVersion, p+"/"); len(files) > 0 {
+	if files, _ := s.db.DirFiles(ctx, snap.ArtifactID, snap.Version, p+"/"); len(files) > 0 {
 		if !trailing {
 			return Target{Kind: TargetRedirect, Location: "/" + p + "/"}
 		}
 		return Target{Kind: TargetListing, Dir: p + "/"}
 	}
-	if a.SPA && a.Entry != "" && path.Ext(p) == "" {
-		if f := s.fileAt(ctx, a, a.Entry); f != nil {
+	if snap.SPA && snap.Entry != "" && path.Ext(p) == "" {
+		if f := s.fileAt(ctx, snap, snap.Entry); f != nil {
 			return Target{Kind: TargetFile, File: f}
 		}
 	}
@@ -341,8 +375,8 @@ type DirEntry struct {
 }
 
 // List returns the immediate children of dir in the current version.
-func (s *Service) ListDir(ctx context.Context, a *store.Artifact, dir string) []DirEntry {
-	files, _ := s.db.DirFiles(ctx, a.ID, a.CurrentVersion, dir)
+func (s *Service) ListDir(ctx context.Context, snap Snapshot, dir string) []DirEntry {
+	files, _ := s.db.DirFiles(ctx, snap.ArtifactID, snap.Version, dir)
 	seen := map[string]bool{}
 	var out []DirEntry
 	for _, f := range files {

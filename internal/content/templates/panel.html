@@ -1,0 +1,17 @@
+{{define "panel"}}<button type="button" class="rd-i" popovertarget="rd-info" aria-label="About this shared page">i</button>
+<div id="rd-info" class="rd-panel" popover role="region" aria-label="Shared page info">
+<h2>{{.Title}}</h2>
+<ul class="rd-facts">
+<li>Version {{.Version}}, published <span data-rel="{{iso .Published}}">{{utc .Published}}</span><small data-abs="{{iso .Published}}"></small></li>
+<li>{{with .ExpiresAt}}<span data-expires="{{iso .}}">Expires {{utc .}}</span><small data-abs="{{iso .}}"></small>{{else}}Never expires{{end}}</li>
+{{if eq .MaxViews 1}}<li>One-time link: this was the only view.</li>
+{{else if .MaxViews}}<li>{{.ViewsLeft}} of {{.MaxViews}} views left</li>
+{{end}}{{if .Password}}<li>Password-protected</li>
+{{end}}<li>{{bytes .Size}} in {{.Files}} file{{if ne .Files 1}}s{{end}}</li>
+</ul>
+{{if .Revisions}}<h3>Versions</h3>
+<ol class="rd-revs">{{range .Revisions}}
+<li{{if .Viewing}} aria-current="page"{{end}}>{{if and .Href (not .Viewing)}}<a href="{{.Href}}">Version {{.Number}}</a>{{else}}Version {{.Number}}{{end}}{{if .Current}} <span class="rd-tag">current</span>{{end}}{{if and .Viewing (not .Current)}} <span class="rd-tag">viewing</span>{{end}} · <span data-rel="{{iso .Published}}">{{utc .Published}}</span>{{with .Note}}<span class="rd-note">{{.}}</span>{{end}}</li>{{end}}
+</ol>{{end}}
+<div class="rd-foot"><img src="/__redrop/favicon.svg" alt="" width="16" height="16">Shared with redrop</div>
+</div>{{end}}

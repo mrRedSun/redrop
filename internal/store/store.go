@@ -16,7 +16,21 @@ import (
 //go:embed schema.sql
 var schemaV1 string
 
-var migrations = []string{schemaV1}
+// schemaV2 adds the per-artifact info button setting. NULL follows the
+// server default (REDROP_INFO_BUTTON_DEFAULT), so existing rows keep it.
+const schemaV2 = `ALTER TABLE artifacts ADD COLUMN info_button INTEGER;`
+
+// schemaV3 adds whether viewers may open older versions (off unless the owner
+// enables it); a version high-water mark, so each version number is used
+// once per artifact and a saved ?redrop-version=N link never shows other
+// bytes; and whether a version's note may be shown to viewers. Notes written
+// before viewers could see them stay private (0); new notes are public.
+const schemaV3 = `ALTER TABLE artifacts ADD COLUMN viewer_old_versions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE versions ADD COLUMN note_public INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artifacts ADD COLUMN last_version INTEGER NOT NULL DEFAULT 0;
+UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = artifacts.id), 0));`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3}
 
 var ErrNotFound = errors.New("not found")
 
@@ -105,6 +119,13 @@ func nullTime(t *time.Time) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: t.Unix(), Valid: true}
+}
+
+func nullBool(b *bool) sql.NullBool {
+	if b == nil {
+		return sql.NullBool{}
+	}
+	return sql.NullBool{Bool: *b, Valid: true}
 }
 
 func notFound(err error) error {

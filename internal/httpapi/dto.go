@@ -16,7 +16,8 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		Size: m.Size, TotalSize: m.TotalSize, Files: m.Files, Version: m.Version, Versions: m.Versions,
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
-		PurgeAt: m.PurgeAt, TokenName: m.TokenName,
+		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
+		OldVersions: m.OldVersions,
 	}
 }
 
@@ -43,7 +44,7 @@ func mapItems[T, U any](in []T, f func(T) U) []U {
 
 func versionDTO(v sharing.Version) api.Version {
 	return api.Version{Number: v.Number, Kind: v.Kind, Size: v.Size, Files: v.Files, Entry: v.Entry, SPA: v.SPA,
-		Note: v.Note, CreatedAt: v.CreatedAt, TokenName: v.TokenName, Current: v.Current}
+		Note: v.Note, NotePublic: v.NotePublic, CreatedAt: v.CreatedAt, TokenName: v.TokenName, Current: v.Current}
 }
 
 func fileListDTO(f sharing.FileList) api.FileList {
@@ -100,11 +101,11 @@ func contentFromRequest(p api.PublishRequest) sharing.Content {
 }
 
 func settingsFromRequest(r api.CreateArtifactRequest) sharing.Settings {
-	return sharing.Settings{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews}
+	return sharing.Settings{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, InfoButton: r.InfoButton, OldVersions: r.OldVersions}
 }
 
 func patchFromRequest(r api.UpdateArtifactRequest) sharing.Patch {
-	return sharing.Patch{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, ResetViews: r.ResetViews, Revoked: r.Revoked, SPA: r.SPA}
+	return sharing.Patch{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, ResetViews: r.ResetViews, Revoked: r.Revoked, SPA: r.SPA, InfoButton: r.InfoButton, OldVersions: r.OldVersions}
 }
 
 func userPatchFromRequest(r api.AdminUpdateUserRequest) accounts.UserPatch {

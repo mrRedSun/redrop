@@ -12,6 +12,19 @@ cross-platform CLI that agents drive.
 - Optional password and view limit. One-time links show an "Open" page first, so
   chat link previews don't use them up. Same-link versions with rollback.
 - Multi-user and invite-only; built-in login with TOTP, plus OIDC single sign-on.
+- Shared pages get a small info button showing viewers the version history,
+  expiry countdown, and remaining views, never who shared them. HTML opens in
+  redrop's viewer, with the artifact untouched in a frame on the same origin,
+  and the address bar follows the frame. Turn it off per artifact (`--no-info`,
+  or in the dashboard), or with `?redrop-info=0` (remembered for 30 minutes
+  when the link is opened directly; when it's clicked on another website,
+  only that page is direct). Clients without Fetch Metadata (curl, very old
+  browsers) always get the artifact directly. Owners can let viewers open
+  older versions (`--old-versions`); inside an older version, a root-absolute
+  link (`/x.html`) leads to the current version. Change notes on new versions are shown
+  to viewers; notes written before this release stay private.
+- Artifacts can't register service workers (a worker would outlive
+  revocation). Everything else behaves as a normal web page on its own origin.
 
 ## Read first
 
@@ -120,6 +133,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_DATA_DIR` | `/data` |
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
+| `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 
 ## Reverse proxy

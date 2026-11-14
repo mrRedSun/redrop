@@ -12,6 +12,7 @@ const (
 	cookieVisit   = "visit"   // granted after Open / correct password
 	cookiePreview = "preview" // owner preview from the dashboard
 	cookieSeen    = "seen"    // de-duplicates view counting
+	cookieDirect  = "direct"  // the visitor chose the direct view (?redrop-info=0)
 )
 
 func (h *Handler) cookieName(base string) string {
@@ -39,4 +40,9 @@ func (h *Handler) setCookie(w http.ResponseWriter, base string, g *sharing.Grant
 		c.SameSite, c.Partitioned = http.SameSiteNoneMode, true
 	}
 	http.SetCookie(w, c)
+}
+
+// clearCookie removes a cookie set by setCookie (non-cross-site).
+func (h *Handler) clearCookie(w http.ResponseWriter, base string) {
+	http.SetCookie(w, &http.Cookie{Name: h.cookieName(base), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !h.cfg.Insecure, SameSite: http.SameSiteLaxMode})
 }

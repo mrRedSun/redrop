@@ -31,9 +31,12 @@ type Artifact struct {
 	ExpiresAt      *time.Time
 	ExhaustedAt    *time.Time
 	LastViewedAt   *time.Time
+	InfoButton     *bool // nil = server default
+	OldVersions    bool  // viewers may open older versions
 
 	// Current version details (joined).
 	Kind      string
+	Published time.Time // when the current version was published
 	Size      int64
 	Files     int
 	Entry     string
@@ -80,8 +83,8 @@ func (v *NewVersion) size() int64 {
 }
 
 const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.token_id,''), a.token_name, a.title, a.current_version, a.password_hash,
-	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at,
-	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0),
+	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button, a.viewer_old_versions,
+	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0), coalesce(v.created_at,0),
 	(SELECT coalesce(sum(size),0) FROM versions WHERE artifact_id = a.id),
 	(SELECT count(*) FROM versions WHERE artifact_id = a.id)
 	FROM artifacts a JOIN users u ON u.id = a.user_id
@@ -90,14 +93,19 @@ const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.t
 func scanArtifact(r scanner) (*Artifact, error) {
 	var a Artifact
 	var created, updated int64
+	var published int64
 	var exp, exh, last sql.NullInt64
+	var info sql.NullBool
 	err := r.Scan(&a.ID, &a.Slug, &a.UserID, &a.OwnerUsername, &a.TokenID, &a.TokenName, &a.Title, &a.CurrentVersion, &a.PasswordHash,
-		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last,
-		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &a.TotalSize, &a.Versions)
+		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last, &info, &a.OldVersions,
+		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &published, &a.TotalSize, &a.Versions)
 	if err != nil {
 		return nil, notFound(err)
 	}
-	a.CreatedAt, a.UpdatedAt = ts(created), ts(updated)
+	if info.Valid {
+		a.InfoButton = &info.Bool
+	}
+	a.CreatedAt, a.UpdatedAt, a.Published = ts(created), ts(updated), ts(published)
 	a.ExpiresAt, a.ExhaustedAt, a.LastViewedAt = tsp(exp), tsp(exh), tsp(last)
 	return &a, nil
 }
@@ -150,7 +158,7 @@ func (s *Store) ListArtifacts(ctx context.Context, f ListFilter) ([]*Artifact, e
 }
 
 func insertVersion(ctx context.Context, tx *sql.Tx, artifactID string, number int, v *NewVersion) error {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO versions (artifact_id, number, kind, size, files, entry, spa, note, token_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO versions (artifact_id, number, kind, size, files, entry, spa, note, note_public, token_name, created_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)`,
 		artifactID, number, v.Kind, v.size(), len(v.Files), v.Entry, v.SPA, v.Note, v.TokenName, now()); err != nil {
 		return err
 	}
@@ -175,6 +183,8 @@ type NewArtifact struct {
 	PasswordHash string
 	MaxViews     int
 	ExpiresAt    *time.Time
+	InfoButton   *bool // nil = server default
+	OldVersions  bool
 }
 
 // ErrQuota is returned when a write would exceed a quota.
@@ -213,8 +223,8 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 		}
 		n := now()
 		if err := s.withNewSlug(func(slug string) error {
-			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at)
-			VALUES (?,?,?,?,?,?,1,?,?,?,?,?)`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt))
+			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, last_version)
+			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,1)`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions)
 			return err
 		}); err != nil {
 			return err
@@ -231,13 +241,14 @@ func (s *Store) AddVersion(ctx context.Context, artifactID, userID string, v *Ne
 		if err := checkQuota(ctx, tx, userID, v.size(), maxTotal); err != nil {
 			return err
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT coalesce(max(number),0)+1 FROM versions WHERE artifact_id = ?`, artifactID).Scan(&number); err != nil {
-			return err
+		// Never reuse a number, even one whose version was deleted.
+		if err := tx.QueryRowContext(ctx, `SELECT max(last_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = ?), 0)) + 1 FROM artifacts WHERE id = ?`, artifactID, artifactID).Scan(&number); err != nil {
+			return notFound(err)
 		}
 		if err := insertVersion(ctx, tx, artifactID, number, v); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE artifacts SET current_version = ?, updated_at = ? WHERE id = ?`, number, now(), artifactID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE artifacts SET current_version = ?, last_version = ?, updated_at = ? WHERE id = ?`, number, number, now(), artifactID); err != nil {
 			return err
 		}
 		if keep > 0 {
@@ -273,6 +284,8 @@ type ArtifactUpdate struct {
 	RotateSlug   bool
 	BumpGen      bool
 	SPA          *bool
+	InfoButton   *bool
+	OldVersions  *bool
 }
 
 func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) error {
@@ -300,6 +313,12 @@ func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate)
 		}
 		if u.Revoked != nil {
 			set, args = append(set, "revoked = ?"), append(args, *u.Revoked)
+		}
+		if u.InfoButton != nil {
+			set, args = append(set, "info_button = ?"), append(args, *u.InfoButton)
+		}
+		if u.OldVersions != nil {
+			set, args = append(set, "viewer_old_versions = ?"), append(args, *u.OldVersions)
 		}
 		slugArg := -1
 		if u.RotateSlug {
@@ -349,19 +368,33 @@ func (s *Store) DeleteArtifact(ctx context.Context, id string) error {
 }
 
 type VersionRow struct {
-	Number    int
-	Kind      string
-	Size      int64
-	Files     int
-	Entry     string
-	SPA       bool
-	Note      string
-	TokenName string
-	CreatedAt time.Time
+	Number     int
+	Kind       string
+	Size       int64
+	Files      int
+	Entry      string
+	SPA        bool
+	Note       string
+	NotePublic bool // shown to viewers; false for notes written before they could be
+	TokenName  string
+	CreatedAt  time.Time
+}
+
+// VersionAt returns one version's row, or ErrNotFound when it is not retained.
+func (s *Store) VersionAt(ctx context.Context, artifactID string, number int) (VersionRow, error) {
+	var v VersionRow
+	var created int64
+	err := s.DB.QueryRowContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at FROM versions WHERE artifact_id = ? AND number = ?`, artifactID, number).
+		Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created)
+	if err != nil {
+		return VersionRow{}, notFound(err)
+	}
+	v.CreatedAt = ts(created)
+	return v, nil
 }
 
 func (s *Store) ListVersions(ctx context.Context, artifactID string) ([]VersionRow, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT number, kind, size, files, entry, spa, note, token_name, created_at FROM versions WHERE artifact_id = ? ORDER BY number DESC`, artifactID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at FROM versions WHERE artifact_id = ? ORDER BY number DESC`, artifactID)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +403,7 @@ func (s *Store) ListVersions(ctx context.Context, artifactID string) ([]VersionR
 	for rows.Next() {
 		var v VersionRow
 		var created int64
-		if err := rows.Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.TokenName, &created); err != nil {
+		if err := rows.Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = ts(created)
