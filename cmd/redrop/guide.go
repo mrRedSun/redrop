@@ -76,16 +76,21 @@ index.html files are never overwritten. --spa is not supported with rendering.
 Ordinary and Markdown directories share one confined packer. Relative symlinks
 within the directory are followed; outside-root, absolute, and cyclic links are
 usage errors. Broken asset symlinks and non-regular bundle entries are skipped
-with stderr warnings. Selected Markdown sources and entries must be regular files.
+with stderr warnings. Explicitly named single files follow symlinks normally,
+including absolute links or links into other directories. Only directory walks
+and --entry are root-confined. Sources and entries must resolve to regular files;
+Unix opens use nonblocking mode and re-check the descriptor before reading.
 Missing local references in single-file uploads produce a stderr warning
 suggesting directory publishing. Rejected image sources produce a warning for
-both files and directories, naming the source and the local-image rule.
-Invalid rendering options exit with 2.
+both files and directories, once per distinct source, naming it and the local-image
+rule. Empty sources have an explicit warning. Invalid options, missing sources
+or entries, and symlink cycles exit with 2.
 
 The page has heading anchors, a TOC at four headings, offline syntax highlighting,
 copy buttons, GFM tables/task lists, blockquotes, and responsive light/dark styles.
 Unknown languages and code blocks over 64 KiB stay plain. Sources over 8 MiB must
-use --render none. HTML comments are omitted. Other raw HTML becomes escaped
+use --render none. HTML comments are omitted while visible text after them stays.
+Comment-only blocks emit nothing. Other raw HTML becomes escaped
 inline text or normal paragraphs, not Copy-enabled code; List<String> stays intact. There is no raw-HTML opt-in. HTTP/HTTPS and mailto
 navigation links use a new tab with no opener/referrer. Images stay local-only;
 active schemes, data URIs and unsafe attributes are rejected. A page CSP blocks

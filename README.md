@@ -73,7 +73,11 @@ never uploads its siblings. Directory rendering refuses an existing root
 same packer and follow relative symlinks only within the selected directory.
 Outside-root, absolute, and cyclic symlinks fail with usage errors. Broken asset
 symlinks and other non-regular bundle entries are skipped with stderr warnings.
-Selected Markdown sources must be regular files. Unpack archives before rendering.
+Explicitly named single files follow normal filesystem symlinks, including links
+into other directories; only directory walks and `--entry` are root-confined.
+Selected sources must resolve to regular files. Unix source and entry opens use
+nonblocking mode and re-check the descriptor to reject a swapped-in FIFO.
+Unpack archives before rendering.
 Missing local references in a single-file upload produce a stderr warning and a
 directory-publishing suggestion. Rejected image sources produce warnings for
 both single files and directories, naming the source and the local-image rule.

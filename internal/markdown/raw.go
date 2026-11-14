@@ -44,12 +44,6 @@ func renderHTMLText(w util.BufWriter, source []byte, node ast.Node, entering boo
 		return ast.WalkContinue, nil
 	}
 	n := node.(*ast.HTMLBlock)
-	if n.HTMLBlockType == ast.HTMLBlockType2 {
-		return ast.WalkContinue, nil
-	}
-	if _, err := w.WriteString("<p>"); err != nil {
-		return ast.WalkStop, err
-	}
 	var content bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
 		line := n.Lines().At(i)
@@ -61,6 +55,7 @@ func renderHTMLText(w util.BufWriter, source []byte, node ast.Node, entering boo
 	// Tokenize only to omit actual comments inside a larger HTML block. Raw
 	// token bytes preserve tags and attributes exactly before escaping them.
 	tokens := html.NewTokenizer(&content)
+	var visible bytes.Buffer
 	for {
 		kind := tokens.Next()
 		if kind == html.ErrorToken {
@@ -70,10 +65,17 @@ func renderHTMLText(w util.BufWriter, source []byte, node ast.Node, entering boo
 			break
 		}
 		if kind != html.CommentToken || !bytes.HasPrefix(tokens.Raw(), []byte("<!--")) {
-			if _, err := w.Write(util.EscapeHTML(tokens.Raw())); err != nil {
-				return ast.WalkStop, err
-			}
+			visible.Write(tokens.Raw())
 		}
+	}
+	if len(bytes.TrimSpace(visible.Bytes())) == 0 {
+		return ast.WalkContinue, nil
+	}
+	if _, err := w.WriteString("<p>"); err != nil {
+		return ast.WalkStop, err
+	}
+	if _, err := w.Write(util.EscapeHTML(visible.Bytes())); err != nil {
+		return ast.WalkStop, err
 	}
 	_, err := w.WriteString("</p>\n")
 	return ast.WalkContinue, err

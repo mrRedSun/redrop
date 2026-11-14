@@ -147,11 +147,15 @@ curl -fsS "${UNKNOWN}favicon.ico" | cmp -s - "$WORK/default.ico" || die "unknown
 pass "bundle: index, types, SPA fallback, listing, 404, own favicon only after a page view"
 
 # Markdown: local rendering, original download, update, opt-out, and bundled images.
-printf '# Markdown report\n\n## Details\n\nA **styled** document. Returns List<String>.\n\n[Docs](https://example.com/docs) ![Missing](pic.png) ![Blocked](https://example.com/pixel.png)\n\n- a\n\n<div>Literal</div>\n\n<!-- hidden-note -->\n' > "$WORK/notes.md"
+printf '# Markdown report\n\n## Details\n\nA **styled** document. Returns List<String>.\n\n[Docs](https://example.com/docs) ![Missing](pic.png) ![Blocked](https://example.com/pixel.png) ![Repeated](https://example.com/pixel.png) ![Empty]() ![Empty again]()\n\n- a\n\n<div>Literal</div>\n\n<!-- hidden-note -->\n\n<!-- note --> important text\n\n<!--\nmulti\n--> visible tail\n' > "$WORK/notes.md"
 MURL=$($R share "$WORK/notes.md" -q 2> "$WORK/markdown-warnings")
 grep -q 'pic.png is not uploaded; share the directory with --render markdown --entry notes.md' "$WORK/markdown-warnings" || die "Markdown missing-asset warning"
 grep -q 'image "https://example.com/pixel.png" removed: images must be files inside the bundle' "$WORK/markdown-warnings" || die "single-file rejected image warning"
+[ "$(grep -c 'image "https://example.com/pixel.png" removed:' "$WORK/markdown-warnings")" = 1 ] || die "duplicate rejected-image warning"
+[ "$(grep -c 'empty image source removed:' "$WORK/markdown-warnings")" = 1 ] || die "missing or duplicate empty-image warning"
 curl -fsS "$MURL" -o "$WORK/rendered.html"
+grep -q 'important text' "$WORK/rendered.html" || die "comment-block trailing text lost"
+grep -q 'visible tail' "$WORK/rendered.html" || die "multiline comment trailing text lost"
 grep -q '<li>a</li>' "$WORK/rendered.html" || die "Markdown single-letter text corruption"
 grep -q '<p>&lt;div&gt;Literal&lt;/div&gt;' "$WORK/rendered.html" || die "raw HTML paragraph"
 if grep -q 'hidden-note\|<pre><code>' "$WORK/rendered.html"; then die "comments or raw HTML code blocks survived"; fi
@@ -174,6 +178,19 @@ curl -fsS "${RAW}notes.md" | cmp -s - "$WORK/notes.md" || die "raw Markdown byte
 if curl -fsSI "${RAW}notes.md" | grep -qi 'content-type: text/html'; then die "raw Markdown became HTML"; fi
 FORCED=$($R share "$WORK/notes.md" --name notes.txt --render markdown -q)
 curl -fsS "$FORCED" | grep -q '<h1 id="md-revised-report">Revised report' || die "forced Markdown"
+# Explicit single-file selections follow links, even outside the link's parent.
+mkdir "$WORK/md-links"
+ln -s "$WORK/notes.md" "$WORK/md-links/absolute.md"
+ln -s ../notes.md "$WORK/md-links/relative.md"
+for LINK in "$WORK/md-links/absolute.md" "$WORK/md-links/relative.md"; do
+  LINKNAME=${LINK##*/}
+  LINKURL=$($R share "$LINK" -q)
+  curl -fsS "$LINKURL" | grep -q '<h1 id="md-revised-report">Revised report' || die "auto-rendered explicit symlink"
+  curl -fsS "${LINKURL}${LINKNAME}" | cmp -s - "$WORK/notes.md" || die "explicit symlink original bytes"
+  LINKBUNDLE=$($R share "$LINK" --as bundle -q)
+  curl -fsS "${LINKBUNDLE}${LINKNAME}" | cmp -s - "$WORK/notes.md" || die "single-file bundle symlink bytes"
+done
+pass "explicit absolute and relative source symlinks: auto-render and single-file bundle"
 mkdir -p "$WORK/md-bundle/docs/images"
 printf '# Bundled report\n\n![Sketch](images/sketch.png) ![Blocked](https://example.com/pixel.png)\n' > "$WORK/md-bundle/docs/report.md"
 printf 'image-fixture' > "$WORK/md-bundle/docs/images/sketch.png"
@@ -226,6 +243,17 @@ $R share "$WORK/md-bundle" --render markdown --entry docs >/dev/null 2>&1; [ $? 
 $R share - </dev/null >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for missing stdin name"
 $R share "$WORK/md-bundle" --as file >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for directory forced as file"
 $R share "$WORK/notes.md" --as invalid >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for unknown kind"
+$R share "$WORK/missing.md" >/dev/null 2> "$WORK/missing-source-error"; [ $? = 2 ] || die "exit code 2 for missing source file"
+grep -q 'does not exist' "$WORK/missing-source-error" || die "missing source diagnostic"
+if grep -q 'symlink' "$WORK/missing-source-error"; then die "missing source blamed on symlink"; fi
+$R share "$WORK/missing-directory" >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for missing source directory"
+$R share "$WORK/md-bundle" --render markdown --entry missing.md >/dev/null 2> "$WORK/missing-entry-error"; [ $? = 2 ] || die "exit code 2 for missing entry"
+grep -q 'does not exist' "$WORK/missing-entry-error" || die "missing entry diagnostic"
+if grep -q 'symlink' "$WORK/missing-entry-error"; then die "missing entry blamed on symlink"; fi
+mkdir "$WORK/loop-site"
+ln -s loop "$WORK/loop-site/loop"
+$R share "$WORK/loop-site" >/dev/null 2> "$WORK/loop-error"; [ $? = 2 ] || die "exit code 2 for self-loop symlink"
+grep -q 'loop.*symlink cycle' "$WORK/loop-error" || die "self-loop diagnostic"
 mkfifo "$WORK/input.md"
 timeout 5s $R share "$WORK/input.md" >/dev/null 2>&1; [ $? = 2 ] || die "non-regular Markdown source must exit 2 without blocking"
 ln -s "$WORK/notes.md" "$WORK/md-bundle/outside.md"

@@ -48,14 +48,26 @@ func TestCommentsInsideRawBlocksDisappear(t *testing.T) {
 	}
 }
 
+func TestOnlyCommentBlocksEmitNothing(t *testing.T) {
+	for _, source := range []string{"<!-- comment -->\n", "<!--\ncomment\n-->   \n", "<!-- unclosed\nstill hidden\n"} {
+		doc := renderDoc(t, source)
+		root := parseDoc(t, doc)
+		walk(root, func(n *html.Node) {
+			if n.Type == html.ElementNode && n.Data == "main" && (strings.TrimSpace(nodeText(n)) != "" || strings.Contains(doc, "<p>")) {
+				t.Errorf("comment-only block emitted document content: %q", source)
+			}
+		})
+	}
+}
+
 func TestCommentsDisappearAndRawBlocksAreProse(t *testing.T) {
-	doc := renderDoc(t, "<!-- markdownlint-disable -->\n\nText <!-- inline --> tail.\n\n<div>Literal</div>\n\n<script>alert(1)</script>\n")
+	doc := renderDoc(t, "<!-- markdownlint-disable -->\n\nText <!-- inline --> tail.\n\n<div>Literal</div>\n\n<script>alert(1)</script>\n\n<!-- note --> important text\n\n<!--\nmulti\n--> visible tail\n")
 	for _, bad := range []string{"markdownlint-disable", "<!-- inline -->", "<pre>", "<code>", "<div>Literal</div>", "<script>alert(1)</script>"} {
 		if strings.Contains(doc, bad) {
 			t.Errorf("unexpected rendered block content %q", bad)
 		}
 	}
-	for _, want := range []string{"Text  tail.", "<p>&lt;div&gt;Literal&lt;/div&gt;", "<p>&lt;script&gt;alert(1)&lt;/script&gt;"} {
+	for _, want := range []string{"Text  tail.", "<p>&lt;div&gt;Literal&lt;/div&gt;", "<p>&lt;script&gt;alert(1)&lt;/script&gt;", "important text", "visible tail"} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("missing escaped prose %q", want)
 		}

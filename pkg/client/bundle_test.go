@@ -69,7 +69,7 @@ func TestBundleRejectsUnsafeSymlinks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "private.txt"), []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"outside-file", "outside-directory", "outside-relative", "absolute-inside", "cycle"} {
+	for _, kind := range []string{"outside-file", "outside-directory", "outside-relative", "absolute-inside", "cycle", "self-loop"} {
 		for _, markdownMode := range []bool{false, true} {
 			name := kind + "/ordinary"
 			if markdownMode {
@@ -86,7 +86,7 @@ func TestBundleRejectsUnsafeSymlinks(t *testing.T) {
 				}
 				target := map[string]string{
 					"outside-file": filepath.Join(outside, "private.txt"), "outside-directory": outside,
-					"outside-relative": relativeOutside, "absolute-inside": filepath.Join(dir, "notes.md"), "cycle": ".",
+					"outside-relative": relativeOutside, "absolute-inside": filepath.Join(dir, "notes.md"), "cycle": ".", "self-loop": "asset-link",
 				}[kind]
 				if err := os.Symlink(target, filepath.Join(dir, "asset-link")); err != nil {
 					t.Skipf("symlinks unavailable: %v", err)
@@ -104,7 +104,7 @@ func TestBundleRejectsUnsafeSymlinks(t *testing.T) {
 				if !errors.As(err, &usage) || !strings.Contains(err.Error(), "asset-link") {
 					t.Errorf("error must identify the bad bundle path and be a usage error: %v", err)
 				}
-				if kind != "cycle" && !strings.Contains(err.Error(), "symlinks must be relative and stay inside the directory") {
+				if kind != "cycle" && kind != "self-loop" && !strings.Contains(err.Error(), "symlinks must be relative and stay inside the directory") {
 					t.Errorf("symlink error must explain the rule: %v", err)
 				}
 			})

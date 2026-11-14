@@ -53,6 +53,10 @@ func (p *Prepared) Close() {
 	}
 }
 
+func (p *Prepared) warn(message string) {
+	p.Warnings = append(p.Warnings, message)
+}
+
 func (p *Prepared) reportWarnings(report func(string)) {
 	if report != nil {
 		for _, warning := range p.Warnings {
@@ -113,7 +117,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	} else {
 		st, err := os.Stat(srcPath)
 		if err != nil {
-			return nil, err
+			return nil, filePathError(srcPath, err, os.Lstat)
 		}
 		isDir = st.IsDir()
 		if name == "" {
@@ -153,7 +157,7 @@ func Prepare(src *Source) (*Prepared, error) {
 		lower := strings.ToLower(name)
 		switch {
 		case isDir:
-			err = packDir(srcPath, tmp, func(warning string) { p.Warnings = append(p.Warnings, warning) })
+			err = packDir(srcPath, tmp, p.warn)
 		case strings.HasSuffix(lower, ".zip"):
 			err = zipToTarGz(srcPath, tmp)
 		case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):

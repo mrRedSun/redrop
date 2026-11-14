@@ -73,6 +73,37 @@ func TestRejectedImageSources(t *testing.T) {
 	}
 }
 
+func TestRejectedImagesMatchSanitizedImageElements(t *testing.T) {
+	for _, source := range []string{"", "pic.png", `pic\-a.png`, "my%20image.png", "https://example.com/pic.png", "data:image/png;base64,AAAA", "javascript:alert%281%29", "javascript&colon;alert%281%29", "//example.com/pic.png", "../up.png", "/abs.png", "%2f%2fexample.com/pic.png"} {
+		t.Run(source, func(t *testing.T) {
+			result, err := Render([]byte("![fixture]("+source+")"), "notes.md", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			images, missingSource := 0, 0
+			walk(parseDoc(t, string(result.HTML)), func(n *html.Node) {
+				if n.Type != html.ElementNode || n.Data != "img" {
+					return
+				}
+				images++
+				hasSource := false
+				for _, attr := range n.Attr {
+					hasSource = hasSource || attr.Key == "src" && attr.Val != ""
+				}
+				if !hasSource {
+					missingSource++
+				}
+			})
+			if images != 1 || missingSource != len(result.RejectedImageSources) {
+				t.Fatalf("sanitizer/report drift: images=%d, removed=%d, reported=%v", images, missingSource, result.RejectedImageSources)
+			}
+			if missingSource == 1 && result.RejectedImageSources[0] != source {
+				t.Fatalf("rejected image lost original source %q: %v", source, result.RejectedImageSources)
+			}
+		})
+	}
+}
+
 func TestPortableDocument(t *testing.T) {
 	doc := renderDoc(t, "# Portable\n\n[Asset](__redrop/info.txt)\n")
 	for _, bad := range []string{`rel="icon"`, `name="robots"`, `name="referrer"`, "?download", "data:image/"} {

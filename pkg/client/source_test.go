@@ -35,8 +35,8 @@ func TestMarkdownEntryMustBeRegular(t *testing.T) {
 		if !errors.As(err, &usage) || !strings.Contains(err.Error(), entry) {
 			t.Fatalf("--entry %s must return a named usage error: %v", entry, err)
 		}
-		if entry == "missing.md" && (!errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "symlinks must be relative and stay inside the directory")) {
-			t.Fatalf("missing path must preserve its cause and explain the rule: %v", err)
+		if entry == "missing.md" && (!errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "does not exist") || strings.Contains(err.Error(), "symlink")) {
+			t.Fatalf("missing path must preserve its cause without blaming a symlink: %v", err)
 		}
 	}
 }
@@ -44,7 +44,7 @@ func TestMarkdownEntryMustBeRegular(t *testing.T) {
 func TestRejectedImageWarningsForFilesAndDirectories(t *testing.T) {
 	for _, directory := range []bool{false, true} {
 		var warnings []string
-		source := "![Remote](https://example.com/a.png) ![Data](data:image/png;base64,AAAA) ![Up](../up.png)\n"
+		source := "![Remote](https://example.com/a.png) ![Data](data:image/png;base64,AAAA) ![Up](../up.png) ![Remote again](https://example.com/a.png) ![Empty]() ![Empty again]()\n"
 		src := &Source{Name: "notes.md", Reader: strings.NewReader(source), Warn: func(w string) { warnings = append(warnings, w) }}
 		if directory {
 			dir := t.TempDir()
@@ -62,6 +62,7 @@ func TestRejectedImageWarningsForFilesAndDirectories(t *testing.T) {
 			`image "https://example.com/a.png" removed: images must be files inside the bundle`,
 			`image "data:image/png;base64,AAAA" removed: images must be files inside the bundle`,
 			`image "../up.png" removed: images must be files inside the bundle`,
+			`empty image source removed: images must be files inside the bundle`,
 		}
 		if !reflect.DeepEqual(warnings, want) || !reflect.DeepEqual(p.Warnings, want) {
 			t.Fatalf("directory=%v rejected image warnings = %v / %v, want %v", directory, warnings, p.Warnings, want)

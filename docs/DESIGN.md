@@ -217,18 +217,26 @@ network lookups or timestamps in the output.
   `fs.FS` packer. Relative file and directory symlinks are followed only within
   the selected `os.OpenRoot`. Absolute, outside-root, and cyclic links are usage
   errors. Broken asset symlinks and non-regular bundle entries are skipped with
-  warnings. An explicitly selected source or `--entry` must be a regular file,
-  checked before opening and again before reading. Directory depth is bounded at
+  warnings. An explicitly named single-file source follows normal filesystem
+  symlinks, even into another directory, since it is not an implicit directory
+  walk. It and `--entry` must resolve to regular files, checked before opening
+  and again before reading. Unix source and entry opens use `O_NONBLOCK` so a
+  FIFO swapped in between the checks cannot block the open. Directory walks
+  and `--entry` retain root confinement. Directory depth is bounded at
   64. Archive rendering is unsupported.
 - Sources are limited to 8 MiB. Unknown code languages and blocks over 64 KiB stay
   escaped plain text rather than invoking a lexer. Rendering does not support
   `--spa`. Invalid render options return a typed client usage error, mapped to
-  CLI exit code 2. `client.RenderMode` and `ParseRenderMode` define the modes once.
+  CLI exit code 2. Missing top-level sources and missing entries follow the same
+  rule, with missing-path messages distinct from symlink errors. OS-reported
+  symlink loops are usage errors too. `client.RenderMode` and `ParseRenderMode`
+  define the modes once.
 - Single-file rendering reports local references that are not uploaded. The CLI
   warns on stderr and suggests directory publishing; it never uploads siblings
   implicitly. Rejected image sources are reported for single-file and directory
-  rendering, with a warning naming the source and the rule that images must be
-  files inside the bundle. Library users may inspect `Prepared.Warnings` or set
+  rendering, with one warning per distinct source naming the source and the rule
+  that images must be files inside the bundle. Empty image destinations receive
+  an explicit empty-source warning. Library users may inspect `Prepared.Warnings` or set
   `Source.Warn`.
   Updating a raw Markdown artifact with auto-rendering creates a rendered bundle
   version; `--render none` keeps the new version raw.
@@ -243,8 +251,10 @@ allowlist, rather than relying on regex-based HTML filtering. These dependencies
 are pinned in the Go module graph and belong to the client build, not the server.
 
 Raw HTML is never enabled. Custom Goldmark renderers omit inline and block HTML
-comments. Other inline HTML remains escaped inline; other HTML blocks become
-escaped text in normal paragraphs, not code blocks with Copy buttons. This
+comments, preserving visible text after a comment closes on the same line.
+Comment-only blocks emit no empty paragraph. Other inline HTML remains escaped
+inline; other HTML blocks become escaped text in normal paragraphs, not code
+blocks with Copy buttons. This
 preserves technical prose such as `List<String>` and tags without executing them. The parsed-output allowlist strips active
 elements, event handlers, arbitrary CSS, and unsafe URLs after highlighting.
 Images are local-only. Relative URLs cannot escape the bundle root and cannot

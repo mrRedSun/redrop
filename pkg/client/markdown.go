@@ -42,13 +42,13 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 		// OpenRoot confines source selection even when a path contains symlinks.
 		root, err := os.OpenRoot(srcPath)
 		if err != nil {
-			return nil, bundlePathError(srcPath, err)
+			return nil, filePathError(srcPath, err, os.Lstat)
 		}
 		defer root.Close()
 		if _, err := root.Lstat("index.html"); err == nil {
 			return nil, usageErrorf("cannot render Markdown: bundle already contains index.html")
 		} else if !os.IsNotExist(err) {
-			return nil, bundlePathError("index.html", err)
+			return nil, bundlePathError(root.FS(), "index.html", err)
 		}
 		f, err := openRegularFile(root, sourceName)
 		if err != nil {
@@ -86,7 +86,7 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root) (*Prepared
 	if root != nil {
 		fsys = root.FS()
 	}
-	err = packFS(fsys, f, func(warning string) { p.Warnings = append(p.Warnings, warning) },
+	err = packFS(fsys, f, p.warn,
 		bundleFile{Name: "index.html", Content: bytes.NewReader(rendered.HTML), Size: int64(len(rendered.HTML))},
 		bundleFile{Name: name, Content: bytes.NewReader(original), Size: int64(len(original)), Replace: true},
 	)
@@ -98,12 +98,16 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root) (*Prepared
 		return nil, err
 	}
 	for _, image := range rendered.RejectedImageSources {
-		p.Warnings = append(p.Warnings, fmt.Sprintf("image %q removed: images must be files inside the bundle", image))
+		if image == "" {
+			p.warn("empty image source removed: images must be files inside the bundle")
+		} else {
+			p.warn(fmt.Sprintf("image %q removed: images must be files inside the bundle", image))
+		}
 	}
 	if root == nil {
 		for _, reference := range rendered.LocalReferences {
 			if reference != name && reference != "index.html" {
-				p.Warnings = append(p.Warnings, fmt.Sprintf("%s is not uploaded; share the directory with --render markdown --entry %s", reference, name))
+				p.warn(fmt.Sprintf("%s is not uploaded; share the directory with --render markdown --entry %s", reference, name))
 			}
 		}
 	}

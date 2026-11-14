@@ -17,7 +17,7 @@ func TestNonRegularPublishingSourcesDoNotBlock(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"markdown", "bundle", "entry"} {
+	for _, mode := range []string{"markdown", "bundle", "entry", "fifo-window"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -66,6 +66,20 @@ func TestNonRegularSourceHelper(t *testing.T) {
 		return
 	}
 	file := os.Getenv("REDROP_SOURCE_PATH")
+	if mode == "fifo-window" {
+		// Model a FIFO swapped in after the caller's successful regular-file
+		// Stat: the open must not block, and the descriptor must be rejected.
+		opened, err := os.OpenFile(file, regularFileOpenFlags, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = checkOpenedRegularFile(opened, file)
+		var usage *UsageError
+		if !errors.As(err, &usage) {
+			t.Fatalf("opened FIFO must be a usage error, got %v", err)
+		}
+		return
+	}
 	src := &Source{Path: file, Render: RenderMarkdown}
 	if mode == "bundle" {
 		src.Kind, src.Render = "bundle", RenderNone

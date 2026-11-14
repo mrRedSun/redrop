@@ -63,7 +63,7 @@ func packFS(fsys fs.FS, w io.Writer, warn func(string), extras ...bundleFile) er
 						return nil
 					}
 				}
-				return bundlePathError(name, err)
+				return bundlePathError(fsys, name, err)
 			}
 			if skipEntry(name, info.IsDir()) {
 				return nil
@@ -81,7 +81,7 @@ func packFS(fsys fs.FS, w io.Writer, warn func(string), extras ...bundleFile) er
 				}
 				entries, err := fs.ReadDir(fsys, name)
 				if err != nil {
-					return bundlePathError(name, err)
+					return bundlePathError(fsys, name, err)
 				}
 				for _, entry := range entries {
 					if err := walk(path.Join(name, entry.Name()), append(ancestors, info)); err != nil {
@@ -98,7 +98,7 @@ func packFS(fsys fs.FS, w io.Writer, warn func(string), extras ...bundleFile) er
 			}
 			file, err := fsys.Open(name)
 			if err != nil {
-				return bundlePathError(name, err)
+				return bundlePathError(fsys, name, err)
 			}
 			defer file.Close()
 			info, err = file.Stat()
@@ -125,7 +125,7 @@ func skipEntry(name string, isDir bool) bool {
 func packDir(dir string, w io.Writer, warn func(string)) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return bundlePathError(dir, err)
+		return filePathError(dir, err, os.Lstat)
 	}
 	defer root.Close()
 	return packFS(root.FS(), w, warn)
