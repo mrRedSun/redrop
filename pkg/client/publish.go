@@ -41,8 +41,9 @@ type Source struct {
 
 	// beforeRead, set only by tests, runs before a file is read for
 	// packing (between a folder walk's stat and read, and between a zip's
-	// first hash and its conversion) to reproduce a tree that changes
-	// mid-read.
+	// first hash and its conversion), and before a single file is uploaded
+	// as is (between Prepare and UploadFile), to reproduce a tree that
+	// changes mid-read.
 	beforeRead func(rel string)
 }
 
@@ -525,6 +526,9 @@ func (c *Client) prepareAndUpload(ctx context.Context, src *Source, progress Pro
 		return nil, err
 	}
 	defer p.Close()
+	if p.Digest == "" && src.Reader == nil && src.beforeRead != nil {
+		src.beforeRead(p.Filename)
+	}
 	id, blobSum, err := c.UploadFile(ctx, p.File, progress)
 	if err != nil {
 		if p.Digest == "" && src.Reader == nil && errors.Is(err, fs.ErrNotExist) {

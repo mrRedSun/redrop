@@ -345,6 +345,12 @@ type sentHash struct {
 	next int64
 }
 
+// rewind re-reads [0, offset) from the file as it is now, not from the
+// bytes the server holds. An edit in that range shows up as a mismatch
+// (conservatively, since the server may hold the old bytes), but an edit
+// that is reverted before the rewind (ABA) is invisible here and is left
+// to the server's checksum. Each failed chunk costs one re-read of the
+// prefix: several resumes of a 1 GB file read several GB locally.
 func (s *sentHash) rewind(f io.ReaderAt, offset int64) error {
 	s.h.Reset()
 	n, err := io.Copy(s.h, io.NewSectionReader(f, 0, offset))

@@ -932,3 +932,86 @@ func TestWatchSymlinkRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// recreatingUploader reproduces "rm -rf dist && mkdir dist" around one
+// publish: the root is gone while Prepare runs and back before the
+// watcher looks at the error.
+type recreatingUploader struct {
+	fakeUploader
+	root string
+	done bool
+}
+
+func (u *recreatingUploader) UpdateDigest(ctx context.Context, id string, src *Source, p Progress) (string, *api.Artifact, error) {
+	if u.done {
+		return u.fakeUploader.UpdateDigest(ctx, id, src, p)
+	}
+	u.done = true
+	if err := os.RemoveAll(u.root); err != nil {
+		return "", nil, err
+	}
+	_, err := Prepare(src)
+	if err == nil {
+		return "", nil, errors.New("Prepare succeeded on a missing root")
+	}
+	if err := os.MkdirAll(u.root, 0700); err != nil {
+		return "", nil, err
+	}
+	if err := os.WriteFile(filepath.Join(u.root, "index.html"), []byte("rebuilt"), 0600); err != nil {
+		return "", nil, err
+	}
+	return "", nil, err
+}
+
+// A root recreated while it is prepared is a tree change, not fatal,
+// even though the root exists again when the error is classified.
+func TestWatchRootRecreatedDuringPrepare(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dist")
+	write(t, dir, "index.html", "v0")
+	up := &recreatingUploader{root: dir}
+	h := newHarness(t, up, dir)
+	write(t, dir, "index.html", "v1")
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if n := receive(t, h.notices); n.Kind != NoticeTreeChanged || !errors.Is(n.Err, fs.ErrNotExist) {
+		t.Fatalf("notice=%+v", n)
+	}
+	h.advance(time.Second)
+	receive(t, h.published)
+	if got := up.lastPack(); fmt.Sprint(got) != "[index.html]" {
+		t.Fatalf("pack=%v", got)
+	}
+}
+
+// A single-file root deleted between Prepare and the upload is wrapped as
+// a tree change where it is opened (prepareAndUpload), and the recreated
+// file then publishes.
+func TestRealClientWatchFileRootDeletedBeforeUpload(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "page.html")
+	write(t, dir, "page.html", "v0")
+	c, state := newUploadClient(t)
+	h := newHarness(t, c, file)
+	removed := false
+	h.w.src.beforeRead = func(string) {
+		if !removed {
+			removed = true
+			if err := os.Remove(file); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	write(t, dir, "page.html", "v1")
+	h.event(file, fsnotify.Write)
+	h.advance(time.Second)
+	if n := receive(t, h.notices); n.Kind != NoticeTreeChanged || !errors.Is(n.Err, ErrSourceChanged) {
+		t.Fatalf("notice=%+v; want tree_changed from the upload", n)
+	}
+	write(t, dir, "page.html", "v2")
+	h.event(file, fsnotify.Create)
+	h.advance(time.Second)
+	receive(t, h.published)
+	if got, versions := state.lastFiles()["page.html"], state.versionCount(); got != "v2" || versions != 1 {
+		t.Fatalf("published %q in %d versions; want v2 once", got, versions)
+	}
+}

@@ -491,6 +491,37 @@ func (w *watcher) publishIfChanged() error {
 	return w.publishWithRetry()
 }
 
+// publishError classifies a not-exist error from a publish by its path,
+// not by a later re-check (the root may be back by then, as with
+// "rm -rf dist && mkdir dist"). A path at or inside the root means the
+// tree moved under Prepare or the upload: a vanished root if it is still
+// gone, otherwise a tree change, which maxChangeRetries bounds. A path
+// outside the root, such as a missing TMPDIR, stays fatal.
+func (w *watcher) publishError(err error) error {
+	var pe *fs.PathError
+	if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrSourceChanged) || !errors.As(err, &pe) || !w.inRoot(pe.Path) {
+		return err
+	}
+	if w.rootGone() {
+		return fmt.Errorf("%w: %w", errRootVanished, err)
+	}
+	return sourceChanged(err)
+}
+
+// inRoot reports whether p is the watch root or a path inside it.
+func (w *watcher) inRoot(p string) bool {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	root, err := filepath.Abs(w.root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, abs)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 // errRootVanished marks a scan or publish that failed because the root
 // itself is gone.
 var errRootVanished = errors.New("watched path disappeared")
@@ -566,10 +597,7 @@ func (w *watcher) publishWithRetry() error {
 			return context.Canceled // clean shutdown, not the upload error
 		}
 		if !transient(err) {
-			if errors.Is(err, fs.ErrNotExist) && !errors.Is(err, ErrSourceChanged) && w.rootGone() {
-				// The root vanished between the scan and the publish.
-				err = fmt.Errorf("%w: %w", errRootVanished, err)
-			}
+			err = w.publishError(err)
 			return w.sourceError(err)
 		}
 		delay := w.opts.Retrier.Next(attempt)

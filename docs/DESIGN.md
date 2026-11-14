@@ -248,8 +248,12 @@ later does not change what is watched or published.
 A single file that is uploaded as is (`html`, `file`, or a `.tar.gz` bundle) is
 read from its own path, without a temporary copy. Its SHA-256 is taken before
 the upload and checked against the bytes sent. When a failed chunk resumes
-below what was already sent, the hash is rebuilt from the file up to the resume
-offset, so the check still covers exactly the bytes the server holds. A
+below what was already sent, the hash is rebuilt by re-reading the file up to
+the resume offset. That catches an edit in the re-sent range, and reports an
+edit before the offset as a change, conservatively. An edit that is reverted
+before the re-read is not seen by the client; the server's checksum still
+rejects any blob that differs from the declared hash. Each failed chunk costs
+one local re-read of that prefix. A
 mismatch means the file changed during the upload: `share` and `update` start
 over once and then fail, and `watch` waits for the next settled change. A
 retried upload abandons the first upload session; the server removes it when
