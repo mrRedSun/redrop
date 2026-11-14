@@ -3,86 +3,119 @@
 # Options (env): REDROP_INSTALL_DIR=/custom/bin
 #   REDROP_TOKEN=rdp_...  also log in with this token after installing
 #   (the dashboard's Tokens page shows this one-line setup command).
+#
+# Everything runs inside main, called on the last line, so a download cut
+# short by `curl | sh` defines nothing that runs.
 set -eu
 
 BASE="{{.Base}}"
 
 err() { printf 'redrop install: %s\n' "$*" >&2; exit 1; }
 
-# Take the token out of the environment before running anything else, so no
-# child process (curl, uname, the CLI itself) inherits it. The CLI treats
-# REDROP_TOKEN as an override of the saved login. Unsetting the local name
-# first drops any export attribute it may have inherited.
-unset rd_token
-rd_token="${REDROP_TOKEN:-}"
-unset REDROP_TOKEN
+main() {
+  # Take the token out of the environment before running anything else, so no
+  # child process (curl, uname, the CLI itself) inherits it. The CLI treats
+  # REDROP_TOKEN as an override of the saved login. Unsetting the local name
+  # first drops any export attribute it may have inherited.
+  unset rd_token
+  rd_token="${REDROP_TOKEN:-}"
+  unset REDROP_TOKEN
 
-case "$(uname -s)" in
-  Linux) os=linux ;;
-  Darwin) os=darwin ;;
-  *) err "unsupported OS $(uname -s); on Windows run: irm $BASE/install.ps1 | iex" ;;
-esac
-case "$(uname -m)" in
-  x86_64|amd64) arch=amd64 ;;
-  arm64|aarch64) arch=arm64 ;;
-  *) err "unsupported CPU $(uname -m)" ;;
-esac
+  case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) err "unsupported OS $(uname -s); on Windows run: irm $BASE/install.ps1 | iex" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *) err "unsupported CPU $(uname -m)" ;;
+  esac
 
-if [ -n "${REDROP_INSTALL_DIR:-}" ]; then
-  dir="$REDROP_INSTALL_DIR"
-elif [ "$(id -u)" = 0 ]; then
-  dir=/usr/local/bin
-else
-  dir="$HOME/.local/bin"
-fi
-mkdir -p "$dir"
+  if [ -n "${REDROP_INSTALL_DIR:-}" ]; then
+    dir="$REDROP_INSTALL_DIR"
+  elif [ "$(id -u)" = 0 ]; then
+    dir=/usr/local/bin
+  else
+    dir="$HOME/.local/bin"
+  fi
+  mkdir -p "$dir"
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT TERM
-file="redrop-$os-$arch"
+  file="redrop-$os-$arch"
+  bin="$dir/redrop"
+  tmp=
+  stage=
+  trap cleanup EXIT
+  trap 'exit 1' INT TERM
+  tmp=$(mktemp -d)
+  # The binary downloads next to its destination, so the final mv is a
+  # rename on one file system: redrop appears only complete and verified.
+  stage=$(mktemp "$dir/.redrop.XXXXXX") || err "cannot write to $dir"
 
+  fetch "$BASE/download/$file" "$stage" || err "download failed"
+  fetch "$BASE/download/SHA256SUMS" "$tmp/SHA256SUMS" || err "checksum download failed"
+
+  want=$(grep " $file\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+  [ -n "$want" ] || err "no checksum for $file"
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$stage" | cut -d' ' -f1)
+  else got=$(shasum -a 256 "$stage" | cut -d' ' -f1); fi
+  [ "$want" = "$got" ] || err "checksum mismatch for $file"
+
+  chmod 0755 "$stage"
+  mv -f "$stage" "$bin"
+  stage=
+  printf 'Installed redrop to %s\n' "$bin"
+  "$bin" version || true
+
+  # The suggested line is printed for the user to run, so $PATH stays literal.
+  # shellcheck disable=SC2016
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) printf '\nNote: %s is not on your PATH. Add it, e.g.:\n  echo '\''export PATH="%s:$PATH"'\'' >> ~/.profile\n' "$dir" "$dir" ;;
+  esac
+
+  if [ -z "$rd_token" ]; then
+    printf '\nNext: create an API token in the dashboard (%s/tokens), then run:\n  redrop login --url %s\n' "$BASE" "$BASE"
+    printf 'The Tokens page also shows a one-line command that installs and logs in.\n'
+    exit 0
+  fi
+
+  # printf is a shell builtin, so the token reaches the CLI on stdin only and
+  # never appears in any process's argv.
+  printf '\n'
+  if ! printf '%s' "$rd_token" | "$bin" login --url "$BASE" --token-stdin; then
+    rd_token=
+    err "redrop is installed at $bin, but login failed (see above). To retry, run: $bin login --url $BASE
+and paste the token at the prompt (create a new one at $BASE/tokens if needed)."
+  fi
+  rd_token=
+  # Confirm the saved login (no token in the environment now).
+  "$bin" --url "$BASE" whoami >/dev/null ||
+    err "redrop is installed at $bin, but the saved login does not work. Retry with: $bin login --url $BASE"
+  # shellcheck disable=SC2016 # the backticks are literal Markdown-style quoting
+  printf '\nredrop is set up. Next: run `redrop guide` to see how to share files and pages.\n'
+}
+
+# cleanup removes the temporary directory and a staged download that was
+# not moved into place.
+cleanup() {
+  if [ -n "${tmp:-}" ]; then rm -rf "${tmp:?}"; fi
+  if [ -n "${stage:-}" ]; then rm -f "${stage:?}"; fi
+}
+
+# Downloads keep to HTTPS, through redirects too, when the server's URL is
+# HTTPS. A server configured with a plain-HTTP URL (a LAN development
+# setup) can only be reached over HTTP, so HTTP is allowed for it.
 fetch() {
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  case "$BASE" in
+    https://*) proto='=https' ;;
+    *) proto='=http,https' ;;
+  esac
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --show-error --location --proto "$proto" --tlsv1.2 \
+      --connect-timeout 10 --max-time 300 --retry 3 -o "$2" "$1"
   elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
   else err "curl or wget is required"; fi
 }
 
-fetch "$BASE/download/$file" "$tmp/$file" || err "download failed"
-fetch "$BASE/download/SHA256SUMS" "$tmp/SHA256SUMS" || err "checksum download failed"
-
-want=$(grep " $file\$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
-[ -n "$want" ] || err "no checksum for $file"
-if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$file" | cut -d' ' -f1)
-else got=$(shasum -a 256 "$tmp/$file" | cut -d' ' -f1); fi
-[ "$want" = "$got" ] || err "checksum mismatch for $file"
-
-chmod 0755 "$tmp/$file"
-bin="$dir/redrop"
-mv "$tmp/$file" "$bin"
-printf 'Installed redrop to %s\n' "$bin"
-"$bin" version || true
-
-case ":$PATH:" in
-  *":$dir:"*) ;;
-  *) printf '\nNote: %s is not on your PATH. Add it, e.g.:\n  echo '\''export PATH="%s:$PATH"'\'' >> ~/.profile\n' "$dir" "$dir" ;;
-esac
-
-if [ -z "$rd_token" ]; then
-  printf '\nNext: create an API token in the dashboard (%s/tokens), then run:\n  redrop login --url %s\n' "$BASE" "$BASE"
-  printf 'The Tokens page also shows a one-line command that installs and logs in.\n'
-  exit 0
-fi
-
-# printf is a shell builtin, so the token reaches the CLI on stdin only and
-# never appears in any process's argv.
-printf '\n'
-if ! printf '%s' "$rd_token" | "$bin" login --url "$BASE" --token-stdin; then
-  rd_token=
-  err "redrop is installed at $bin, but login failed (see above). To retry, run: $bin login --url $BASE
-and paste the token at the prompt (create a new one at $BASE/tokens if needed)."
-fi
-rd_token=
-# Confirm the saved login (no token in the environment now).
-"$bin" --url "$BASE" whoami >/dev/null ||
-  err "redrop is installed at $bin, but the saved login does not work. Retry with: $bin login --url $BASE"
-printf '\nredrop is set up. Next: run `redrop guide` to see how to share files and pages.\n'
+main "$@"
