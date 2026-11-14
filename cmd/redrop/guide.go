@@ -73,7 +73,8 @@ Folder uploads skip these entries:
 - JetBrains files ending in ___jb_tmp___ or ___jb_old___, and gedit files
   starting with .goutputstream-.
 File-name filters are case-insensitive; directory names match exactly.
-A symlink with a skipped name is skipped without being followed.
+A symlink with a skipped name is skipped without being followed, even if
+it points to a directory (counted as a skipped file).
 Legitimate names 4913, #, ##, non-hidden x.swp, and hidden files such as
 .logo.svg, .schema.sql, .subs.srt, and .key.sig are kept. These rules apply
 only inside directories: an explicitly named single file is always uploaded.

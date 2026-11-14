@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -264,6 +266,10 @@ type watcher struct {
 	// changeRetries counts tree_changed retries since the last fs event
 	// or publish, so a misclassified persistent error cannot loop.
 	changeRetries int
+	// dirs holds every directory watchTree registered since the last
+	// registerAll. Unlike fsnotify's WatchList, a removed directory stays
+	// in it, so the event for its removal is still recognised.
+	dirs map[string]bool
 }
 
 // maxChangeRetries bounds consecutive tree_changed retries without a
@@ -474,20 +480,18 @@ func (w *watcher) ignored(name string) bool {
 		}
 	}
 	last := parts[len(parts)-1]
-	asFile, asDir := skipEntryName(last, false), skipEntryName(last, true)
-	if asFile == asDir {
-		return asFile
+	if skipEntryName(last, false) == skipEntryName(last, true) {
+		skip, _ := skipEntry(last, 0) // the type cannot change the answer
+		return skip
 	}
-	info, err := os.Lstat(name)
-	switch {
-	case err != nil:
-		return false
-	case info.IsDir():
-		return asDir
-	case info.Mode()&fs.ModeSymlink != 0:
-		return true // the walk skips a link either rule names
+	var mode fs.FileMode
+	if info, err := os.Lstat(name); err == nil {
+		mode = info.Mode()
+	} else if w.dirs[name] {
+		mode = fs.ModeDir // a removed directory that held packed content
 	}
-	return asFile
+	skip, _ := skipEntry(last, mode)
+	return skip
 }
 
 func (w *watcher) notify(n Notice) {
@@ -521,10 +525,19 @@ func (w *watcher) publishIfChanged() error {
 // "rm -rf dist && mkdir dist"). A path at or inside the root means the
 // tree moved under Prepare or the upload: a vanished root if it is still
 // gone, otherwise a tree change, which maxChangeRetries bounds. A path
-// outside the root, such as a missing TMPDIR, stays fatal.
+// outside the root, such as a missing TMPDIR, stays fatal. A not-exist
+// error the packer already classified as a source change is inside the
+// root; it is a vanished root too if the root is still gone (a single-file
+// root deleted between Prepare's stat and its open).
 func (w *watcher) publishError(err error) error {
+	if errors.Is(err, fs.ErrNotExist) && errors.Is(err, ErrSourceChanged) {
+		if w.rootGone() {
+			return fmt.Errorf("%w: %w", errRootVanished, err)
+		}
+		return err
+	}
 	var pe *fs.PathError
-	if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrSourceChanged) || !errors.As(err, &pe) || !w.inRoot(pe.Path) {
+	if !errors.Is(err, fs.ErrNotExist) || !errors.As(err, &pe) || !w.inRoot(pe.Path) {
 		return err
 	}
 	if w.rootGone() {
@@ -665,6 +678,7 @@ func (w *watcher) registerAll() error {
 			return err
 		}
 	}
+	w.dirs = nil
 	return w.watchTree(".")
 }
 
@@ -677,7 +691,12 @@ func (w *watcher) watchTree(start string) error {
 	}
 	defer root.Close()
 	walk := &bundleWalk{fsys: root.FS(), dir: func(name string) error {
-		return w.fw.Add(filepath.Join(w.root, filepath.FromSlash(name)))
+		p := filepath.Join(w.root, filepath.FromSlash(name))
+		if w.dirs == nil {
+			w.dirs = map[string]bool{}
+		}
+		w.dirs[p] = true
+		return w.fw.Add(p)
 	}}
 	return walk.run(start)
 }
@@ -729,5 +748,9 @@ func hashFile(p string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	return copyHashed(io.Discard, f, -1)
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

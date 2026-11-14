@@ -986,13 +986,23 @@ func TestWatchRootRecreatedDuringPrepare(t *testing.T) {
 }
 
 // A single-file root deleted between Prepare and the upload is wrapped as
-// a tree change where it is opened (prepareAndUpload), and the recreated
-// file then publishes.
+// a source change where it is opened (prepareAndUpload), so share and
+// update retry it. A watch reports the root as vanished while it is gone,
+// and the recreated file then publishes.
 func TestRealClientWatchFileRootDeletedBeforeUpload(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "page.html")
 	write(t, dir, "page.html", "v0")
 	c, state := newUploadClient(t)
+	_, _, err := c.UpdateDigest(context.Background(), "art", &Source{Path: file, beforeRead: func(string) {
+		if err := os.Remove(file); err != nil {
+			t.Error(err)
+		}
+	}}, nil)
+	if !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("UpdateDigest err=%v; want ErrSourceChanged", err)
+	}
+	write(t, dir, "page.html", "v0")
 	h := newHarness(t, c, file)
 	removed := false
 	h.w.src.beforeRead = func(string) {
@@ -1006,8 +1016,8 @@ func TestRealClientWatchFileRootDeletedBeforeUpload(t *testing.T) {
 	write(t, dir, "page.html", "v1")
 	h.event(file, fsnotify.Write)
 	h.advance(time.Second)
-	if n := receive(t, h.notices); n.Kind != NoticeTreeChanged || !errors.Is(n.Err, ErrSourceChanged) {
-		t.Fatalf("notice=%+v; want tree_changed from the upload", n)
+	if n := receive(t, h.notices); n.Kind != NoticeRootVanished || !errors.Is(n.Err, ErrSourceChanged) {
+		t.Fatalf("notice=%+v; want root_vanished from the upload", n)
 	}
 	write(t, dir, "page.html", "v2")
 	h.event(file, fsnotify.Create)
@@ -1080,9 +1090,25 @@ func TestWatchRegistersNewDirectoriesLikeTheWalk(t *testing.T) {
 	}
 	write(t, dir, "x~", "temp")
 	write(t, dir, ".#x", "temp")
-	for name, want := range map[string]bool{"drafts~": false, "node_modules": true, "x~": true, ".#x": true} {
+	if err := os.Symlink("user@host.1234:1700000000", filepath.Join(dir, ".#y")); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"drafts~": false, "node_modules": true, "x~": true, ".#x": true, ".#y": true} {
 		if got := h.w.ignored(filepath.Join(dir, name)); got != want {
 			t.Errorf("ignored(%s)=%v; want %v", name, got, want)
+		}
+	}
+	// Removed names: a temp file is still ignored, so editor churn neither
+	// rehashes nor resets the retry budget; a removed registered directory
+	// held packed content and is not ignored.
+	for _, name := range []string{"x~", ".#y", "drafts~"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, want := range map[string]bool{"x~": true, ".#y": true, "drafts~": false, "gone~": true} {
+		if got := h.w.ignored(filepath.Join(dir, name)); got != want {
+			t.Errorf("removed: ignored(%s)=%v; want %v", name, got, want)
 		}
 	}
 }

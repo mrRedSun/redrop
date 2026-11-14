@@ -43,10 +43,11 @@ type Source struct {
 	OnSkipped func(n int)
 
 	// beforeRead, set only by tests, runs before a file is read for
-	// packing (between a folder walk's stat and read, and between a zip's
-	// first hash and its conversion), and before a single file is uploaded
-	// as is (between Prepare and UploadFile), to reproduce a tree that
-	// changes mid-read.
+	// packing (between a folder walk's stat and read, between Prepare's
+	// stat and the open of a single file it packs or renders, and between
+	// a zip's first hash and its conversion), and before a single file is
+	// uploaded as is (between Prepare and UploadFile), to reproduce a tree
+	// that changes mid-read.
 	beforeRead func(rel string)
 }
 
@@ -227,9 +228,9 @@ func Prepare(src *Source) (*Prepared, error) {
 	case strings.HasSuffix(lower, ".zip"):
 		p.Digest, err = zipToTarGz(srcPath, src.beforeRead, out)
 	case strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm"):
-		p.Digest, err = packSingle(srcPath, "index.html", out)
+		p.Digest, err = packSingle(srcPath, "index.html", out, src.beforeRead)
 	default:
-		p.Digest, err = packSingle(srcPath, name, out)
+		p.Digest, err = packSingle(srcPath, name, out, src.beforeRead)
 	}
 	if cerr := out.Close(); err == nil {
 		err = cerr

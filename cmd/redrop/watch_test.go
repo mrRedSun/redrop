@@ -294,7 +294,7 @@ func TestWatchPassesRenderOptions(t *testing.T) {
 		got = src
 		return nil
 	}
-	defer func() { watchArtifact = orig }()
+	t.Cleanup(func() { watchArtifact = orig })
 
 	for _, tc := range []struct {
 		name  string

@@ -813,53 +813,93 @@ func TestSymlinkRootIsConfinedToResolvedFolder(t *testing.T) {
 	}
 }
 
-// The skip rule runs before an entry is followed: an Emacs lock (a dangling
-// symlink) is skipped and counted without a warning, a node_modules link out
-// of the root is skipped without failing the upload, and a .git file (a
-// worktree or submodule link naming a local path) is skipped. hashTree
-// agrees with the pack.
-func TestSkipRuleAppliesBeforeFollowing(t *testing.T) {
+// An Emacs lock is a dangling symlink. The skip rule runs before the walk
+// follows it, so it is skipped and counted, without a broken-symlink
+// warning, and hashTree agrees with the pack.
+func TestSkipRuleSkipsEmacsLockSymlink(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "page")
-	write(t, dir, ".git", "gitdir: /home/user/repo/.git/worktrees/site\n")
-	shared := t.TempDir()
-	write(t, shared, "node_modules/pkg/index.js", "module")
 	if err := os.Symlink("user@host.1234:1700000000", filepath.Join(dir, ".#index.html")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	assertSkippedPack(t, dir, 1)
+}
+
+// A node_modules symlink out of the root is skipped without being followed,
+// so the upload does not fail on the escaping link.
+func TestSkipRuleSkipsEscapingSkipNamedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "page")
+	shared := t.TempDir()
+	write(t, shared, "node_modules/pkg/index.js", "module")
 	if err := os.Symlink(filepath.Join(shared, "node_modules"), filepath.Join(dir, "node_modules")); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unavailable: %v", err)
 	}
+	assertSkippedPack(t, dir, 0)
+}
+
+// A .git file (a worktree or submodule link naming a local path) is skipped
+// and counted.
+func TestSkipRuleSkipsGitFile(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "page")
+	write(t, dir, ".git", "gitdir: /home/user/repo/.git/worktrees/site\n")
+	assertSkippedPack(t, dir, 1)
+}
+
+// A symlinked directory whose name matches the file rule ("drafts~") is
+// skipped without being followed, and counted.
+func TestSkipRuleSkipsSkipNamedDirectorySymlink(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "page")
+	write(t, dir, "real/page.html", "draft")
+	if err := os.Symlink("real", filepath.Join(dir, "drafts~")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	p := assertSkippedPackFiles(t, dir, 1, "[index.html real/page.html]")
+	p.Close()
+}
+
+// assertSkippedPack prepares dir and requires a pack of only index.html,
+// the given skipped count, no warnings, and a digest equal to hashTree.
+func assertSkippedPack(t *testing.T, dir string, skipped int) {
+	t.Helper()
+	assertSkippedPackFiles(t, dir, skipped, "[index.html]").Close()
+}
+
+func assertSkippedPackFiles(t *testing.T, dir string, skipped int, want string) *Prepared {
+	t.Helper()
 	var warnings []string
-	skipped := 0
-	p, err := Prepare(&Source{Path: dir, Warn: func(w string) { warnings = append(warnings, w) }, OnSkipped: func(n int) { skipped = n }})
+	p, err := Prepare(&Source{Path: dir, Warn: func(w string) { warnings = append(warnings, w) }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
 	files, err := readPack(p.File)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(sortedKeys(files)) != "[index.html]" || len(warnings) != 0 || p.skipped != 2 {
-		t.Fatalf("files=%v warnings=%v skipped=%d (callback %d)", sortedKeys(files), warnings, p.skipped, skipped)
+	if fmt.Sprint(sortedKeys(files)) != want || len(warnings) != 0 || p.skipped != skipped {
+		t.Fatalf("files=%v warnings=%v skipped=%d; want %s, no warnings, %d skipped", sortedKeys(files), warnings, p.skipped, want, skipped)
 	}
-	if want, err := hashTree(dir); err != nil || p.Digest != want {
-		t.Fatalf("hashTree=%s err=%v; pack digest %s", want, err, p.Digest)
+	if digest, err := hashTree(dir); err != nil || p.Digest != digest {
+		t.Fatalf("hashTree=%s err=%v; pack digest %s", digest, err, p.Digest)
 	}
+	return p
 }
 
 // A skipped temp file that vanishes after its directory was listed is not a
-// source change: the walk never stats it.
+// source change: the walk never stats it. The delete runs from ".a.html",
+// which sorts before every temp name, so each one is gone when reached.
 func TestSkippedFileVanishingMidWalk(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "a.html", "page")
-	for _, name := range []string{"z~", ".goutputstream-ABC123", "z.html___jb_tmp___"} {
+	write(t, dir, ".a.html", "page")
+	temps := []string{".goutputstream-ABC123", "z~", "z.html___jb_tmp___"}
+	for _, name := range temps {
 		write(t, dir, name, "temp")
 	}
 	p, err := Prepare(&Source{Path: dir, beforeRead: func(rel string) {
-		if rel == "a.html" {
-			for _, name := range []string{"z~", ".goutputstream-ABC123", "z.html___jb_tmp___"} {
+		if rel == ".a.html" {
+			for _, name := range temps {
 				if err := os.Remove(filepath.Join(dir, name)); err != nil {
 					t.Error(err)
 				}
@@ -886,12 +926,84 @@ func TestMarkdownEntryMustNotBeSkipped(t *testing.T) {
 	}
 }
 
-// A single source that Prepare stat'ed and that is gone when opened was
-// deleted in between: a source change that share retries, not exit 2.
+// A single source that Prepare stat'ed and that is gone when packSingle or
+// prepareMarkdown opens it was deleted in between: a source change that
+// share retries, not a usage error (exit 2).
 func TestStatedSourceVanishedIsSourceChange(t *testing.T) {
-	_, err := openStatedSource(filepath.Join(t.TempDir(), "gone.md"))
+	for _, tc := range []struct{ name, file string }{
+		{"packSingle", "page.txt"},
+		{"prepareMarkdown", "notes.md"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, tc.file, "# content\n")
+			src := &Source{Path: filepath.Join(dir, tc.file), beforeRead: func(string) {
+				if err := os.Remove(filepath.Join(dir, tc.file)); err != nil {
+					t.Error(err)
+				}
+			}}
+			if tc.name == "packSingle" {
+				src.Kind = api.KindBundle
+			}
+			_, err := Prepare(src)
+			var usage *UsageError
+			if !errors.Is(err, ErrSourceChanged) || errors.As(err, &usage) {
+				t.Fatalf("err=%v; want ErrSourceChanged without a usage error", err)
+			}
+		})
+	}
+}
+
+// --entry is checked with the walk's own decision for each component: a
+// symlinked directory named by the file rule ("lnk~") is skipped by the
+// walk, so an entry through it is rejected.
+func TestMarkdownEntryThroughSkippedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "real/index.md", "# Notes\n")
+	write(t, dir, "other.txt", "x")
+	if err := os.Symlink("real", filepath.Join(dir, "lnk~")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, err := Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: "lnk~/index.md"})
 	var usage *UsageError
-	if !errors.Is(err, ErrSourceChanged) || errors.As(err, &usage) {
-		t.Fatalf("err=%v; want ErrSourceChanged without a usage error", err)
+	if !errors.As(err, &usage) || !strings.Contains(err.Error(), "skip rule") {
+		t.Fatalf("err=%v; want a skip-rule usage error", err)
+	}
+	p, err := Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: "real/index.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if digest, _ := hashTree(dir); p.Digest != digest {
+		t.Fatal("digest through the real directory differs from hashTree")
+	}
+}
+
+// A walk that starts below the root (watch registration of a new
+// directory) applies the skip rule to its start, by the start's own type.
+func TestWalkStartBelowRoot(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "sub/deeper/page.html", "x")
+	write(t, dir, "sub/node_modules/pkg/x.js", "x")
+	write(t, dir, "drafts~/page.html", "x")
+	write(t, dir, "node_modules/pkg/x.js", "x")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for start, want := range map[string]string{
+		"sub":          "[sub sub/deeper]",
+		"drafts~":      "[drafts~]",
+		"node_modules": "[]",
+	} {
+		var dirs []string
+		walk := &bundleWalk{fsys: root.FS(), dir: func(name string) error { dirs = append(dirs, name); return nil }}
+		if err := walk.run(start); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(dirs) != want {
+			t.Errorf("start %s: dirs=%v; want %s", start, dirs, want)
+		}
 	}
 }

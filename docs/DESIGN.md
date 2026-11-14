@@ -584,8 +584,13 @@ type picks the directory or file rule, and a symlink is skipped without being
 followed when either rule matches its name. An Emacs lock (`.#x`, a dangling
 symlink) is therefore skipped and counted rather than warned about, a
 `node_modules` link out of the folder does not fail the upload, and a skipped
-temp file that vanishes mid-walk is not a source change. The watch event
-filter decides a last path component the same way.
+temp file that vanishes mid-walk is not a source change. One function,
+`skipEntry`, makes this decision for the walk, the watch event filter (for
+the last path component) and the Markdown `--entry` check (for every
+component, typed through the folder's `os.Root`). For an event on a name
+that is already gone, the filter uses the file rule unless the name was a
+registered directory, so editor temp-file churn neither rehashes the folder
+nor resets the watch's retry budget.
 Names `4913`, `#`, `##`, non-hidden `x.swp`, and hidden files such as
 `.logo.svg`, `.schema.sql`, `.subs.srt`, and `.key.sig` remain valid. Filtering applies
 only to entries inside directories. An explicitly named single file is always

@@ -62,33 +62,47 @@ func (b *bundleWalk) run(start string) error {
 	return b.walk(start, nil, nil)
 }
 
-// skip applies the skip rule to name before anything follows it, so a
-// skipped entry is never stat'ed through a symlink, warned about, or
-// reported as changed. A directory entry's own type decides between the
-// file and directory rules; a symlink is not followed, and is skipped when
-// either rule matches its name. Skipped file entries are counted.
+// skipEntry is the walk's skip decision for one path component with base
+// name base and type mode, as listed (not followed): a directory uses the
+// directory rule; anything else is skipped by the file rule, and a symlink
+// also by the directory rule, so a skip-named link is never followed.
+// counted reports a skip that the walk counts as a skipped file. The watch
+// event filter and the Markdown --entry check use it too, so they decide
+// exactly as the walk does.
+func skipEntry(base string, mode fs.FileMode) (skip, counted bool) {
+	switch {
+	case mode.IsDir():
+		return skipEntryName(base, true), false
+	case skipEntryName(base, false):
+		return true, true
+	case mode&fs.ModeSymlink != 0:
+		return skipEntryName(base, true), false
+	}
+	return false, false
+}
+
+// skip applies skipEntry to name before anything follows it, so a skipped
+// entry is never stat'ed through a symlink, warned about, or reported as
+// changed. Skipped file entries are counted.
 func (b *bundleWalk) skip(name string, entry fs.DirEntry) bool {
 	if name == "." {
 		return false
 	}
-	if entry == nil { // a start below the root: its type is not listed yet
+	var mode fs.FileMode
+	if entry != nil {
+		mode = entry.Type()
+	} else { // a start below the root: its type is not listed yet
 		info, err := fs.Lstat(b.fsys, name)
 		if err != nil {
 			return false // the stat in walk reports it
 		}
-		entry = fs.FileInfoToDirEntry(info)
+		mode = info.Mode()
 	}
-	base := path.Base(name)
-	switch {
-	case entry.IsDir():
-		return skipEntryName(base, true)
-	case skipEntryName(base, false):
+	skip, counted := skipEntry(path.Base(name), mode)
+	if counted {
 		b.skipped++
-		return true
-	case entry.Type()&fs.ModeSymlink != 0:
-		return skipEntryName(base, true)
 	}
-	return false
+	return skip
 }
 
 // walk visits name. entry is how its directory listed it (nil for the
@@ -266,9 +280,10 @@ func packFS(fsys fs.FS, w io.Writer, hooks walkHooks, extras ...bundleFile) (*pa
 // skipEntryName is the single skip rule for publishable content: the
 // bundle walk (packing, the watch content digest, watch registration) and
 // the watch event filter all consult it, so they can never disagree about
-// what counts. Directories: VCS and dependency caches. Files: a .git file
-// (worktrees and submodules), OS junk and editor temp/swap/backup files (vim swaps .swp down to .swa plus .swx on
-// dot-prefixed names, JetBrains ___jb_tmp___/___jb_old___, gedit
+// what counts; skipEntry adds the type-dependent part. Directories: VCS and
+// dependency caches. Files: a .git file (worktrees and submodules), OS junk
+// and editor temp/swap/backup files (vim swaps .swp down to .swa plus .swx
+// on dot-prefixed names, JetBrains ___jb_tmp___/___jb_old___, gedit
 // .goutputstream-*, *~ backups, emacs .# lock files and #…# autosave),
 // which never belong in a published artifact. Applied only to entries
 // inside a directory: an explicitly named single file is always published.
@@ -369,7 +384,10 @@ func packDir(dir string, w io.Writer, hooks walkHooks) (string, int, error) {
 
 // packSingle packs one explicitly named file as a bundle and returns the
 // SHA-256 of the source bytes packed.
-func packSingle(src, name string, w io.Writer) (string, error) {
+func packSingle(src, name string, w io.Writer, beforeRead func(string)) (string, error) {
+	if beforeRead != nil {
+		beforeRead(name)
+	}
 	file, err := openStatedSource(src)
 	if err != nil {
 		return "", err
@@ -396,18 +414,11 @@ func addBundleFile(tw *tar.Writer, name string, content io.Reader, size int64) (
 	return copyHashed(tw, content, size)
 }
 
-// copyHashed copies n bytes of r to w (all of r when n < 0) and returns
-// the hex SHA-256 of the bytes copied.
+// copyHashed copies n bytes of r to w and returns the hex SHA-256 of the
+// bytes copied.
 func copyHashed(w io.Writer, r io.Reader, n int64) (string, error) {
 	h := sha256.New()
-	dst := io.MultiWriter(w, h)
-	var err error
-	if n < 0 {
-		_, err = io.Copy(dst, r)
-	} else {
-		_, err = io.CopyN(dst, r, n)
-	}
-	if err != nil {
+	if _, err := io.CopyN(io.MultiWriter(w, h), r, n); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
