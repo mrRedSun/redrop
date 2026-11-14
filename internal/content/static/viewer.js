@@ -35,19 +35,24 @@
 
   // ---- the address bar follows the frame ----
   // The frame is on this origin, so its location is read directly after
-  // every load, hash change and history step inside it. The artifact's bytes
-  // stay untouched and nothing in its window is patched: the viewer only
-  // reads its location and listens for events.
+  // every load and every same-document URL change inside it (a fragment,
+  // history.pushState or replaceState, Back/Forward). The artifact's bytes
+  // stay untouched and nothing in its window is written or patched: the
+  // viewer only reads its location and listens for events.
   // replaceState, never pushState: the frame owns the history entries.
   var frame = doc.getElementById('rd-frame')
   if (!frame) return
   var OLD = /^\/__redrop\/v\/([1-9][0-9]*)(\/.*)$/
+  var POLL_MS = 250
   // barURL maps the frame's location to the address bar: version N's files
   // (/__redrop/v/N/path) show as path?redrop-version=N. It returns null for
-  // another origin and for redrop's own pages.
+  // another origin, for redrop's own pages, and for a location without a
+  // path (the frame's initial about:blank).
   function barURL(loc) {
     if (loc.origin !== location.origin) return null
-    var path = loc.pathname, search = loc.search, m = OLD.exec(path)
+    var path = loc.pathname, search = loc.search
+    if (path.charAt(0) !== '/') return null
+    var m = OLD.exec(path)
     if (m) {
       var q = new URLSearchParams(search)
       q.set('redrop-version', m[1])
@@ -68,15 +73,59 @@
       // The frame navigated to another origin: leave the address bar alone.
     }
   }
-  frame.addEventListener('load', function () {
+
+  // follow watches the frame's current document for URL changes that load
+  // no page. With the Navigation API, its currententrychange event covers
+  // every one; without it, pushState and replaceState fire no event, so the
+  // frame's address is polled while this page is visible. Each document has
+  // a new window, so this runs again after every load; stop undoes it, on
+  // the next load and while the page is hidden.
+  var unfollow = null
+  function stop() {
+    if (unfollow) unfollow()
+    unfollow = null
+  }
+  function follow() {
+    stop()
     sync()
+    if (doc.visibilityState !== 'visible') return
     try {
-      // A new document has a new window: listen again on every load.
-      frame.contentWindow.addEventListener('hashchange', sync)
-      frame.contentWindow.addEventListener('popstate', sync)
+      var win = frame.contentWindow, nav = win.navigation
+      if (nav && typeof nav.addEventListener === 'function') {
+        nav.addEventListener('currententrychange', sync)
+        unfollow = function () {
+          try { nav.removeEventListener('currententrychange', sync) } catch (e) { /* gone */ }
+        }
+        return
+      }
+      win.addEventListener('hashchange', sync)
+      win.addEventListener('popstate', sync)
+      var last = win.location.href
+      var poll = setInterval(function () {
+        try {
+          var href = frame.contentWindow.location.href
+          if (href !== last) { last = href; sync() }
+        } catch (e) {
+          // Another origin, until the next load.
+        }
+      }, POLL_MS)
+      unfollow = function () {
+        clearInterval(poll)
+        // After a load, win already points at the new document (the old
+        // window and its listeners are gone); this matters when hidden.
+        try {
+          win.removeEventListener('hashchange', sync)
+          win.removeEventListener('popstate', sync)
+        } catch (e) { /* gone */ }
+      }
     } catch (e) {
-      // another origin
+      // Another origin: nothing to follow until the next load.
     }
+  }
+  frame.addEventListener('load', follow)
+  doc.addEventListener('visibilitychange', function () {
+    if (doc.visibilityState === 'visible') follow()
+    else stop()
   })
   // The server never sees the fragment: hand it to the frame.
   if (location.hash) frame.src = frame.getAttribute('src') + location.hash
