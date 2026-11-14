@@ -62,10 +62,10 @@ func (s *Service) InfoShown(a *store.Artifact) bool { return s.infoButton(a) }
 // retained.
 var ErrVersionUnavailable = errors.New("version unavailable")
 
-// SelectVersion returns the version a viewer asked for: 0 or the current
-// number means the current version.
+// SelectVersion returns the version a viewer asked for (?redrop-version=N):
+// the current one, or an older one the owner lets viewers open.
 func (s *Service) SelectVersion(ctx context.Context, a *store.Artifact, v int) (Snapshot, error) {
-	if v == 0 || v == a.CurrentVersion {
+	if v == a.CurrentVersion {
 		return CurrentSnapshot(a), nil
 	}
 	return s.OldVersion(ctx, a, v)

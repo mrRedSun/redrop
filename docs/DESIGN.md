@@ -54,8 +54,8 @@ so untrusted HTML can never be same-site with the dashboard or other services
 (cookie tossing, same-site CSRF, Safe Browsing blast radius). Per-artifact
 subdomains give each artifact its own browser origin, so artifacts cannot read
 each other's storage or cookies, while still allowing normal
-`localStorage`/`fetch` inside one artifact. No artifact host serves a service
-worker script (requests with `Sec-Fetch-Dest: serviceworker` or
+`localStorage`/`fetch` inside one artifact. No content host serves a service
+worker script, not even redrop's own `/__redrop/` scripts (requests with `Sec-Fetch-Dest: serviceworker` or
 `Service-Worker: script` get `404`): a worker would keep answering after the
 link is revoked or expires, and could take over the viewer page's own
 navigations.
@@ -132,6 +132,14 @@ Every content response sets:
 Paths under `/__redrop/` are reserved for redrop (gate, preview, viewer
 assets, icons, and older versions' files under `/__redrop/v/<N>/`) and cannot
 be uploaded.
+
+A request path that starts with `//`, or with a backslash after the first
+slash (`/\`), gets the identical miss before gates, view counting and
+routing. Browsers read such a path as protocol-relative, so echoing it into a
+redirect, a frame `src` or a link would send the visitor to another site.
+Every URL the content handler emits for its own origin (`Location`, the
+viewer's frame, panel and file-page links) is also built by one helper,
+`selfRef`, that guarantees exactly one leading slash.
 
 ### Icons
 
@@ -296,8 +304,10 @@ anyway. Look-alikes were already possible.
   `sharing.Revision` hold exactly these fields, and tests pin them.
 * **Older versions:** "Viewers can open older versions" is a per-artifact
   setting, off by default; it needs the info button.
-  * **Off:** the list is metadata only, and `?redrop-version=N` redirects to
-    the current version.
+  * **Off:** the list is metadata only, and `?redrop-version=N` gets the
+    identical miss, like the version path. So does a version that isn't
+    retained or a malformed N. The current version's own number shows the
+    current version.
   * **On:** each version links to `?redrop-version=N`. The viewer frames
     `/__redrop/v/<N>/<path>` on the same origin and shows "Viewing version N
     of M · Back to latest" above the frame. M is the highest retained

@@ -180,6 +180,13 @@ curl -fsSI "${FRAME[@]}" "$URL" | grep -qi "content-security-policy: frame-ances
 [ "$(code_of -H 'Service-Worker: script' "${URL}sw.js")" = 404 ] || die "service worker served (Service-Worker)"
 pass "viewer page for documents; untouched bytes for frames, subresources, and no Fetch Metadata"
 
+# paths starting with // or /\ are the miss: never a protocol-relative
+# redirect or a viewer framing another site
+[ "$(redirect_of --path-as-is "${DOC[@]}" "${URL}/evil.example/x?redrop-version=zz")" = "404 " ] || die "//host path redirected"
+[ "$(redirect_of --path-as-is "${DOC[@]}" "${BURL}/evil.example/phish")" = "404 " ] || die "//host path on an SPA got a page"
+[ "$(code_of --path-as-is "${DOC[@]}" "${URL}%5Cevil.example")" = 404 ] || die "/\\host path served"
+pass "//host and /\\host paths are the miss"
+
 # exactly one view per visit
 VURL=$($R share "$WORK/page-v1.html" -q)
 J8="$WORK/c8"
@@ -208,7 +215,7 @@ pass "password gate before the viewer and in the frame; both open after unlock"
 vp=$(curl -fsS "${DOC[@]}" "$URL")
 echo "$vp" | grep -q 'Version 2' && echo "$vp" | grep -q 'v2' || die "versions listed with notes"
 echo "$vp" | grep -q 'redrop-version=2' && die "version 2 offered while closed"
-[ "$(redirect_of "${DOC[@]}" "${URL}?redrop-version=2")" = "303 $URL" ] || die "closed version redirects"
+[ "$(code_of "${DOC[@]}" "${URL}?redrop-version=2")" = 404 ] || die "closed version is the miss"
 [ "$(code_of "${FRAME[@]}" "${URL}__redrop/v/2/")" = 404 ] || die "version path while closed"
 $R versions "$ID" | grep -q '\* v2' || die "versions marks the new public note"
 $R set "$ID" --old-versions | grep -q 'older versions: *viewers can open them' || die "set --old-versions"

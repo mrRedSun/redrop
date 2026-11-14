@@ -22,9 +22,33 @@ type pages struct {
 	tmpl *template.Template
 	css  template.CSS
 	csp  string
-	// fileCSP is the file page's policy with the viewer script and stylesheet
-	// of origin %[1]s allowed.
-	fileCSP string
+	// pageDirectives are the default policy's directives after style-src,
+	// shared with the file page's policy (see pagePolicy).
+	pageDirectives []string
+}
+
+// The viewer's static files, served on every content host.
+const (
+	viewerJS  = reservedPrefix + "viewer.js"
+	viewerCSS = reservedPrefix + "viewer.css"
+)
+
+// pagePolicy builds the Content-Security-Policy of a server page: nothing
+// by default, style-src from styles, then directives. With self (this
+// origin) set, it also allows the viewer's script and stylesheet, pinned to
+// their paths on that origin.
+func pagePolicy(self, styles string, directives ...string) string {
+	parts := []string{"default-src 'none'"}
+	if self != "" {
+		styles = strings.TrimSpace(styles + " " + self + viewerCSS)
+	}
+	if styles != "" {
+		parts = append(parts, "style-src "+styles)
+	}
+	if self != "" {
+		parts = append(parts, "script-src "+self+viewerJS)
+	}
+	return strings.Join(append(parts, directives...), "; ")
 }
 
 func newPages(cfg *config.Config) *pages {
@@ -37,11 +61,12 @@ func newPages(cfg *config.Config) *pages {
 		"iso":   func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
 		"utc":   func(t time.Time) string { return t.UTC().Format("2 Jan 2006, 15:04 UTC") },
 	}).ParseFS(templateFS, "templates/*.html"))
+	directives := []string{"img-src 'self'", "media-src 'self'", "frame-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'self' " + cfg.PublicOrigin()}
 	return &pages{
-		tmpl:    t,
-		css:     template.CSS(css),
-		csp:     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'self' " + cfg.PublicOrigin(),
-		fileCSP: "default-src 'none'; style-src 'unsafe-inline' %[1]s/__redrop/viewer.css; script-src %[1]s/__redrop/viewer.js; img-src 'self'; media-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'self' " + cfg.PublicOrigin(),
+		tmpl:           t,
+		css:            template.CSS(css),
+		csp:            pagePolicy("", "'unsafe-inline'", directives...),
+		pageDirectives: directives,
 	}
 }
 
@@ -58,8 +83,13 @@ const (
 	artifactIcons = ""             // pages showing artifact content: /favicon.ico decides
 )
 
-// render writes a server page. csp replaces the default policy when set.
-func (p *pages) render(w http.ResponseWriter, status int, name, title, icons string, data any, csp string) {
+// render writes a server page with the default policy.
+func (p *pages) render(w http.ResponseWriter, status int, name, title, icons string, data any) {
+	p.renderWithCSP(w, status, name, title, icons, data, p.csp)
+}
+
+// renderWithCSP writes a server page with its own policy.
+func (p *pages) renderWithCSP(w http.ResponseWriter, status int, name, title, icons string, data any, csp string) {
 	var buf bytes.Buffer
 	if err := p.tmpl.ExecuteTemplate(&buf, name, pageData{Title: title, CSS: p.css, IconBase: icons, Data: data}); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -67,16 +97,13 @@ func (p *pages) render(w http.ResponseWriter, status int, name, title, icons str
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
-	if csp == "" {
-		csp = p.csp
-	}
 	h.Set("Content-Security-Policy", csp)
 	w.WriteHeader(status)
 	w.Write(buf.Bytes())
 }
 
 func (p *pages) message(w http.ResponseWriter, status int, heading, body string) {
-	p.render(w, status, "message.html", "redrop", serverIcons, map[string]string{"Heading": heading, "Body": body}, "")
+	p.render(w, status, "message.html", "redrop", serverIcons, map[string]string{"Heading": heading, "Body": body})
 }
 
 func (p *pages) notFound(w http.ResponseWriter) {
@@ -92,7 +119,7 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
 		"Action": "/" + sharing.ReservedPrefix + "/open",
-	}, "")
+	})
 }
 
 type fileData struct {
@@ -112,7 +139,7 @@ type fileData struct {
 // origin, for the policy that allows the viewer's script and stylesheet.
 func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo) {
 	ct := f.ContentType
-	raw := base + "/" + url.PathEscape(f.Path)
+	raw := selfRef(base + "/" + url.PathEscape(f.Path))
 	d := fileData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: raw, Download: raw + "?download", Size: f.Size, Latest: "/"}
 	switch {
 	case strings.HasPrefix(ct, "image/"):
@@ -128,7 +155,7 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 			d.Text, d.Truncated = text, truncated
 		}
 	}
-	csp := ""
+	csp := p.csp
 	if info != nil {
 		// The file page lives at "/" only; its version links point there.
 		panel := panelFor(*info, &url.URL{Path: "/"})
@@ -136,9 +163,9 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 		if info.Version != info.Current {
 			d.OldVersion = info.Version
 		}
-		csp = fmt.Sprintf(p.fileCSP, self)
+		csp = pagePolicy(self, "'unsafe-inline'", p.pageDirectives...)
 	}
-	p.render(w, http.StatusOK, "file.html", f.Path, artifactIcons, d, csp)
+	p.renderWithCSP(w, http.StatusOK, "file.html", f.Path, artifactIcons, d, csp)
 }
 
 type listItem struct {
@@ -157,12 +184,12 @@ func (p *pages) listing(w http.ResponseWriter, dir string, entries []sharing.Dir
 		}
 		items = append(items, it)
 	}
-	p.render(w, http.StatusOK, "listing.html", "Files", artifactIcons, map[string]any{"Dir": dir, "Items": items}, "")
+	p.render(w, http.StatusOK, "listing.html", "Files", artifactIcons, map[string]any{"Dir": dir, "Items": items})
 }
 
 // Apex renders the content-domain landing page.
 func (p *pages) apex(w http.ResponseWriter) {
-	p.render(w, http.StatusOK, "apex.html", "redrop", "/", nil, "")
+	p.render(w, http.StatusOK, "apex.html", "redrop", "/", nil)
 }
 
 func humanBytes(n int64) string {

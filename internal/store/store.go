@@ -30,9 +30,6 @@ ALTER TABLE versions ADD COLUMN note_public INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE artifacts ADD COLUMN last_version INTEGER NOT NULL DEFAULT 0;
 UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = artifacts.id), 0));`
 
-// (schemaV3 was extended with note_public before its first release. A
-// development database that ran an earlier draft of it must be recreated.)
-
 var migrations = []string{schemaV1, schemaV2, schemaV3}
 
 var ErrNotFound = errors.New("not found")

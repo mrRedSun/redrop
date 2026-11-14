@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -62,10 +61,9 @@ func serveViewerAsset(w http.ResponseWriter, r *http.Request) bool {
 // /__redrop/v/<N>/ for an older version). Directory redirects and missing
 // paths answer as they would without the viewer; only real pages get it.
 func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, d sharing.Decision) {
-	w.Header().Add("Vary", "Sec-Fetch-Dest") // the same URL is content for frames
 	switch t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind {
 	case sharing.TargetRedirect:
-		http.Redirect(w, r, withQuery(t.Location, r.URL.RawQuery), http.StatusMovedPermanently)
+		redirect(w, r, withQuery(t.Location, r.URL.RawQuery), http.StatusMovedPermanently)
 		return
 	case sharing.TargetNotFound:
 		h.pages.notFound(w)
@@ -75,7 +73,7 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	frameSrc := withoutParams(r.URL, paramVersion, paramInfo)
 	data := viewerData{FrameSrc: frameSrc, Latest: withoutParams(r.URL, paramVersion)}
 	if snap.Version != a.CurrentVersion {
-		data.OldVersion, data.FrameSrc = snap.Version, versionBase(snap.Version)+frameSrc
+		data.OldVersion, data.FrameSrc = snap.Version, selfRef(versionBase(snap.Version)+frameSrc)
 	}
 	data.Info = panelFor(h.sharing.ViewerInfo(r.Context(), a, snap), r.URL)
 	self := h.selfOrigin(a)
@@ -85,9 +83,8 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	if h.cfg.ContentURL.Scheme == "http" {
 		navigable = "http: https:"
 	}
-	csp := fmt.Sprintf("default-src 'none'; script-src %[1]s/__redrop/viewer.js; style-src %[1]s/__redrop/viewer.css; "+
-		"img-src 'self'; frame-src 'self' %[2]s; form-action 'none'; base-uri 'none'; frame-ancestors 'none'", self, navigable)
-	h.pages.render(w, http.StatusOK, "viewer.html", a.Title, serverIcons, data, csp)
+	csp := pagePolicy(self, "", "img-src 'self'", "frame-src 'self' "+navigable, "form-action 'none'", "base-uri 'none'", "frame-ancestors 'none'")
+	h.pages.renderWithCSP(w, http.StatusOK, "viewer.html", a.Title, serverIcons, data, csp)
 }
 
 type viewerData struct {
@@ -123,7 +120,7 @@ func panelFor(info sharing.ViewerInfo, u *url.URL) panelData {
 			q := u.Query()
 			q.Del(paramInfo)
 			q.Set(paramVersion, strconv.Itoa(rev.Number))
-			row.Href = u.EscapedPath() + "?" + q.Encode()
+			row.Href = selfRef(u.EscapedPath() + "?" + q.Encode())
 		}
 		p.Revisions = append(p.Revisions, row)
 	}

@@ -271,16 +271,12 @@ func TestOlderVersions(t *testing.T) {
 	if _, b := h.page("GET", a.URL, "/", nav); strings.Contains(b, "first draft") || !strings.Contains(b, "Version 1") {
 		t.Error("a private note reached the panel, or its version vanished")
 	}
-	for _, q := range []string{"1", "abc", "-1", "0x1"} {
-		if r, _ := h.page("GET", a.URL, "/?redrop-version="+q, nav); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/" {
-			t.Errorf("version %q: %d %q", q, r.StatusCode, r.Header.Get("Location"))
-		}
-	}
-	// The old-version paths give the identical miss.
+	// Closed, unknown and malformed versions get the identical miss, by
+	// parameter and by version path alike.
 	miss, missBody := h.page("GET", "http://zebra-zebra-zebra-zebra.content.test/", "/", inFrame)
 	refused := func(when string) {
 		t.Helper()
-		for _, p := range []string{"/__redrop/v/1/", "/__redrop/v/1/page.html"} {
+		for _, p := range []string{"/__redrop/v/1/", "/__redrop/v/1/page.html", "/?redrop-version=1", "/page.html?redrop-version=1"} {
 			r, b := h.page("GET", a.URL, p, inFrame)
 			if r.StatusCode != miss.StatusCode || b != missBody {
 				t.Errorf("%s: %s: %d, want the miss", when, p, r.StatusCode)
@@ -330,7 +326,11 @@ func TestOlderVersions(t *testing.T) {
 	if r, _ := h.page("GET", a.URL, "/__redrop/v/1", inFrame); r.StatusCode != http.StatusMovedPermanently || r.Header.Get("Location") != "/__redrop/v/1/" {
 		t.Errorf("version root without a slash: %d %q", r.StatusCode, r.Header.Get("Location"))
 	}
-	for _, p := range []string{"/__redrop/v/01/", "/__redrop/v/0/", "/__redrop/v/9/", "/__redrop/v/x/", "/__redrop/v/-1/"} {
+	if r, b := h.page("GET", a.URL, "/?redrop-version=2", nav); r.StatusCode != 200 || !strings.Contains(b, `src="/"`) {
+		t.Errorf("the current version by number: %d", r.StatusCode)
+	}
+	for _, p := range []string{"/__redrop/v/01/", "/__redrop/v/0/", "/__redrop/v/9/", "/__redrop/v/x/", "/__redrop/v/-1/",
+		"/?redrop-version=9", "/?redrop-version=0", "/?redrop-version=01", "/?redrop-version=abc", "/?redrop-version=-1", "/?redrop-version=0x1"} {
 		if r, b := h.page("GET", a.URL, p, inFrame); r.StatusCode != miss.StatusCode || b != missBody {
 			t.Errorf("%s: %d, want the miss", p, r.StatusCode)
 		}
@@ -480,5 +480,104 @@ func TestDirectChoiceOnlyByVisitor(t *testing.T) {
 	r, _ = h.page("GET", a.URL, "/?redrop-info=1", map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-site"})
 	if cookieNamed(r, "rd_direct") != nil {
 		t.Error("a same-site navigation cleared the direct choice")
+	}
+}
+
+// sameOriginRef reports whether ref, a Location or link the content handler
+// emitted, stays on the requested origin: an absolute path with exactly one
+// leading slash (never "//host" or "/\host"), or an absolute URL on host.
+func sameOriginRef(ref, host string) bool {
+	if strings.HasPrefix(ref, "/") {
+		return len(ref) == 1 || (ref[1] != '/' && ref[1] != '\\')
+	}
+	u, err := url.Parse(ref)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == host
+}
+
+var hrefRE = regexp.MustCompile(`(?:href|src)="([^"]*)"`)
+
+// TestSelfURLsStayOnOrigin: request paths that start with "//" or "/\" are
+// the identical miss before gates and routing, and nothing the content
+// handler emits for its own origin (redirect Location, the viewer's frame
+// src, panel and file page links) can point at another host.
+func TestSelfURLsStayOnOrigin(t *testing.T) {
+	t.Setenv("REDROP_CONTENT_MISS_BURST", "100000") // every hostile path is a miss
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	ctx := context.Background()
+	on := true
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<p>spa one</p>"), 0o600)
+	os.MkdirAll(filepath.Join(dir, "docs"), 0o700)
+	os.WriteFile(filepath.Join(dir, "docs", "index.html"), []byte("<p>docs</p>"), 0o600)
+	spa, err := c.Share(ctx, &client.Source{Path: dir, SPA: true}, client.PublishOptions{OldVersions: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<p>spa two</p>"), 0o600)
+	if _, err := c.Update(ctx, spa.ID, &client.Source{Path: dir, SPA: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	page := shareFile(t, c, "p.html", "<p>page</p>", client.PublishOptions{})
+	file := shareFile(t, c, "f.txt", "file", client.PublishOptions{})
+	p2 := filepath.Join(t.TempDir(), "f.txt")
+	os.WriteFile(p2, []byte("file two"), 0o600)
+	if _, err := c.Update(ctx, file.ID, &client.Source{Path: p2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateArtifact(ctx, file.ID, &api.UpdateArtifactRequest{OldVersions: &on}); err != nil {
+		t.Fatal(err)
+	}
+	miss, missBody := h.page("GET", "http://zebra-zebra-zebra-zebra.content.test/", "/", inFrame)
+
+	typed := map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"}
+	headers := map[string]map[string]string{"page load": nav, "typed": typed, "frame": inFrame, "subresource": asset, "no Fetch Metadata": noMeta}
+	hostile := []string{"//evil.example/x", "//evil.example/x?redrop-version=1", "/\\evil.example", "/\\evil.example/x?redrop-info=0",
+		"/%2F%2Fevil.example/x", "/%5Cevil.example", "///evil.example/x", "//evil.example/__redrop/v/1/"}
+	paths := []string{"/", "/docs", "/docs/", "/a/b?x=1", "/?redrop-version=1", "/docs?redrop-version=1", "/x?redrop-version=1&redrop-info=0",
+		"/__redrop/v/1", "/__redrop/v/1/", "/__redrop/v/1/docs", "/__redrop/v/1//evil.example/x", "/__redrop/v/1//evil.example/x?y=1",
+		"/__redrop/v/1/\\evil.example", "/__redrop/v/1/%2F%2Fevil.example", "/__redrop/v/1/?redrop-info=0", "/f.txt?redrop-version=1"}
+	for _, a := range []*api.Artifact{spa, page, file} {
+		host, _ := url.Parse(a.URL)
+		for name, hdr := range headers {
+			for _, p := range hostile {
+				r, b := h.page("GET", a.URL, p, hdr)
+				if r.StatusCode != miss.StatusCode || b != missBody || r.Header.Get("Location") != "" {
+					t.Errorf("%s %s %q: %d, want the identical miss", a.Title, name, p, r.StatusCode)
+				}
+			}
+			for _, p := range paths {
+				r, b := h.page("GET", a.URL, p, hdr)
+				if loc := r.Header.Get("Location"); loc != "" && !sameOriginRef(loc, host.Host) {
+					t.Errorf("%s %s %q: Location %q leaves the origin", a.Title, name, p, loc)
+				}
+				if m := frameSrcRE.FindStringSubmatch(b); m != nil {
+					src := html.UnescapeString(m[1])
+					if !strings.HasPrefix(src, "/") || strings.HasPrefix(src, "//") || strings.HasPrefix(src, "/\\") {
+						t.Errorf("%s %s %q: frame src %q", a.Title, name, p, src)
+					}
+				}
+				if strings.Contains(b, `id="rd-info"`) {
+					for _, m := range hrefRE.FindAllStringSubmatch(b, -1) {
+						if ref := html.UnescapeString(m[1]); !sameOriginRef(ref, host.Host) {
+							t.Errorf("%s %s %q: link %q leaves the origin", a.Title, name, p, ref)
+						}
+					}
+				}
+			}
+		}
+	}
+	// The SPA case from the review: a "//host" path never reaches the
+	// SPA fallback, so no viewer frames another site.
+	if _, b := h.page("GET", spa.URL, "//evil.example/phish", nav); strings.Contains(b, "rd-frame") {
+		t.Fatal("a //host path got a viewer page")
+	}
+	// The viewer-form redirect keeps the path's escaping.
+	if r, _ := h.page("GET", spa.URL, "/__redrop/v/1/a%3Fb%20c", nav); r.Header.Get("Location") != "/a%3Fb%20c?redrop-version=1" {
+		t.Errorf("escaped old-version path: %q", r.Header.Get("Location"))
+	}
+	// An old-version path with "//" inside redirects to a single-slash path.
+	if r, _ := h.page("GET", spa.URL, "/__redrop/v/1//evil.example/x", nav); r.Header.Get("Location") != "/evil.example/x?redrop-version=1" {
+		t.Errorf("old-version path with //: %d %q", r.StatusCode, r.Header.Get("Location"))
 	}
 }

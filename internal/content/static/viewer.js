@@ -35,8 +35,9 @@
 
   // ---- the address bar follows the frame ----
   // The frame is on this origin, so its location is read directly after
-  // every load, hash change and history step inside it. Nothing is added to
-  // the artifact or patched in its window: the viewer only reads and listens.
+  // every load, hash change and history step inside it. The artifact's bytes
+  // stay untouched and nothing in its window is patched: the viewer only
+  // reads its location and listens for events.
   // replaceState, never pushState: the frame owns the history entries.
   var frame = doc.getElementById('rd-frame')
   if (!frame) return

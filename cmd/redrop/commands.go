@@ -308,7 +308,9 @@ Access control (combine freely):
 Shared pages get a small "i" button with the title, version history,
 expiry, remaining views and size; HTML opens in redrop's viewer with the
 artifact untouched in a frame. --no-info serves pages directly instead;
---old-versions lets viewers open earlier versions.
+--old-versions lets viewers open earlier versions. curl, scripts and very
+old browsers (no Fetch Metadata) always get the artifact directly. Inside an
+older version, a root-absolute link (/x.html) leads to the current version.
 
 The link is printed on the first line; it is the only way in, so share it
 deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,

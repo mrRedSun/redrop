@@ -123,7 +123,20 @@ func (h *Handler) tooManyMisses(w http.ResponseWriter) {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
-	if h.serveServerIcon(w, r) || serveViewerAsset(w, r) {
+	switch {
+	case !singleSlash(r.URL.Path):
+		// "//host/x" and "/\host/x" would become protocol-relative URLs
+		// wherever a path is echoed (redirects, the frame, panel links).
+		// They are never artifact paths: answer before gates and routing.
+		h.miss(w, r)
+		return
+	case isServiceWorkerScript(r):
+		// A service worker would outlive revocation and could answer the
+		// viewer page's own navigations, so no content host serves one,
+		// not even redrop's own scripts.
+		h.pages.notFound(w)
+		return
+	case h.serveServerIcon(w, r) || serveViewerAsset(w, r):
 		return
 	}
 	slug, ok := h.slug(r)
@@ -139,11 +152,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case r.URL.Path == "/robots.txt":
 		RobotsTxt(w, r)
-		return
-	case isServiceWorkerScript(r):
-		// A service worker would outlive revocation and could answer the
-		// viewer page's own navigations, so no artifact host serves one.
-		h.pages.notFound(w)
 		return
 	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.favicon(w, r, slug)
@@ -176,6 +184,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serve(w, r, a)
+}
+
+// singleSlash reports whether p starts with exactly one slash, not followed
+// by another slash or a backslash (which browsers treat as a slash).
+func singleSlash(p string) bool {
+	return strings.HasPrefix(p, "/") && !strings.HasPrefix(p[1:], "/") && !strings.HasPrefix(p[1:], `\`)
+}
+
+// selfRef returns ref, a path with an optional query, as a reference to this
+// origin: exactly one leading slash, so it can never be read as
+// protocol-relative ("//host") or with a backslash ("/\host"). Every URL the
+// content handler emits for its own origin (redirects, the viewer's frame,
+// panel and file page links) goes through it.
+func selfRef(ref string) string {
+	return "/" + strings.TrimLeft(ref, `/\`)
+}
+
+// redirect sends the visitor to ref on this origin.
+func redirect(w http.ResponseWriter, r *http.Request, ref string, code int) {
+	http.Redirect(w, r, selfRef(ref), code)
 }
 
 // isServiceWorkerScript reports a request for a service worker's script
@@ -281,26 +309,27 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 	snap := sharing.CurrentSnapshot(a)
 	if v := r.URL.Query().Get(paramVersion); v != "" {
 		n, err := strconv.Atoi(v)
-		if err == nil {
+		if err == nil && v == strconv.Itoa(n) {
 			snap, err = h.sharing.SelectVersion(r.Context(), a, n)
+		} else {
+			err = sharing.ErrVersionUnavailable
 		}
 		if err != nil {
-			// Not a miss: the visitor passed the gates. Show the current version.
-			http.Redirect(w, r, withoutParams(r.URL, paramVersion), http.StatusSeeOther)
+			// Closed, unknown or malformed: the same miss as the version path.
+			h.miss(w, r)
 			return
 		}
 	}
-	mode := h.sharing.Mode(a, snap)
 	old := snap.Version != a.CurrentVersion
 	switch {
-	case mode == sharing.ModeFramed && wantsViewer(r) && !direct:
+	case h.getsViewer(w, r, a, snap, direct):
 		h.viewer(w, r, a, snap, d)
-	case old && mode == sharing.ModeFilePage && r.URL.Path == "/":
+	case old && h.sharing.Mode(a, snap) == sharing.ModeFilePage && r.URL.Path == "/":
 		h.countView(w, r, a, d)
 		h.serveContent(w, r, a, snap, versionBase(snap.Version), "/", direct)
 	case old:
 		// Version N's files live under its own path space.
-		http.Redirect(w, r, versionBase(snap.Version)+withoutParams(r.URL, paramVersion), http.StatusSeeOther)
+		redirect(w, r, versionBase(snap.Version)+withoutParams(r.URL, paramVersion), http.StatusSeeOther)
 	default:
 		h.countView(w, r, a, d)
 		h.serveContent(w, r, a, snap, "", r.URL.Path, direct)
@@ -328,17 +357,15 @@ func (h *Handler) serveOldVersion(w http.ResponseWriter, r *http.Request, a *sto
 		return
 	}
 	if !strings.HasPrefix(rest, num+"/") {
-		http.Redirect(w, r, versionBase(n)+"/"+withQuery("", r.URL.RawQuery), http.StatusMovedPermanently)
+		redirect(w, r, withQuery(versionBase(n)+"/", r.URL.RawQuery), http.StatusMovedPermanently)
 		return
 	}
 	p, direct := "/"+sub, h.directView(w, r, a)
-	if h.sharing.Mode(a, snap) == sharing.ModeFramed && wantsViewer(r) && !direct {
-		u := *r.URL
-		u.Path, u.RawPath = p, ""
-		q := u.Query()
+	if h.getsViewer(w, r, a, snap, direct) {
+		// The viewer form of this page: <path>?redrop-version=N.
+		q := r.URL.Query()
 		q.Set(paramVersion, strconv.Itoa(n))
-		u.RawQuery = q.Encode()
-		http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+		redirect(w, r, withQuery((&url.URL{Path: p}).EscapedPath(), q.Encode()), http.StatusSeeOther)
 		return
 	}
 	h.countView(w, r, a, d)
@@ -371,6 +398,18 @@ func (h *Handler) directView(w http.ResponseWriter, r *http.Request, a *store.Ar
 	return h.sharing.Direct(a, h.cookieValue(r, cookieDirect))
 }
 
+// getsViewer reports whether this request for snap gets the viewer page: a
+// framed artifact, a top-level page load, and no direct-view choice. It is
+// also the one place that marks framed responses as varying with
+// Sec-Fetch-Dest, since the same URL is content for frames.
+func (h *Handler) getsViewer(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, direct bool) bool {
+	if h.sharing.Mode(a, snap) != sharing.ModeFramed {
+		return false
+	}
+	w.Header().Add("Vary", "Sec-Fetch-Dest")
+	return wantsViewer(r) && !direct
+}
+
 // visitorNavigation reports a top-level page load the visitor started: from
 // the address bar or a bookmark (Sec-Fetch-Site: none) or from a page of the
 // same origin. Without Fetch Metadata it is never assumed.
@@ -385,7 +424,7 @@ func withoutParams(u *url.URL, names ...string) string {
 	for _, n := range names {
 		q.Del(n)
 	}
-	return withQuery(u.EscapedPath(), q.Encode())
+	return selfRef(withQuery(u.EscapedPath(), q.Encode()))
 }
 
 func withQuery(p, rawQuery string) string {
@@ -400,10 +439,6 @@ func withQuery(p, rawQuery string) string {
 // files are served ("" for the current version); direct leaves the info
 // panel off the file page.
 func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, base, p string, direct bool) {
-	if h.sharing.Mode(a, snap) == sharing.ModeFramed {
-		// The same URL is the viewer page for a top-level navigation.
-		w.Header().Add("Vary", "Sec-Fetch-Dest")
-	}
 	t := h.sharing.ResolvePath(r.Context(), snap, p)
 	switch t.Kind {
 	case sharing.TargetFile:
@@ -418,7 +453,7 @@ func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.
 	case sharing.TargetListing:
 		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), snap, t.Dir))
 	case sharing.TargetRedirect:
-		http.Redirect(w, r, base+t.Location, http.StatusMovedPermanently)
+		redirect(w, r, base+t.Location, http.StatusMovedPermanently)
 	default:
 		h.pages.notFound(w)
 	}
@@ -454,12 +489,12 @@ func (h *Handler) preview(w http.ResponseWriter, r *http.Request, a *store.Artif
 		return
 	}
 	h.setCookie(w, cookiePreview, g, true)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
 	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
@@ -488,7 +523,7 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 		return
 	}
 	h.setCookie(w, cookieVisit, g, false)
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	redirect(w, r, next, http.StatusSeeOther)
 }
 
 // reservedPrefix is redrop's own path space on every content host: gates,

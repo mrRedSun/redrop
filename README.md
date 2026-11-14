@@ -20,7 +20,8 @@ cross-platform CLI that agents drive.
   when the link is opened directly; when it's clicked on another website,
   only that page is direct). Clients without Fetch Metadata (curl, very old
   browsers) always get the artifact directly. Owners can let viewers open
-  older versions (`--old-versions`). Change notes on new versions are shown
+  older versions (`--old-versions`); inside an older version, a root-absolute
+  link (`/x.html`) leads to the current version. Change notes on new versions are shown
   to viewers; notes written before this release stay private.
 - Artifacts can't register service workers (a worker would outlive
   revocation). Everything else behaves as a normal web page on its own origin.
