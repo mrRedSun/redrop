@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/mrRedSun/redrop/internal/markdown"
@@ -40,25 +39,25 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 		return nil, usageErrorf("--name must be a file name, not a path, when rendering a single file")
 	}
 	if isDir {
-		if _, err := os.Lstat(filepath.Join(srcPath, "index.html")); err == nil {
-			return nil, usageErrorf("cannot render Markdown: bundle already contains index.html")
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("inspect bundle index.html: %w", err)
-		}
 		// OpenRoot confines source selection even when a path contains symlinks.
 		root, err := os.OpenRoot(srcPath)
 		if err != nil {
-			return nil, err
+			return nil, bundlePathError(srcPath, err)
 		}
 		defer root.Close()
-		f, err := root.Open(filepath.FromSlash(sourceName))
+		if _, err := root.Lstat("index.html"); err == nil {
+			return nil, usageErrorf("cannot render Markdown: bundle already contains index.html")
+		} else if !os.IsNotExist(err) {
+			return nil, bundlePathError("index.html", err)
+		}
+		f, err := openRegularFile(root, sourceName)
 		if err != nil {
-			return nil, fmt.Errorf("open Markdown entry: %w", err)
+			return nil, fmt.Errorf("--entry %s: %w", sourceName, err)
 		}
 		defer f.Close()
 		return packMarkdown(sourceName, base, f, root)
 	}
-	f, err := os.Open(srcPath)
+	f, err := openSingleSource(srcPath)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +86,7 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root) (*Prepared
 	if root != nil {
 		fsys = root.FS()
 	}
-	err = packFS(fsys, f,
+	err = packFS(fsys, f, func(warning string) { p.Warnings = append(p.Warnings, warning) },
 		bundleFile{Name: "index.html", Content: bytes.NewReader(rendered.HTML), Size: int64(len(rendered.HTML))},
 		bundleFile{Name: name, Content: bytes.NewReader(original), Size: int64(len(original)), Replace: true},
 	)
@@ -97,6 +96,9 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root) (*Prepared
 	if err != nil {
 		p.Close()
 		return nil, err
+	}
+	for _, image := range rendered.RejectedImageSources {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("image %q removed: images must be files inside the bundle", image))
 	}
 	if root == nil {
 		for _, reference := range rendered.LocalReferences {

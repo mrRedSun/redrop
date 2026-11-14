@@ -215,15 +215,21 @@ network lookups or timestamps in the output.
   files never upload siblings. Rendering does not modify the input directory and
   refuses an existing root `index.html`. Ordinary and Markdown bundles share one
   `fs.FS` packer. Relative file and directory symlinks are followed only within
-  the selected `os.OpenRoot`; outside-root, absolute, broken, or cyclic links fail
-  explicitly. Directory depth is bounded at 64. Archive rendering is unsupported.
+  the selected `os.OpenRoot`. Absolute, outside-root, and cyclic links are usage
+  errors. Broken asset symlinks and non-regular bundle entries are skipped with
+  warnings. An explicitly selected source or `--entry` must be a regular file,
+  checked before opening and again before reading. Directory depth is bounded at
+  64. Archive rendering is unsupported.
 - Sources are limited to 8 MiB. Unknown code languages and blocks over 64 KiB stay
   escaped plain text rather than invoking a lexer. Rendering does not support
   `--spa`. Invalid render options return a typed client usage error, mapped to
   CLI exit code 2. `client.RenderMode` and `ParseRenderMode` define the modes once.
 - Single-file rendering reports local references that are not uploaded. The CLI
   warns on stderr and suggests directory publishing; it never uploads siblings
-  implicitly. Library users may inspect `Prepared.Warnings` or set `Source.Warn`.
+  implicitly. Rejected image sources are reported for single-file and directory
+  rendering, with a warning naming the source and the rule that images must be
+  files inside the bundle. Library users may inspect `Prepared.Warnings` or set
+  `Source.Warn`.
   Updating a raw Markdown artifact with auto-rendering creates a rendered bundle
   version; `--render none` keeps the new version raw.
 
@@ -236,9 +242,10 @@ there are no CDN scripts, web fonts, or runtime highlighting dependencies.
 allowlist, rather than relying on regex-based HTML filtering. These dependencies
 are pinned in the Go module graph and belong to the client build, not the server.
 
-Raw HTML is never enabled. Custom Goldmark renderers escape inline HTML and HTML
-blocks as visible text, preserving technical prose such as `List<String>`, tags,
-and comments without executing them. The parsed-output allowlist strips active
+Raw HTML is never enabled. Custom Goldmark renderers omit inline and block HTML
+comments. Other inline HTML remains escaped inline; other HTML blocks become
+escaped text in normal paragraphs, not code blocks with Copy buttons. This
+preserves technical prose such as `List<String>` and tags without executing them. The parsed-output allowlist strips active
 elements, event handlers, arbitrary CSS, and unsafe URLs after highlighting.
 Images are local-only. Relative URLs cannot escape the bundle root and cannot
 contain controls or backslashes. `data:`, `javascript:`, and other active schemes

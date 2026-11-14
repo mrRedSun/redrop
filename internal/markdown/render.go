@@ -22,6 +22,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/renderer"
+	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -47,10 +48,12 @@ type heading struct {
 }
 
 // Result contains the portable document and the bundle-relative asset/link paths
-// it references. Callers decide which references exist in their upload.
+// it references. Callers decide which references exist in their upload. Rejected
+// image sources retain their original Markdown destinations for diagnostics.
 type Result struct {
-	HTML            []byte
-	LocalReferences []string
+	HTML                 []byte
+	LocalReferences      []string
+	RejectedImageSources []string
 }
 
 // Render returns a self-contained HTML page. name and base are slash-separated
@@ -64,7 +67,9 @@ func Render(source []byte, name, base string) (Result, error) {
 		goldmark.WithExtensions(extension.GFM),
 		goldmark.WithRendererOptions(renderer.WithNodeRenderers(util.Prioritized(rawTextRenderer{}, 100))),
 	) // Raw HTML is always escaped, never enabled.
-	if err := md.Convert(source, &raw); err != nil {
+	document := md.Parser().Parse(text.NewReader(source))
+	rejected := rejectedImageSources(document, base)
+	if err := md.Renderer().Render(&raw, source, document); err != nil {
 		return Result{}, fmt.Errorf("render Markdown: %w", err)
 	}
 	nodes, err := html.ParseFragment(&raw, &html.Node{Type: html.ElementNode, Data: "div", DataAtom: atom.Div})
@@ -94,7 +99,7 @@ func Render(source []byte, name, base string) (Result, error) {
 		Body                              template.HTML
 		Headings                          []heading
 	}{title, name, (&url.URL{Path: "./" + name}).String(), scriptHash, template.HTML(body.String()), headings}) // body passed the allowlist above
-	return Result{HTML: out.Bytes(), LocalReferences: references}, err
+	return Result{HTML: out.Bytes(), LocalReferences: references, RejectedImageSources: rejected}, err
 }
 
 func walk(n *html.Node, fn func(*html.Node)) {
@@ -161,7 +166,11 @@ func sanitize(root *html.Node, base string) {
 	const allowed = " p h1 h2 h3 h4 h5 h6 a img pre code span strong em del blockquote ul ol li table thead tbody tr th td hr br input "
 	for n := root.FirstChild; n != nil; {
 		next := n.NextSibling
-		if n.Type != html.TextNode && (n.Type != html.ElementNode || !strings.Contains(allowed, " "+n.Data+" ")) {
+		if n.Type == html.TextNode {
+			n = next
+			continue
+		}
+		if n.Type != html.ElementNode || !strings.Contains(allowed, " "+n.Data+" ") {
 			root.RemoveChild(n)
 			n = next
 			continue

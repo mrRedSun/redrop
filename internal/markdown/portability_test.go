@@ -58,6 +58,21 @@ func TestRejectedLinksArePlainText(t *testing.T) {
 	}
 }
 
+func TestRejectedImageSources(t *testing.T) {
+	source := "![Remote](https://example.com/a.png) ![Data](data:image/png;base64,AAAA) ![Root](/abs.png) ![Up](../up.png) ![Local](pic.png) ![Escaped](pic\\-a.png)"
+	result, err := Render([]byte(source), "notes.md", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"https://example.com/a.png", "data:image/png;base64,AAAA", "/abs.png", "../up.png"}
+	if !reflect.DeepEqual(result.RejectedImageSources, want) {
+		t.Errorf("rejected images = %v, want %v", result.RejectedImageSources, want)
+	}
+	if !reflect.DeepEqual(result.LocalReferences, []string{"pic.png", "pic-a.png"}) {
+		t.Errorf("valid images were misclassified: %v", result.LocalReferences)
+	}
+}
+
 func TestPortableDocument(t *testing.T) {
 	doc := renderDoc(t, "# Portable\n\n[Asset](__redrop/info.txt)\n")
 	for _, bad := range []string{`rel="icon"`, `name="robots"`, `name="referrer"`, "?download", "data:image/"} {

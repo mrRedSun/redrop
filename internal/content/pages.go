@@ -12,6 +12,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 //go:embed templates/*.html templates/style.css
@@ -78,7 +79,7 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	}
 	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
-		"Action": "/" + sharing.ReservedPrefix + "/open",
+		"Action": "/" + api.ReservedPrefix + "/open",
 	})
 }
 

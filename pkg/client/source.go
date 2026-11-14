@@ -12,9 +12,13 @@ const (
 )
 
 // UsageError identifies invalid publishing options rather than runtime failures.
-type UsageError struct{ Message string }
+type UsageError struct {
+	Message string
+	Cause   error
+}
 
 func (e *UsageError) Error() string { return e.Message }
+func (e *UsageError) Unwrap() error { return e.Cause }
 
 func usageErrorf(format string, args ...any) error {
 	return &UsageError{Message: fmt.Sprintf(format, args...)}

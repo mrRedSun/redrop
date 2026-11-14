@@ -74,15 +74,19 @@ A single .md file does not upload siblings. Use a directory for local images.
 Archives are not rendered: unpack them into a directory first. Existing
 index.html files are never overwritten. --spa is not supported with rendering.
 Ordinary and Markdown directories share one confined packer. Relative symlinks
-within the directory are followed; outside-root, absolute, broken, and cyclic
-links fail. Missing local references in single-file uploads produce a stderr
-warning suggesting directory publishing. Invalid rendering options exit with 2.
+within the directory are followed; outside-root, absolute, and cyclic links are
+usage errors. Broken asset symlinks and non-regular bundle entries are skipped
+with stderr warnings. Selected Markdown sources and entries must be regular files.
+Missing local references in single-file uploads produce a stderr warning
+suggesting directory publishing. Rejected image sources produce a warning for
+both files and directories, naming the source and the local-image rule.
+Invalid rendering options exit with 2.
 
 The page has heading anchors, a TOC at four headings, offline syntax highlighting,
 copy buttons, GFM tables/task lists, blockquotes, and responsive light/dark styles.
 Unknown languages and code blocks over 64 KiB stay plain. Sources over 8 MiB must
-use --render none. Raw HTML, including tags and comments, is escaped as visible
-text; List<String> stays intact. There is no raw-HTML opt-in. HTTP/HTTPS and mailto
+use --render none. HTML comments are omitted. Other raw HTML becomes escaped
+inline text or normal paragraphs, not Copy-enabled code; List<String> stays intact. There is no raw-HTML opt-in. HTTP/HTTPS and mailto
 navigation links use a new tab with no opener/referrer. Images stay local-only;
 active schemes, data URIs and unsafe attributes are rejected. A page CSP blocks
 automatic external requests. The document has no hosting-specific branding, icon,

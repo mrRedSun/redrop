@@ -2,6 +2,9 @@ package client
 
 import (
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,6 +21,51 @@ func TestParseRenderMode(t *testing.T) {
 	var usage *UsageError
 	if !errors.As(err, &usage) {
 		t.Fatalf("invalid mode must return a typed usage error: %v", err)
+	}
+}
+
+func TestMarkdownEntryMustBeRegular(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "guides"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"guides", "missing.md"} {
+		_, err := Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: entry})
+		var usage *UsageError
+		if !errors.As(err, &usage) || !strings.Contains(err.Error(), entry) {
+			t.Fatalf("--entry %s must return a named usage error: %v", entry, err)
+		}
+		if entry == "missing.md" && (!errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "symlinks must be relative and stay inside the directory")) {
+			t.Fatalf("missing path must preserve its cause and explain the rule: %v", err)
+		}
+	}
+}
+
+func TestRejectedImageWarningsForFilesAndDirectories(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		var warnings []string
+		source := "![Remote](https://example.com/a.png) ![Data](data:image/png;base64,AAAA) ![Up](../up.png)\n"
+		src := &Source{Name: "notes.md", Reader: strings.NewReader(source), Warn: func(w string) { warnings = append(warnings, w) }}
+		if directory {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			src.Path, src.Reader, src.Render, src.Entry = dir, nil, RenderMarkdown, "notes.md"
+		}
+		p, err := Prepare(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Close()
+		want := []string{
+			`image "https://example.com/a.png" removed: images must be files inside the bundle`,
+			`image "data:image/png;base64,AAAA" removed: images must be files inside the bundle`,
+			`image "../up.png" removed: images must be files inside the bundle`,
+		}
+		if !reflect.DeepEqual(warnings, want) || !reflect.DeepEqual(p.Warnings, want) {
+			t.Fatalf("directory=%v rejected image warnings = %v / %v, want %v", directory, warnings, p.Warnings, want)
+		}
 	}
 }
 

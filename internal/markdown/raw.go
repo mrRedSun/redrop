@@ -1,13 +1,17 @@
 package markdown
 
 import (
+	"bytes"
+	"io"
+
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/util"
+	"golang.org/x/net/html"
 )
 
 // rawTextRenderer preserves HTML-looking prose without enabling raw HTML.
-// Inline tags stay literal text; blocks become escaped, copyable code blocks.
+// Comments are omitted; other tags stay literal text in inline prose or paragraphs.
 type rawTextRenderer struct{}
 
 func (rawTextRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
@@ -20,6 +24,12 @@ func renderRawText(w util.BufWriter, source []byte, node ast.Node, entering bool
 		return ast.WalkContinue, nil
 	}
 	n := node.(*ast.RawHTML)
+	if n.Segments.Len() > 0 {
+		first := n.Segments.At(0)
+		if bytes.HasPrefix(first.Value(source), []byte("<!--")) {
+			return ast.WalkContinue, nil
+		}
+	}
 	for i := 0; i < n.Segments.Len(); i++ {
 		segment := n.Segments.At(i)
 		if _, err := w.Write(util.EscapeHTML(segment.Value(source))); err != nil {
@@ -34,20 +44,37 @@ func renderHTMLText(w util.BufWriter, source []byte, node ast.Node, entering boo
 		return ast.WalkContinue, nil
 	}
 	n := node.(*ast.HTMLBlock)
-	if _, err := w.WriteString("<pre><code>"); err != nil {
+	if n.HTMLBlockType == ast.HTMLBlockType2 {
+		return ast.WalkContinue, nil
+	}
+	if _, err := w.WriteString("<p>"); err != nil {
 		return ast.WalkStop, err
 	}
+	var content bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
 		line := n.Lines().At(i)
-		if _, err := w.Write(util.EscapeHTML(line.Value(source))); err != nil {
-			return ast.WalkStop, err
-		}
+		content.Write(line.Value(source))
 	}
 	if n.HasClosure() {
-		if _, err := w.Write(util.EscapeHTML(n.ClosureLine.Value(source))); err != nil {
-			return ast.WalkStop, err
+		content.Write(n.ClosureLine.Value(source))
+	}
+	// Tokenize only to omit actual comments inside a larger HTML block. Raw
+	// token bytes preserve tags and attributes exactly before escaping them.
+	tokens := html.NewTokenizer(&content)
+	for {
+		kind := tokens.Next()
+		if kind == html.ErrorToken {
+			if err := tokens.Err(); err != io.EOF {
+				return ast.WalkStop, err
+			}
+			break
+		}
+		if kind != html.CommentToken || !bytes.HasPrefix(tokens.Raw(), []byte("<!--")) {
+			if _, err := w.Write(util.EscapeHTML(tokens.Raw())); err != nil {
+				return ast.WalkStop, err
+			}
 		}
 	}
-	_, err := w.WriteString("</code></pre>\n")
+	_, err := w.WriteString("</p>\n")
 	return ast.WalkContinue, err
 }

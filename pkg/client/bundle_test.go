@@ -69,7 +69,7 @@ func TestBundleRejectsUnsafeSymlinks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "private.txt"), []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"outside-file", "outside-directory", "broken", "cycle"} {
+	for _, kind := range []string{"outside-file", "outside-directory", "outside-relative", "absolute-inside", "cycle"} {
 		for _, markdownMode := range []bool{false, true} {
 			name := kind + "/ordinary"
 			if markdownMode {
@@ -80,9 +80,13 @@ func TestBundleRejectsUnsafeSymlinks(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
+				relativeOutside, err := filepath.Rel(dir, filepath.Join(outside, "private.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
 				target := map[string]string{
 					"outside-file": filepath.Join(outside, "private.txt"), "outside-directory": outside,
-					"broken": "missing", "cycle": ".",
+					"outside-relative": relativeOutside, "absolute-inside": filepath.Join(dir, "notes.md"), "cycle": ".",
 				}[kind]
 				if err := os.Symlink(target, filepath.Join(dir, "asset-link")); err != nil {
 					t.Skipf("symlinks unavailable: %v", err)
@@ -96,18 +100,53 @@ func TestBundleRejectsUnsafeSymlinks(t *testing.T) {
 					p.Close()
 					t.Fatal("unsafe symlink was followed or silently omitted")
 				}
-				if !strings.Contains(err.Error(), "asset-link") {
-					t.Errorf("error does not identify the bad bundle path: %v", err)
+				var usage *UsageError
+				if !errors.As(err, &usage) || !strings.Contains(err.Error(), "asset-link") {
+					t.Errorf("error must identify the bad bundle path and be a usage error: %v", err)
+				}
+				if kind != "cycle" && !strings.Contains(err.Error(), "symlinks must be relative and stay inside the directory") {
+					t.Errorf("symlink error must explain the rule: %v", err)
 				}
 			})
 		}
 	}
 }
 
+func TestBrokenBundleSymlinksAreSkippedWithWarnings(t *testing.T) {
+	for _, mode := range []RenderMode{RenderNone, RenderMarkdown} {
+		t.Run(string(mode), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("missing.png", filepath.Join(dir, "image-link.png")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			var warnings []string
+			src := &Source{Path: dir, Kind: api.KindBundle, Render: mode, Warn: func(w string) { warnings = append(warnings, w) }}
+			if mode == RenderMarkdown {
+				src.Entry = "notes.md"
+			}
+			p, err := Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if len(warnings) != 1 || warnings[0] != `bundle path "image-link.png" skipped: broken symlink` || len(p.Warnings) != 1 || p.Warnings[0] != warnings[0] {
+				t.Fatalf("missing broken-symlink warning: %v / %v", p.Warnings, warnings)
+			}
+			files := unpackPrepared(t, p)
+			if _, exists := files["image-link.png"]; exists || files["notes.md"] != "# Notes\n" {
+				t.Fatal("broken symlink was archived or valid source lost")
+			}
+		})
+	}
+}
+
 func TestPackFSSnapshotsAndCollisions(t *testing.T) {
 	fsys := fstest.MapFS{"notes.md": &fstest.MapFile{Data: []byte("newer source")}}
 	var out bytes.Buffer
-	err := packFS(fsys, &out,
+	err := packFS(fsys, &out, nil,
 		bundleFile{Name: "index.html", Content: strings.NewReader("rendered snapshot"), Size: 17},
 		bundleFile{Name: "notes.md", Content: strings.NewReader("original snapshot"), Size: 17, Replace: true},
 	)
@@ -124,17 +163,17 @@ func TestPackFSSnapshotsAndCollisions(t *testing.T) {
 	}
 	fsys["index.html"] = &fstest.MapFile{Data: []byte("keep existing")}
 	out.Reset()
-	if err := packFS(fsys, &out, bundleFile{Name: "index.html", Content: strings.NewReader("new"), Size: 3}); err == nil {
+	if err := packFS(fsys, &out, nil, bundleFile{Name: "index.html", Content: strings.NewReader("new"), Size: 3}); err == nil {
 		t.Fatal("generated index.html replaced an existing file")
 	}
 }
 
 func TestPackFSDepthBoundAndWriteErrors(t *testing.T) {
 	deep := strings.Repeat("nested/", 65) + "file.txt"
-	if err := packFS(fstest.MapFS{deep: &fstest.MapFile{Data: []byte("content")}}, io.Discard); err == nil || !strings.Contains(err.Error(), "depth") {
+	if err := packFS(fstest.MapFS{deep: &fstest.MapFile{Data: []byte("content")}}, io.Discard, nil); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("unbounded directory nesting accepted: %v", err)
 	}
-	if err := packFS(fstest.MapFS{"file.txt": &fstest.MapFile{Data: []byte("content")}}, brokenBundleWriter{}); !errors.Is(err, io.ErrClosedPipe) {
+	if err := packFS(fstest.MapFS{"file.txt": &fstest.MapFile{Data: []byte("content")}}, brokenBundleWriter{}, nil); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("archive write failure not propagated: %v", err)
 	}
 }

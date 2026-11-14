@@ -29,6 +29,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 const maxInlineText = 1 << 20
@@ -147,7 +148,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.tooManyMisses(w)
 		return
 	}
-	openPath := "/" + sharing.ReservedPrefix + "/open"
+	openPath := "/" + api.ReservedPrefix + "/open"
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == openPath) {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -158,7 +159,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.miss(w, r)
 		return
 	}
-	if rest, reserved := strings.CutPrefix(r.URL.Path, "/"+sharing.ReservedPrefix+"/"); reserved {
+	if rest, reserved := strings.CutPrefix(r.URL.Path, "/"+api.ReservedPrefix+"/"); reserved {
 		switch rest {
 		case "preview":
 			h.preview(w, r, a)
@@ -305,7 +306,7 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 
 // iconPrefix is where server-rendered pages on the content domain link their
 // icons. It is reserved, so it can never collide with artifact files.
-const iconPrefix = "/" + sharing.ReservedPrefix + "/"
+const iconPrefix = "/" + api.ReservedPrefix + "/"
 
 // fallbackIcons are the paths browsers request without being told to. On an
 // artifact origin they fall back to the redrop icon when the artifact has none.
@@ -363,7 +364,7 @@ func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
 
 // safeNext only allows same-host relative paths outside the reserved space.
 func safeNext(p string) string {
-	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") || strings.HasPrefix(p, "/"+sharing.ReservedPrefix) {
+	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") || strings.HasPrefix(p, "/"+api.ReservedPrefix) {
 		return "/"
 	}
 	return p

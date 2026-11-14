@@ -71,12 +71,16 @@ include images and links relative to the selected Markdown file. A single file
 never uploads its siblings. Directory rendering refuses an existing root
 `index.html` and does not support `--spa`. Ordinary and Markdown bundles use the
 same packer and follow relative symlinks only within the selected directory.
-Outside-root, absolute, broken, and cyclic symlinks fail explicitly. Unpack
-archives before rendering. Missing local references in a single-file upload
-produce a stderr warning and a directory-publishing suggestion.
+Outside-root, absolute, and cyclic symlinks fail with usage errors. Broken asset
+symlinks and other non-regular bundle entries are skipped with stderr warnings.
+Selected Markdown sources must be regular files. Unpack archives before rendering.
+Missing local references in a single-file upload produce a stderr warning and a
+directory-publishing suggestion. Rejected image sources produce warnings for
+both single files and directories, naming the source and the local-image rule.
 
-Raw HTML is displayed as escaped text, so prose such as `List<String>` survives
-without becoming markup. Unsafe attributes and active URL schemes are removed.
+HTML comments are omitted. Other raw HTML is displayed as escaped inline text
+or normal paragraphs, not Copy-enabled code blocks. Prose such as `List<String>`
+survives without becoming markup. Unsafe attributes and active URL schemes are removed.
 HTTP/HTTPS and mailto links open with no opener or referrer; images stay local-only.
 A restrictive CSP prevents automatic external resource requests. Generated HTML
 has no branding, favicon, hosting-policy meta tags, or special download queries.

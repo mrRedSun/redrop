@@ -21,9 +21,6 @@ import (
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
-// ReservedPrefix is the URL path space used by gate pages on artifact hosts.
-const ReservedPrefix = api.ReservedPrefix
-
 func init() {
 	// Distroless images ship no /etc/mime.types; register what artifacts use.
 	for ext, typ := range map[string]string{
@@ -90,7 +87,7 @@ func sanitizeFilename(name string) string {
 		}
 		return r
 	}, name)
-	if name == "" || name == "." || name == "/" || name == ".." || strings.HasPrefix(name, ReservedPrefix) {
+	if name == "" || name == "." || name == "/" || name == ".." || strings.HasPrefix(name, api.ReservedPrefix) {
 		return "file"
 	}
 	return truncate(name, 200)
@@ -112,7 +109,7 @@ func CleanBundlePath(p string) (string, error) {
 	if c == "" || c == "." {
 		return "", nil
 	}
-	if c == ReservedPrefix || strings.HasPrefix(c, ReservedPrefix+"/") {
+	if c == api.ReservedPrefix || strings.HasPrefix(c, api.ReservedPrefix+"/") {
 		return "", fmt.Errorf("path %q is reserved", p)
 	}
 	if len(c) > 1024 || !utf8.ValidString(c) {

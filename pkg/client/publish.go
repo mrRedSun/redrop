@@ -53,6 +53,14 @@ func (p *Prepared) Close() {
 	}
 }
 
+func (p *Prepared) reportWarnings(report func(string)) {
+	if report != nil {
+		for _, warning := range p.Warnings {
+			report(warning)
+		}
+	}
+}
+
 // DetectKind chooses html for .html/.htm files, bundle for directories and
 // .zip/.tar.gz archives only when forced, and file otherwise.
 func DetectKind(name string, isDir bool) string {
@@ -119,11 +127,7 @@ func Prepare(src *Source) (*Prepared, error) {
 		if err != nil {
 			return fail(err)
 		}
-		if src.Warn != nil {
-			for _, warning := range rendered.Warnings {
-				src.Warn(warning)
-			}
-		}
+		rendered.reportWarnings(src.Warn)
 		cleanup := rendered.cleanup
 		rendered.cleanup = func() { cleanup(); p.Close() }
 		return rendered, nil
@@ -149,7 +153,7 @@ func Prepare(src *Source) (*Prepared, error) {
 		lower := strings.ToLower(name)
 		switch {
 		case isDir:
-			err = packDir(srcPath, tmp)
+			err = packDir(srcPath, tmp, func(warning string) { p.Warnings = append(p.Warnings, warning) })
 		case strings.HasSuffix(lower, ".zip"):
 			err = zipToTarGz(srcPath, tmp)
 		case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):
@@ -173,6 +177,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	default:
 		return fail(usageErrorf("unknown kind %q (use html, file, or bundle)", kind))
 	}
+	p.reportWarnings(src.Warn)
 	return p, nil
 }
 

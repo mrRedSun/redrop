@@ -398,7 +398,7 @@ func (s *Service) Preview(ctx context.Context, actor Actor, id string) (PreviewL
 	}
 	exp := time.Now().Add(previewTTL)
 	tok := s.previewSigner.Sign(previewTokenPayload(a), exp)
-	return PreviewLink{URL: s.cfg.ArtifactURL(a.Slug) + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
+	return PreviewLink{URL: s.cfg.ArtifactURL(a.Slug) + api.ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
 }
 
 func (s *Service) Versions(ctx context.Context, actor Actor, id string) ([]Version, error) {

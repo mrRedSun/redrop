@@ -3,12 +3,12 @@ package client
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
@@ -25,7 +25,7 @@ type bundleFile struct {
 // packFS uses the same traversal and symlink policy for every directory bundle.
 // Callers supply an os.Root filesystem so every stat, directory read, and open
 // remains within the selected root, including when following symlinks.
-func packFS(fsys fs.FS, w io.Writer, extras ...bundleFile) error {
+func packFS(fsys fs.FS, w io.Writer, warn func(string), extras ...bundleFile) error {
 	added := make(map[string]bundleFile, len(extras))
 	for _, extra := range extras {
 		if !fs.ValidPath(extra.Name) || extra.Name == "." || strings.Contains(extra.Name, "\\") || extra.Size < 0 {
@@ -55,7 +55,15 @@ func packFS(fsys fs.FS, w io.Writer, extras ...bundleFile) error {
 			}
 			info, err := fs.Stat(fsys, name)
 			if err != nil {
-				return fmt.Errorf("inspect bundle path %q: %w", name, err)
+				if errors.Is(err, fs.ErrNotExist) {
+					if link, linkErr := fs.Lstat(fsys, name); linkErr == nil && link.Mode()&fs.ModeSymlink != 0 {
+						if warn != nil {
+							warn(fmt.Sprintf("bundle path %q skipped: broken symlink", name))
+						}
+						return nil
+					}
+				}
+				return bundlePathError(name, err)
 			}
 			if skipEntry(name, info.IsDir()) {
 				return nil
@@ -73,7 +81,7 @@ func packFS(fsys fs.FS, w io.Writer, extras ...bundleFile) error {
 				}
 				entries, err := fs.ReadDir(fsys, name)
 				if err != nil {
-					return fmt.Errorf("read bundle directory %q: %w", name, err)
+					return bundlePathError(name, err)
 				}
 				for _, entry := range entries {
 					if err := walk(path.Join(name, entry.Name()), append(ancestors, info)); err != nil {
@@ -83,11 +91,14 @@ func packFS(fsys fs.FS, w io.Writer, extras ...bundleFile) error {
 				return nil
 			}
 			if !info.Mode().IsRegular() {
-				return usageErrorf("bundle path %q is not a regular file or directory", name)
+				if warn != nil {
+					warn(fmt.Sprintf("bundle path %q skipped: not a regular file or directory", name))
+				}
+				return nil
 			}
 			file, err := fsys.Open(name)
 			if err != nil {
-				return fmt.Errorf("open bundle file %q: %w", name, err)
+				return bundlePathError(name, err)
 			}
 			defer file.Close()
 			info, err = file.Stat()
@@ -111,22 +122,17 @@ func skipEntry(name string, isDir bool) bool {
 	return base == ".DS_Store" || base == "Thumbs.db"
 }
 
-func packDir(dir string, w io.Writer) error {
+func packDir(dir string, w io.Writer, warn func(string)) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return err
+		return bundlePathError(dir, err)
 	}
 	defer root.Close()
-	return packFS(root.FS(), w)
+	return packFS(root.FS(), w, warn)
 }
 
 func packSingle(src, name string, w io.Writer) error {
-	root, err := os.OpenRoot(filepath.Dir(src))
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	file, err := root.Open(filepath.Base(src))
+	file, err := openSingleSource(src)
 	if err != nil {
 		return err
 	}
@@ -135,10 +141,7 @@ func packSingle(src, name string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() {
-		return usageErrorf("bundle source %q is not a regular file", src)
-	}
-	return packFS(nil, w, bundleFile{Name: name, Content: file, Size: info.Size()})
+	return packFS(nil, w, nil, bundleFile{Name: name, Content: file, Size: info.Size()})
 }
 
 func addBundleFile(tw *tar.Writer, name string, content io.Reader, size int64) error {
