@@ -146,7 +146,7 @@ func TestBrokenBundleSymlinksAreSkippedWithWarnings(t *testing.T) {
 func TestPackFSSnapshotsAndCollisions(t *testing.T) {
 	fsys := fstest.MapFS{"notes.md": &fstest.MapFile{Data: []byte("newer source")}}
 	var out bytes.Buffer
-	err := packFS(fsys, &out, nil,
+	_, err := packFS(fsys, &out, walkHooks{},
 		bundleFile{Name: "index.html", Content: strings.NewReader("rendered snapshot"), Size: 17},
 		bundleFile{Name: "notes.md", Content: strings.NewReader("original snapshot"), Size: 17, Replace: true},
 	)
@@ -163,17 +163,17 @@ func TestPackFSSnapshotsAndCollisions(t *testing.T) {
 	}
 	fsys["index.html"] = &fstest.MapFile{Data: []byte("keep existing")}
 	out.Reset()
-	if err := packFS(fsys, &out, nil, bundleFile{Name: "index.html", Content: strings.NewReader("new"), Size: 3}); err == nil {
+	if _, err := packFS(fsys, &out, walkHooks{}, bundleFile{Name: "index.html", Content: strings.NewReader("new"), Size: 3}); err == nil {
 		t.Fatal("generated index.html replaced an existing file")
 	}
 }
 
 func TestPackFSDepthBoundAndWriteErrors(t *testing.T) {
 	deep := strings.Repeat("nested/", 65) + "file.txt"
-	if err := packFS(fstest.MapFS{deep: &fstest.MapFile{Data: []byte("content")}}, io.Discard, nil); err == nil || !strings.Contains(err.Error(), "depth") {
+	if _, err := packFS(fstest.MapFS{deep: &fstest.MapFile{Data: []byte("content")}}, io.Discard, walkHooks{}); err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("unbounded directory nesting accepted: %v", err)
 	}
-	if err := packFS(fstest.MapFS{"file.txt": &fstest.MapFile{Data: []byte("content")}}, brokenBundleWriter{}, nil); !errors.Is(err, io.ErrClosedPipe) {
+	if _, err := packFS(fstest.MapFS{"file.txt": &fstest.MapFile{Data: []byte("content")}}, brokenBundleWriter{}, walkHooks{}); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("archive write failure not propagated: %v", err)
 	}
 }

@@ -223,9 +223,9 @@ type contentFlags struct {
 
 func (f *contentFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.as, "as", "", "force the kind: html (render the page), file (viewer + download), bundle (folder/static site)")
-	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin)")
+	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin; not valid with watch)")
 	cmd.Flags().StringVar(&f.render, "render", "auto", "render mode: auto (.md files unless --as is set), markdown, or none (raw)")
-	cmd.Flags().StringVar(&f.entry, "entry", "", "bundle start page (default index.html), or Markdown source with --render markdown")
+	cmd.Flags().StringVar(&f.entry, "entry", "", "bundle start page (default index.html; without one a file listing is shown), or Markdown source with --render markdown")
 	cmd.Flags().BoolVar(&f.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
 	cmd.Flags().StringVar(&f.note, "note", "", "note stored with this version; viewers see it in the info panel's version list")
 }
@@ -267,7 +267,7 @@ func (f *contentFlags) source(arg string) (*client.Source, error) {
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	src := &client.Source{Kind: f.as, Render: mode, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, Warn: func(warning string) {
+	src := &client.Source{Kind: f.as, Render: mode, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, OnSkipped: reportSkippedFiles, Warn: func(warning string) {
 		fmt.Fprintln(os.Stderr, "warning: "+warning)
 	}}
 	if arg == "-" {
@@ -282,6 +282,10 @@ func (f *contentFlags) source(arg string) (*client.Source, error) {
 		src.Path = arg
 	}
 	return src, nil
+}
+
+func reportSkippedFiles(n int) {
+	fmt.Fprintf(os.Stderr, "redrop: skipped %d file%s from folder upload\n", n, plural(n))
 }
 
 func shareCmd() *cobra.Command {

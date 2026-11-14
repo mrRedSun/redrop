@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -137,6 +138,9 @@ func mapErr(err error) error {
 	if errors.As(err, &ee) {
 		return err
 	}
+	if errors.Is(err, client.ErrEmptyDirectory) {
+		return &exitError{exitUsage, err} // as when the server rejected it
+	}
 	var usage *client.UsageError
 	if errors.As(err, &usage) {
 		return &exitError{exitUsage, err}
@@ -167,9 +171,18 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
+// printJSONLine writes one compact JSON line, for streaming output.
+func printJSONLine(v any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		fmt.Fprintf(os.Stderr, "redrop: writing JSON output failed: %v\n", err)
+	}
+}
+
 func main() {
 	root := newRootCmd()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := root.ExecuteContext(ctx)
 	if err == nil {
@@ -228,7 +241,7 @@ machine-readable output, and check exit codes (listed in the guide).`,
 	})
 
 	root.AddGroup(&cobra.Group{ID: "share", Title: "Sharing:"}, &cobra.Group{ID: "manage", Title: "Managing artifacts:"}, &cobra.Group{ID: "setup", Title: "Setup:"})
-	for _, c := range []*cobra.Command{shareCmd(), updateCmd()} {
+	for _, c := range []*cobra.Command{shareCmd(), updateCmd(), watchCmd()} {
 		c.GroupID = "share"
 		root.AddCommand(c)
 	}

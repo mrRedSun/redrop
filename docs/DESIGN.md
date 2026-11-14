@@ -448,16 +448,11 @@ network lookups or timestamps in the output.
   links/images are rebased from the source directory to the root entry. Single
   files never upload siblings. Rendering does not modify the input directory and
   refuses an existing root `index.html`. Ordinary and Markdown bundles share one
-  `fs.FS` packer. Relative file and directory symlinks are followed only within
-  the selected `os.OpenRoot`. Absolute, outside-root, and cyclic links are usage
-  errors. Broken asset symlinks and non-regular bundle entries are skipped with
-  warnings. An explicitly named single-file source follows normal filesystem
-  symlinks, even into another directory, since it is not an implicit directory
-  walk. It and `--entry` must resolve to regular files, checked before opening
-  and again before reading. Unix source and entry opens use `O_NONBLOCK` so a
-  FIFO swapped in between the checks cannot block the open. Directory walks
-  and `--entry` retain root confinement. Directory depth is bounded at
-  64. Archive rendering is unsupported.
+  `fs.FS` packer, with the symlink, skip and regular-file rules in
+  [Directory uploads](#directory-uploads). `--entry` is opened through the
+  same `os.OpenRoot`. An `--entry` with a path component the skip rule
+  excludes is a usage error, since the watch digest and event filter could
+  never see it. Archive rendering is unsupported.
 - Sources are limited to 8 MiB. Unknown code languages and blocks over 64 KiB stay
   escaped plain text rather than invoking a lexer. Rendering does not support
   `--spa`. Invalid render options return a typed client usage error, mapped to
@@ -557,3 +552,131 @@ environment variables. Setting `REDROP_TOKEN` for the installer
 (`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
 command when a token is created. Every command supports `--json`; exit codes are stable
 (see `redrop guide`). The Go package `pkg/client` is the same client as a library.
+
+### Directory uploads
+
+Every directory bundle (ordinary or Markdown) is packed by one walk,
+`bundleWalk` in `pkg/client/bundle.go`. The watch content digest
+(`hashTree`) and the watch directory registration use the same walk, and the
+watch event filter uses its skip predicate, so they always agree on which
+files count.
+
+Symlinks:
+
+- The walk runs inside an `os.OpenRoot` of the selected directory. Relative
+  file and directory symlinks are followed only within it. Absolute,
+  outside-root, and cyclic links are usage errors (exit 2). Directory depth is
+  bounded at 64.
+- Broken asset symlinks and non-regular entries are skipped with warnings.
+- A `PATH` that is itself a symlink is resolved once with
+  `filepath.EvalSymlinks` before the walk, which is then confined to the
+  resolved folder. A link to a file uploads the target's bytes under the
+  link's name. `watch` resolves it at startup and watches the real path, so
+  retargeting the link later does not change what is watched or published.
+- An explicitly named single-file source follows normal filesystem symlinks,
+  even into another directory, since it is not an implicit directory walk. It
+  and `--entry` must resolve to regular files, checked before opening and
+  again before reading. Unix source and entry opens use `O_NONBLOCK` so a FIFO
+  swapped in between the checks cannot block the open.
+
+When `share`, `update`, or `watch` packs a directory, it skips:
+
+- Directories named `.git`, `.svn`, `.hg`, `node_modules`, `__pycache__`, or
+  `.DS_Store`, including their contents.
+- Files named `.git` (a worktree or submodule link, `gitdir: /abs/path`, which
+  would publish a local path), `.DS_Store`, or `Thumbs.db`.
+- Editor backups `*~`, Emacs locks `.#*`, and Emacs autosaves `#...#` only
+  when the name is longer than two characters.
+- Hidden Vim swaps: dot-prefixed names ending in `.swa` to `.swp`, or `.swx`,
+  such as `.page.swp` and `.page.swo`.
+- JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
+  `.goutputstream-*` files.
+
+File-name filters are case-insensitive; directory names match exactly. The
+walk applies the rule before it follows an entry: a listed directory's own
+type picks the directory or file rule, and a symlink is skipped without being
+followed when either rule matches its name. An Emacs lock (`.#x`, a dangling
+symlink) is therefore skipped and counted rather than warned about, a
+`node_modules` link out of the folder does not fail the upload, and a skipped
+temp file that vanishes mid-walk is not a source change. One function,
+`skipEntry`, makes this decision for the walk, the watch event filter (for
+the last path component) and the Markdown `--entry` check (for every
+component, typed through the folder's `os.Root`). For an event on a name
+that is already gone, the filter uses the file rule unless the name was a
+registered directory, so editor temp-file churn neither rehashes the folder
+nor resets the watch's retry budget.
+Names `4913`, `#`, `##`, non-hidden `x.swp`, and hidden files such as
+`.logo.svg`, `.schema.sql`, `.subs.srt`, and `.key.sig` remain valid. Filtering applies
+only to entries inside directories. An explicitly named single file is always
+uploaded, even when its name matches a filter. `share` and `update` print one
+stderr line with the number of excluded file entries encountered, when
+nonzero. They do not count files inside excluded directory trees, and print
+no skipped-file line when the count is zero. This notice never changes their
+stdout JSON. A folder with no files to upload fails locally (exit code 2)
+instead of uploading an empty bundle.
+
+`PATH` must be a regular file or a folder; pipes and devices (such as
+`<(cmd)`) are rejected rather than uploaded as zero bytes. Use `-` with
+`--name` for streamed input.
+
+A single file that is uploaded as is (`html`, `file`, or a `.tar.gz` bundle) is
+read from its own path, without a temporary copy. Its SHA-256 is taken before
+the upload and checked against the bytes sent. When a failed chunk resumes
+below what was already sent, the hash is rebuilt by re-reading the file up to
+the resume offset. That catches an edit in the re-sent range, and reports an
+edit before the offset as a change, conservatively. An edit that is reverted
+before the re-read is not seen by the client; the server's checksum still
+rejects any blob that differs from the declared hash. Each failed chunk costs
+one local re-read of that prefix. A
+mismatch means the file changed during the upload: `share` and `update` start
+over once and then fail, and `watch` waits for the next settled change. A
+retried upload abandons the first upload session; the server removes it when
+it expires (24h). Directories, single files forced to
+a bundle, and `.zip` input are packed into a temporary tar.gz first; stdin is
+spooled to a temporary file.
+
+Archive entries supplied with `--as bundle` are not editor-filtered. ZIP input
+is converted to tar.gz using the existing archive conventions: strip a common
+top-level folder and omit `._*` files, `__MACOSX/` entries, and non-regular
+entries. tar.gz input is passed through. The server still validates archive
+paths and entry types.
+
+### Watching an artifact
+
+`redrop watch ID|URL PATH` reuses the update path, including the CLI's source
+construction, so `--render`, `--entry` and warnings behave as on `update` (the
+skipped-file count is not printed per publish). It debounces edits for 500ms by
+default, and publishes only changed content. The directory upload rule above
+applies. An explicitly named single file is not filtered. Uploads run one at
+a time, with one trailing publish for edits received during an upload.
+
+With `--json`, each publish or non-fatal notice is one compact JSON line.
+Events are `publish`, `retry`, `watch_error`, `root_vanished`,
+`rewatch_failed`, `tree_changed`, and `empty_folder`. The CLI maps library
+notice kinds to these names, so they are a stable contract. Every event has
+`id` and `at`. Publishes also have `version` and `url`; notices include
+`error` when available, and retries include `attempt`, the upcoming upload
+attempt number, starting at 2 for the first retry, and `delay_ms`, the wait
+before it. Transient failures use nominal exponential backoff from 1s to 60s,
+with jitter below the cap. Rate-limit responses honor `Retry-After` up to a
+ceiling of 10 minutes (10x the backoff cap), so a proxy that sends a huge
+value cannot park the watcher.
+
+Local races are not fatal. Only errors that wrap `ErrSourceChanged` count as
+a tree change. The packer, the zip conversion, and the uploader produce
+them for a file that vanished, shrank, or was edited while being read. In
+the walk, that means an entry its directory listed that no longer exists
+(and is not a broken symlink), or a file that ends before its opened size. Such
+an error marks the tree dirty, emits `tree_changed`, and the publish runs
+again after the next debounce. At most 3 such retries run in a row without a
+filesystem event in between; the next one is returned as fatal, so a
+misclassified persistent error cannot loop. Other local errors (a missing
+`TMPDIR`, permissions, a full disk) are fatal at once. A root that vanishes
+between the scan and the publish emits `root_vanished` and waits for it to
+come back. The startup scan gets the same treatment: a file removed while it
+is scanned is waited out for up to 3 debounce intervals. A folder
+with no packable files emits `empty_folder` and publishes nothing; the last
+version stays live until the rebuilt content publishes as a normal change.
+Authentication and not-found errors use the normal CLI exit codes. Cancellation
+returns success. The command creates immutable versions; it does not squash
+history or inject live-reload code into uploaded artifacts.

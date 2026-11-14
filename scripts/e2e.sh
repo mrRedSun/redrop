@@ -124,6 +124,33 @@ $R rollback "$ID" 1 >/dev/null
 curl -fsS "$URL" | grep -q hello || die "rollback"
 pass "update + rollback keep the same link"
 
+# watch republishes on change and exits cleanly on SIGTERM. It uses its own
+# artifact, so URL keeps serving page-v1.html for the viewer-frame checks.
+echo '<!doctype html><title>w1</title><p>first</p>' > "$WORK/watched.html"
+WATCH_URL=$($R share "$WORK/watched.html" -q)
+WID=$($R info "$WATCH_URL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+$R watch "$WID" "$WORK/watched.html" --debounce 300ms >"$WORK/watch.log" 2>"$WORK/watch.err" &
+WPID=$!
+w_versions() { $R info "$WID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["versions"])'; }
+# "watching" is printed only after the watches are registered, so an edit
+# made after it cannot fall into the startup gap.
+for _ in $(seq 1 50); do grep -q "^watching" "$WORK/watch.err" && break; sleep 0.2; done
+grep -q "^watching" "$WORK/watch.err" || { cat "$WORK/watch.err"; die "watch did not start"; }
+echo '<!doctype html><title>w2</title><p>third</p>' > "$WORK/watched.html"
+for _ in $(seq 1 50); do
+  curl -fsS "$WATCH_URL" | grep -q third && break
+  sleep 0.2
+done
+curl -fsS "$WATCH_URL" | grep -q third || { cat "$WORK/watch.log" "$WORK/watch.err"; die "watch published new content"; }
+grep -q "version 2" "$WORK/watch.log" || die "watch printed the version number"
+kill -TERM $WPID 2>/dev/null
+for _ in $(seq 1 50); do kill -0 $WPID 2>/dev/null || break; sleep 0.2; done
+kill -0 $WPID 2>/dev/null && die "watch did not exit on SIGTERM"
+wait $WPID; WRC=$?
+[ "$WRC" = 0 ] || die "watch exit code $WRC after SIGTERM, want 0"
+[ "$(w_versions)" = 2 ] || die "watch made exactly one new version, got $(w_versions)"
+pass "watch: content change published, version printed, clean SIGTERM exit"
+
 # one-time link with password
 P=$($R share "$WORK/page.html" --once --password-generate --json)
 OURL=$(echo "$P" | python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])')
@@ -145,7 +172,7 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$OURL")
 [ "$code" = 404 ] || die "second visitor expected 404 got $code"
 curl -fsS "${OURL}favicon.ico" | cmp -s - "$WORK/default.ico" || die "exhausted artifact favicon"
 OID=$($R info "$OURL" --json | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["id"], d["status"], d["views"], d["previews"])')
-echo "$OID" | grep -q " exhausted 1 1" || die "status after one-time: $OID"
+grep -q " exhausted 1 1" <<<"$OID" || die "status after one-time: $OID"
 pass "one-time + password: bot preview and favicons not counted, wrong pw rejected, second visitor gets 404"
 
 # bundle with SPA and listing

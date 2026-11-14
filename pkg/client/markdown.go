@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/mrRedSun/redrop/internal/markdown"
@@ -45,6 +46,9 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 			return nil, filePathError(srcPath, err, os.Lstat)
 		}
 		defer root.Close()
+		if err := checkEntryNotSkipped(root, sourceName); err != nil {
+			return nil, err
+		}
 		if _, err := root.Lstat("index.html"); err == nil {
 			return nil, usageErrorf("cannot render Markdown: bundle already contains index.html")
 		} else if !os.IsNotExist(err) {
@@ -55,17 +59,46 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 			return nil, fmt.Errorf("--entry %s: %w", sourceName, err)
 		}
 		defer f.Close()
-		return packMarkdown(sourceName, base, f, root)
+		return packMarkdown(sourceName, base, f, root, src.beforeRead)
 	}
-	f, err := openSingleSource(srcPath)
+	if src.beforeRead != nil {
+		src.beforeRead(sourceName)
+	}
+	f, err := openStatedSource(srcPath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return packMarkdown(sourceName, base, f, nil)
+	return packMarkdown(sourceName, base, f, nil, nil)
 }
 
-func packMarkdown(name, base string, source io.Reader, root *os.Root) (*Prepared, error) {
+// checkEntryNotSkipped rejects an --entry that the walk would skip, through
+// any component of its path, since the watch digest and event filter would
+// then never see it. Each component is decided by skipEntry with its type as
+// listed inside root; a component that cannot be listed is left to the open
+// that follows.
+func checkEntryNotSkipped(root *os.Root, entry string) error {
+	parts := strings.Split(entry, "/")
+	for i, part := range parts {
+		mode := fs.ModeDir
+		if i == len(parts)-1 {
+			mode = 0
+		}
+		if info, err := root.Lstat(filepath.FromSlash(strings.Join(parts[:i+1], "/"))); err == nil {
+			mode = info.Mode()
+		}
+		if skip, _ := skipEntry(part, mode); skip {
+			return usageErrorf("--entry %s is excluded from folder uploads (%s matches the skip rule; see redrop guide)", entry, part)
+		}
+	}
+	return nil
+}
+
+// packMarkdown renders source and packs it with the original snapshot and,
+// for a directory, the rest of root. Prepared.Digest is in the hashTree
+// domain: the tree digest of root with the snapshot standing in for the
+// source file, or the snapshot's hash for a single file.
+func packMarkdown(name, base string, source io.Reader, root *os.Root, beforeRead func(string)) (*Prepared, error) {
 	original, err := io.ReadAll(io.LimitReader(source, markdown.MaxSourceBytes+1))
 	if err != nil {
 		return nil, err
@@ -86,10 +119,18 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root) (*Prepared
 	if root != nil {
 		fsys = root.FS()
 	}
-	err = packFS(fsys, f, p.warn,
+	result, err := packFS(fsys, f, walkHooks{warn: p.warn, beforeRead: beforeRead},
 		bundleFile{Name: "index.html", Content: bytes.NewReader(rendered.HTML), Size: int64(len(rendered.HTML))},
 		bundleFile{Name: name, Content: bytes.NewReader(original), Size: int64(len(original)), Replace: true},
 	)
+	if err == nil {
+		p.skipped = result.skipped
+		if root != nil {
+			p.Digest = result.digest.digest()
+		} else {
+			p.Digest = result.digest.single()
+		}
+	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}

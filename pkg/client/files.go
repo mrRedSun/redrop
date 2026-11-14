@@ -76,6 +76,18 @@ func openSingleSource(src string) (*os.File, error) {
 	return checkOpenedRegularFile(file, src)
 }
 
+// openStatedSource opens a single source that Prepare has already stat'ed
+// and resolved. If it is gone by now, it was deleted or replaced in between:
+// that is a source change, not a usage error.
+func openStatedSource(src string) (*os.File, error) {
+	file, err := openSingleSource(src)
+	var pe *fs.PathError
+	if err != nil && errors.Is(err, fs.ErrNotExist) && errors.As(err, &pe) {
+		return nil, fmt.Errorf("%w: %w", ErrSourceChanged, pe)
+	}
+	return file, err
+}
+
 func checkOpenedRegularFile(file *os.File, name string) (*os.File, error) {
 	info, err := file.Stat()
 	if err != nil {

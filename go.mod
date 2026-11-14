@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/getkin/kin-openapi v0.149.0
 	github.com/go-fuego/fuego v0.21.0
 	github.com/pquerna/otp v1.5.0
