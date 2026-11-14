@@ -207,7 +207,9 @@ func TestWatchUnauthorizedExitCode(t *testing.T) {
 	}))
 	defer srv.Close()
 	path := writeCLIFile(t, t.TempDir(), "page.html", "original")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Only a hang guard: starting a race-enabled test binary on a loaded
+	// machine can take seconds.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCLIProcess$", "--",
 		"--url", srv.URL, "--token", "test-token", "watch", "artifact-id", path, "--debounce", "1ms")

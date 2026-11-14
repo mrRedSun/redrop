@@ -1,6 +1,7 @@
 package security
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -32,8 +33,22 @@ func TestSigner(t *testing.T) {
 	if _, ok := b.Verify(v); ok {
 		t.Error("value from one purpose accepted by another")
 	}
-	if _, ok := a.Verify(v[:len(v)-1] + "A"); ok {
-		t.Error("tampered signature accepted")
+	// Tamper with the decoded MAC, not its last base64 character: that
+	// character carries only 4 significant bits, and replacing it with a
+	// fixed symbol is a no-op when it already is that symbol.
+	enc, sig, _ := strings.Cut(v, ".")
+	mac, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range mac {
+		for bit := range 8 {
+			bad := append([]byte(nil), mac...)
+			bad[i] ^= 1 << bit
+			if _, ok := a.Verify(enc + "." + base64.RawURLEncoding.EncodeToString(bad)); ok {
+				t.Errorf("signature with byte %d bit %d flipped accepted", i, bit)
+			}
+		}
 	}
 	if _, ok := a.Verify(a.Sign("x", time.Now().Add(-time.Second))); ok {
 		t.Error("expired value accepted")

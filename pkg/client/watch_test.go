@@ -143,12 +143,17 @@ type staticRetrier struct{ d time.Duration }
 
 func (r staticRetrier) Next(int) time.Duration { return r.d }
 
+// waitLimit bounds every wait on the watcher. It only has to catch a real
+// hang: a race-enabled binary on a loaded machine can stall for seconds, and
+// a passing test never waits for it.
+const waitLimit = time.Minute
+
 func receive[T any](t *testing.T, ch <-chan T) T {
 	t.Helper()
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitLimit):
 		t.Fatal("timed out waiting for watcher")
 		var zero T
 		return zero
@@ -189,13 +194,6 @@ type watchHarness struct {
 	exited    bool
 }
 
-// exit waits for the watcher to return on its own (a fatal error).
-func (h *watchHarness) exit() error {
-	h.t.Helper()
-	h.exited = true
-	return receive(h.t, h.done)
-}
-
 func newHarness(t *testing.T, up Uploader, root string) *watchHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -229,7 +227,7 @@ func (h *watchHarness) sync() {
 	h.t.Helper()
 	select {
 	case h.errs <- h.barrier:
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitLimit):
 		h.t.Fatal("watcher failed to reach barrier")
 	}
 	receive(h.t, h.ack)
@@ -238,7 +236,7 @@ func (h *watchHarness) event(name string, op fsnotify.Op) {
 	h.t.Helper()
 	select {
 	case h.events <- fsnotify.Event{Name: name, Op: op}:
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitLimit):
 		h.t.Fatal("watcher did not receive event")
 	}
 	h.sync()
@@ -252,6 +250,48 @@ func (h *watchHarness) advance(d time.Duration) {
 	// barrier has completed its publish/hash pass before we assert counts.
 	h.sync()
 	h.sync()
+}
+
+// advanceUntil advances the fake clock by d, then waits for cond. The watcher
+// reads Now and arms its timer in two steps, so an advance can land between
+// them and leave the timer armed past the new time, where it never fires.
+// A barrier makes the watcher recompute against the advanced clock, so one is
+// offered whenever the watcher listens, until cond holds. Use it where
+// advance's trailing barriers are not possible: an upload is blocked, or
+// the watcher is about to exit.
+func (h *watchHarness) advanceUntil(d time.Duration, cond func() bool) {
+	h.t.Helper()
+	h.clk.advance(d)
+	deadline := time.NewTimer(waitLimit)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for !cond() {
+		select {
+		case h.errs <- h.barrier:
+			receive(h.t, h.ack)
+		case <-tick.C:
+		case <-deadline.C:
+			h.t.Fatal("condition not reached")
+		}
+	}
+}
+
+// exitAfter advances the clock by d and waits for the watcher to return on
+// its own (a fatal error).
+func (h *watchHarness) exitAfter(d time.Duration) error {
+	h.t.Helper()
+	h.exited = true
+	var err error
+	h.advanceUntil(d, func() bool {
+		select {
+		case err = <-h.done:
+			return true
+		default:
+			return false
+		}
+	})
+	return err
 }
 
 func TestWatchDebounceCoalescesBursts(t *testing.T) {
@@ -358,10 +398,9 @@ func TestWatchSingleFlightWithTrailingPublish(t *testing.T) {
 	h := newHarness(t, up, dir)
 	write(t, dir, "index.html", "v1")
 	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
-	h.clk.advance(time.Second)
-	// A notice barrier is intentionally unavailable while an upload is in
-	// flight. Wait for the fake's snapshot, then edit that live source.
-	waitFor(t, func() bool { return up.calls() == 1 })
+	// A notice barrier is unavailable while the upload is in flight. Wait
+	// for the fake's snapshot, then edit that live source.
+	h.advanceUntil(time.Second, func() bool { return up.calls() == 1 })
 	write(t, dir, "index.html", "v2")
 	close(block)
 	receive(t, h.published)
@@ -382,7 +421,7 @@ func TestWatchSingleFlightWithTrailingPublish(t *testing.T) {
 // assertion uses wall-clock delays.
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(waitLimit)
 	defer deadline.Stop()
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
@@ -558,9 +597,13 @@ func TestWatchAtomicSaveAndRecreateFileRoot(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "page.html")); err != nil {
 		t.Fatal(err)
 	}
-	write(t, dir, "page.html", "recreated")
+	// Recreate and edit with a rename, so each change is one event. A plain
+	// write is a truncate and then a write; if the test is descheduled for
+	// longer than the 10ms real debounce between them, the empty file is a
+	// version of its own and the count below would depend on scheduling.
+	atomicSave(t, dir, "page.html", "recreated")
 	receive(t, pub)
-	write(t, dir, "page.html", "still watching")
+	atomicSave(t, dir, "page.html", "still watching")
 	receive(t, pub)
 	if up.calls() != 4 {
 		t.Fatalf("atomic saves/recreation uploaded %d", up.calls())
@@ -857,8 +900,7 @@ func TestWatchTreeChangedRetriesAreBounded(t *testing.T) {
 		}
 	}
 	h.sync()
-	h.clk.advance(time.Second)
-	if err := h.exit(); !errors.Is(err, ErrSourceChanged) {
+	if err := h.exitAfter(time.Second); !errors.Is(err, ErrSourceChanged) {
 		t.Fatalf("exit=%v; want the tree-change error as fatal", err)
 	}
 }
