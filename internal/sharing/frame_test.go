@@ -3,6 +3,7 @@ package sharing
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -176,7 +177,7 @@ func TestStreamFrame(t *testing.T) {
 	a := framedArtifact()
 	f := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now())
 	frame, exp, ok := s.StreamFrame(a, f.Stream)
-	if !ok || frame == "" || time.Until(exp) > rawCookieMax {
+	if !ok || frame == "" || time.Until(exp) > 12*time.Hour {
 		t.Fatalf("stream: %v %q %v", ok, frame, exp)
 	}
 	g, _ := s.RedeemEnter(a, ids.RawHost(testSlug, 0), f.Enter)
@@ -194,5 +195,114 @@ func TestStreamFrame(t *testing.T) {
 	}
 	if f2 := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now()); f2.Stream == f.Stream {
 		t.Error("two viewer loads share a frame id")
+	}
+}
+
+// fakeClock moves every raw-grant clock (service and signers) together.
+func fakeClock(s *Service, start time.Time) *time.Time {
+	now := start
+	f := func() time.Time { return now }
+	s.now = f
+	for _, sg := range []*security.Signer{s.enterSigner, s.rawSigner, s.streamSigner, s.accessSigner, s.previewSigner} {
+		sg.SetClock(f)
+	}
+	return &now
+}
+
+// TestRawCookieSlidingRefresh: a page left open keeps working past one
+// rawCookieMax. Admitted requests renew the cookie once less than half its
+// life is left; an open link's renewals are unbounded (each request is
+// re-checked live anyway), a visit-derived cookie never outlives its visit.
+func TestRawCookieSlidingRefresh(t *testing.T) {
+	s := frameService(t)
+	ctx := context.Background()
+	raw := ids.RawHost(testSlug, 0)
+	t0 := time.Now().Truncate(time.Second)
+	now := fakeClock(s, t0)
+	a := framedArtifact()
+	far := t0.Add(48 * time.Hour)
+	a.ExpiresAt = &far
+
+	g, ok := enter(t, s, a, Grants{}, raw)
+	if !ok || g.TTL != rawCookieMax {
+		t.Fatalf("enter: %v %v", ok, g)
+	}
+	*now = t0.Add(10 * time.Minute)
+	if acc, ok := s.AuthorizeRaw(ctx, a, raw, g.Value, *now); !ok || acc.Refresh != nil {
+		t.Fatalf("early request: %v, refresh %v", ok, acc.Refresh)
+	}
+	*now = t0.Add(50 * time.Minute)
+	acc, ok := s.AuthorizeRaw(ctx, a, raw, g.Value, *now)
+	if !ok || acc.Refresh == nil || acc.Refresh.TTL != rawCookieMax {
+		t.Fatalf("late request: %v, refresh %+v", ok, acc.Refresh)
+	}
+	*now = t0.Add(100 * time.Minute) // past the old one-hour cap
+	if _, ok := s.AuthorizeRaw(ctx, a, raw, g.Value, *now); ok {
+		t.Fatal("the original cookie outlived its hour")
+	}
+	if _, ok := s.AuthorizeRaw(ctx, a, raw, acc.Refresh.Value, *now); !ok {
+		t.Fatal("the refreshed cookie stopped working past the old cap")
+	}
+
+	// Behind a gate the visit grant is the hard limit.
+	*now = t0
+	b := framedArtifact()
+	b.PasswordHash, b.ExpiresAt = "x", &far
+	visit := s.accessSigner.Sign(grantPayload(b, "visit"), t0.Add(75*time.Minute))
+	g, _ = enter(t, s, b, Grants{Visit: visit}, raw)
+	*now = t0.Add(50 * time.Minute)
+	acc, ok = s.AuthorizeRaw(ctx, b, raw, g.Value, *now)
+	if !ok || acc.Refresh == nil || acc.Refresh.TTL != 25*time.Minute {
+		t.Fatalf("visit-bounded refresh: %v %+v", ok, acc.Refresh)
+	}
+	*now = t0.Add(80 * time.Minute)
+	if _, ok := s.AuthorizeRaw(ctx, b, raw, acc.Refresh.Value, *now); ok {
+		t.Fatal("a refreshed cookie outlived the visit grant")
+	}
+}
+
+// TestEnterTokenExpiry: an enter token works for enterTTL only.
+func TestEnterTokenExpiry(t *testing.T) {
+	s := frameService(t)
+	t0 := time.Now().Truncate(time.Second)
+	now := fakeClock(s, t0)
+	a := framedArtifact()
+	f := s.Frame(a, CurrentSnapshot(a), Grants{}, t0)
+	*now = t0.Add(enterTTL + time.Second)
+	if _, ok := s.RedeemEnter(a, ids.RawHost(testSlug, 0), f.Enter); ok {
+		t.Fatal("expired enter token redeemed")
+	}
+}
+
+// TestEnterTokenSingleUse: an enter token is redeemed once; a copy (from the
+// page source or a log) is useless afterwards.
+func TestEnterTokenSingleUse(t *testing.T) {
+	s := frameService(t)
+	a := framedArtifact()
+	raw := ids.RawHost(testSlug, 0)
+	f := s.Frame(a, CurrentSnapshot(a), Grants{}, time.Now())
+	other := framedArtifact()
+	other.ID = "a2"
+	if _, ok := s.RedeemEnter(other, raw, f.Enter); ok {
+		t.Fatal("redeemed for another artifact")
+	}
+	if _, ok := s.RedeemEnter(a, raw, f.Enter); !ok {
+		t.Fatal("a refused redemption used the token up")
+	}
+	if _, ok := s.RedeemEnter(a, raw, f.Enter); ok {
+		t.Fatal("enter token replayed")
+	}
+
+	// The set is bounded: expired ids make room; unexpired ones are kept.
+	var u usedFrames
+	t0 := time.Now()
+	for i := range maxUsedFrames {
+		u.use("f"+strconv.Itoa(i), t0)
+	}
+	if u.use("late", t0) {
+		t.Fatal("accepted past the bound while every id is unexpired")
+	}
+	if !u.use("later", t0.Add(enterTTL+time.Second)) || len(u.seen) != 1 {
+		t.Fatalf("expired ids not pruned: %d kept", len(u.seen))
 	}
 }

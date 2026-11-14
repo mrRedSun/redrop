@@ -9,6 +9,7 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/sharing"
+	"github.com/mrRedSun/redrop/internal/store"
 )
 
 // serveRaw answers a raw host (<slug>--raw or <slug>--v<N>): the artifact's
@@ -16,9 +17,18 @@ import (
 // It is reached only after robots, fallback icons and the miss budget.
 func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host) {
 	viewer := h.cfg.ContentOrigin(host.Viewer())
-	// Only its own viewer (and the dashboard preview) may frame a raw page;
-	// 'self' lets an artifact frame its own pages.
-	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self' "+viewer+" "+h.cfg.PublicOrigin())
+	// Only its own viewer may frame a raw page ('self' lets an artifact frame
+	// its own pages); the dashboard previews on the "--raw" host only.
+	ancestors := "frame-ancestors 'self' " + viewer
+	if host.Version() == 0 {
+		ancestors += " " + h.cfg.PublicOrigin()
+	}
+	hd := w.Header()
+	hd.Set("Content-Security-Policy", ancestors)
+	// Raw bytes are for this artifact's own pages: other artifacts on the
+	// same site must not include them (with this visitor's raw cookie) as
+	// scripts or images. Frames are navigations and are not affected.
+	hd.Set("Cross-Origin-Resource-Policy", "same-origin")
 
 	// A raw page is never a top-level page: send the visitor to the shared
 	// link. Decided from the host alone, before any lookup, so it says
@@ -49,26 +59,14 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 		h.miss(w, r)
 		return
 	}
-	switch r.URL.Path {
-	case "/" + sharing.ReservedPrefix + "/enter":
-		g, ok := h.sharing.RedeemEnter(a, host, r.URL.Query().Get("t"))
-		if !ok {
+	if g, next, isEntry := h.redeemRaw(r, a, host); isEntry {
+		if g == nil {
 			h.miss(w, r)
 			return
 		}
 		h.setRawCookie(w, g)
 		w.Header().Set("Cache-Control", "private, no-store")
-		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther)
-		return
-	case "/" + sharing.ReservedPrefix + "/preview":
-		g, ok := h.sharing.RedeemRawPreview(a, host, r.URL.Query().Get("t"))
-		if !ok {
-			h.miss(w, r)
-			return
-		}
-		h.setRawCookie(w, g)
-		w.Header().Set("Cache-Control", "private, no-store")
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, next, http.StatusSeeOther)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/"+sharing.ReservedPrefix+"/") {
@@ -80,28 +78,49 @@ func (h *Handler) serveRaw(w http.ResponseWriter, r *http.Request, host ids.Host
 		h.miss(w, r)
 		return
 	}
+	if acc.Refresh != nil {
+		h.setRawCookie(w, acc.Refresh)
+	}
 	if acc.Frame != "" && r.Method == http.MethodGet && frameNavigation(r) {
 		h.relay.publish(acc.Frame, r.URL.RequestURI())
 	}
-	t := h.sharing.ResolvePath(r.Context(), acc.Snapshot, r.URL.Path)
-	switch t.Kind {
-	case sharing.TargetFile:
-		h.sendFile(w, r, t.File, r.URL.Query().Has("download"))
-	case sharing.TargetListing:
-		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), acc.Snapshot, t.Dir))
-	case sharing.TargetRedirect:
-		http.Redirect(w, r, t.Location, http.StatusMovedPermanently)
-	default:
-		h.pages.notFound(w) // the visitor is admitted; this path just doesn't exist
-	}
+	h.sendTarget(w, r, acc.Snapshot, h.sharing.ResolvePath(r.Context(), acc.Snapshot, r.URL.Path))
 }
 
-// frameNavigation reports a navigation inside the viewer's frame: a new page
-// the address bar should follow, as opposed to a subresource or fetch.
-// Without Fetch Metadata only an explicit HTML Accept counts.
-func frameNavigation(r *http.Request) bool {
-	if m := r.Header.Get("Sec-Fetch-Mode"); m != "" {
-		return m == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "iframe"
+// redeemRaw handles the raw host's two ways in: the viewer frame's enter
+// token and the dashboard's preview token. isEntry is false for other paths;
+// g is nil when the token is refused.
+func (h *Handler) redeemRaw(r *http.Request, a *store.Artifact, host ids.Host) (g *sharing.Grant, next string, isEntry bool) {
+	t := r.URL.Query().Get("t")
+	switch r.URL.Path {
+	case "/" + sharing.ReservedPrefix + "/enter":
+		g, _ = h.sharing.RedeemEnter(a, host, t)
+		return g, safeNext(r.URL.Query().Get("next")), true
+	case "/" + sharing.ReservedPrefix + "/preview":
+		g, _ = h.sharing.RedeemRawPreview(a, host, t)
+		return g, "/", true
 	}
-	return strings.Contains(r.Header.Get("Accept"), "text/html")
+	return nil, "", false
+}
+
+// rawAccess admits a raw-host request by its cookie, or reports false.
+func (h *Handler) rawAccess(r *http.Request, host ids.Host) (sharing.RawAccess, bool) {
+	cookie := h.cookieValue(r, cookieRaw)
+	if cookie == "" {
+		return sharing.RawAccess{}, false
+	}
+	a, err := h.sharing.Lookup(r.Context(), host.Slug())
+	if err != nil {
+		return sharing.RawAccess{}, false
+	}
+	return h.sharing.AuthorizeRaw(r.Context(), a, host, cookie, time.Now())
+}
+
+// frameNavigation reports a navigation the visitor made inside a frame: a
+// link they clicked or a form they sent (Sec-Fetch-User). Scripted and
+// automatic loads, including the frame's first load and nested frames that
+// load by themselves, are not reported; requests without Fetch Metadata never
+// are.
+func frameNavigation(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "iframe" && r.Header.Get("Sec-Fetch-User") == "?1"
 }

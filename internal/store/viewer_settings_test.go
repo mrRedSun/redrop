@@ -22,7 +22,7 @@ func TestViewerSettingsMigration(t *testing.T) {
 	if _, err := old.Exec(schemaV1 + `; PRAGMA user_version = 1;
 		INSERT INTO users (id, username, display_name, password_hash, role, quota_bytes, created_at) VALUES ('u', 'alice', '', '', 'admin', 0, 1);
 		INSERT INTO artifacts (id, slug, user_id, title, current_version, created_at, updated_at) VALUES ('a', 's', 'u', 'old', 1, 1, 1);
-		INSERT INTO versions (artifact_id, number, kind, size, files, created_at) VALUES ('a', 1, 'html', 3, 1, 42);`); err != nil {
+		INSERT INTO versions (artifact_id, number, kind, size, files, note, created_at) VALUES ('a', 1, 'html', 3, 1, 'private before', 42);`); err != nil {
 		t.Fatal(err)
 	}
 	old.Close()
@@ -62,8 +62,13 @@ func TestViewerSettingsMigration(t *testing.T) {
 		t.Fatal("old versions not enabled")
 	}
 	// The migrated artifact continues numbering after its existing version.
-	if n, err := db.AddVersion(ctx, "a", "u", &NewVersion{Kind: "html"}, 0, 0); err != nil || n != 2 {
+	if n, err := db.AddVersion(ctx, "a", "u", &NewVersion{Kind: "html", Note: "public now"}, 0, 0); err != nil || n != 2 {
 		t.Fatalf("AddVersion after migration = %d, %v", n, err)
+	}
+	// Notes written before viewers could see them stay private; new ones are public.
+	rows, err := db.ListVersions(ctx, "a")
+	if err != nil || len(rows) != 2 || rows[0].NotePublic != true || rows[1].NotePublic != false || rows[1].Note != "private before" {
+		t.Fatalf("note visibility after migration: %+v %v", rows, err)
 	}
 }
 

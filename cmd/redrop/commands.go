@@ -225,7 +225,7 @@ func (f *contentFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin)")
 	cmd.Flags().StringVar(&f.entry, "entry", "", "start page inside a bundle (default index.html; without one a file listing is shown)")
 	cmd.Flags().BoolVar(&f.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
-	cmd.Flags().StringVar(&f.note, "note", "", "short note stored with this version (viewers see it in the info panel)")
+	cmd.Flags().StringVar(&f.note, "note", "", "note stored with this version; viewers see it in the info panel's version list")
 }
 
 // viewerFlags are the viewer settings: --info / --no-info (the info button,
@@ -742,14 +742,18 @@ func versionsCmd() *cobra.Command {
 				return printJSON(list)
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "VERSION\tCURRENT\tKIND\tFILES\tSIZE\tCREATED\tNOTE")
+			fmt.Fprintln(w, "VERSION\tCURRENT\tKIND\tFILES\tSIZE\tCREATED\tNOTE (* shown to viewers)")
 			for _, v := range list {
 				cur := ""
 				if v.Current {
 					cur = "*"
 				}
 				t := v.CreatedAt
-				fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n", v.Number, cur, v.Kind, v.Files, human(v.Size), fmtTime(&t), v.Note)
+				note := v.Note
+				if note != "" && v.NotePublic {
+					note = "* " + note
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n", v.Number, cur, v.Kind, v.Files, human(v.Size), fmtTime(&t), note)
 			}
 			return w.Flush()
 		},

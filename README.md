@@ -17,7 +17,12 @@ cross-platform CLI that agents drive.
   redrop's viewer, with the artifact untouched in a frame from its own origin,
   and the address bar follows the frame. Turn it off per artifact (`--no-info`,
   or in the dashboard), or for one load with `?redrop-info=0`. Owners can let
-  viewers open older versions (`--old-versions`).
+  viewers open older versions (`--old-versions`). Change notes on new
+  versions are shown to viewers; notes written before this release stay
+  private.
+- Artifacts can't register service workers (a worker would outlive
+  revocation), and a shared SVG or HTML *file* opened from its file page is
+  sandboxed. Everything else behaves as a normal web page on its own origin.
 
 ## Read first
 

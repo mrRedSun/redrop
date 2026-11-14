@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/ids"
@@ -42,6 +43,21 @@ func modeFor(kind string, infoOn bool) Mode {
 // Mode returns how snap, a version of a, is presented.
 func (s *Service) Mode(a *store.Artifact, snap Snapshot) Mode {
 	return modeFor(snap.Kind, s.infoButton(a))
+}
+
+// directWindow is how long a visitor's ?redrop-info=0 choice lasts.
+const directWindow = 30 * time.Minute
+
+// DirectChoice records that the visitor asked for the direct view of a
+// (?redrop-info=0), so the pages and frames it loads stay direct too.
+func (s *Service) DirectChoice(a *store.Artifact) *Grant {
+	return &Grant{Value: s.directSigner.Sign(a.ID+"|"+strconv.Itoa(a.AccessGen), s.clock().Add(directWindow)), TTL: directWindow}
+}
+
+// Direct reports whether value is a current direct-view choice for a.
+func (s *Service) Direct(a *store.Artifact, value string) bool {
+	p, ok := s.directSigner.Verify(value)
+	return ok && p == a.ID+"|"+strconv.Itoa(a.AccessGen)
 }
 
 // InfoShown reports whether a's pages carry the info button.
@@ -93,33 +109,47 @@ const (
 )
 
 // rawClaim is the payload of enter tokens and raw cookies:
-// "id|gen|version|kind|frame". Version 0 is the "--raw" host. A claim is only
-// honoured on the host whose Version matches, for the artifact and access
-// generation it names. Frame is the frame id of the viewer load (for the
-// address-bar relay); empty for previews.
+// "id|gen|version|kind|frame|limit". Version 0 is the "--raw" host. A claim
+// is only honoured on the host whose Version matches, for the artifact and
+// access generation it names. Frame is the frame id of the viewer load (for
+// the address-bar relay); empty for previews. Limit (unix seconds, 0 = none)
+// is the expiry of the visit or preview grant the claim came from: the raw
+// cookie, refreshes included, never outlives it.
 type rawClaim struct {
 	ID      string
 	Gen     int
 	Version int
 	Kind    string
 	Frame   string
+	Limit   int64
 }
 
 func (c rawClaim) encode() string {
-	return strings.Join([]string{c.ID, strconv.Itoa(c.Gen), strconv.Itoa(c.Version), c.Kind, c.Frame}, "|")
+	return strings.Join([]string{c.ID, strconv.Itoa(c.Gen), strconv.Itoa(c.Version), c.Kind, c.Frame, strconv.FormatInt(c.Limit, 10)}, "|")
 }
 
 func parseRawClaim(s string) (rawClaim, bool) {
 	p := strings.Split(s, "|")
-	if len(p) != 5 {
+	if len(p) != 6 {
 		return rawClaim{}, false
 	}
 	gen, err1 := strconv.Atoi(p[1])
 	ver, err2 := strconv.Atoi(p[2])
-	if err1 != nil || err2 != nil {
+	limit, err3 := strconv.ParseInt(p[5], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil {
 		return rawClaim{}, false
 	}
-	return rawClaim{ID: p[0], Gen: gen, Version: ver, Kind: p[3], Frame: p[4]}, true
+	return rawClaim{ID: p[0], Gen: gen, Version: ver, Kind: p[3], Frame: p[4], Limit: limit}, true
+}
+
+// cookieExpiry is when a raw cookie for c issued at now expires: one
+// rawCookieMax later, but never after the claim's limit.
+func (c rawClaim) cookieExpiry(now time.Time) time.Time {
+	exp := now.Add(rawCookieMax)
+	if c.Limit > 0 {
+		exp = minTime(exp, time.Unix(c.Limit, 0))
+	}
+	return exp
 }
 
 // Frame is what one viewer page load needs to show snap in its frame.
@@ -133,18 +163,26 @@ type Frame struct {
 // after Decide returned Serve or ServeOwnerPreview for g. The raw cookie it
 // leads to expires within rawCookieMax and never after the visit grant.
 func (s *Service) Frame(a *store.Artifact, snap Snapshot, g Grants, now time.Time) Frame {
-	kind, exp := rawOpen, now.Add(rawCookieMax)
+	kind, limit := rawOpen, time.Time{}
 	if visitExp, ok := grantExpiry(s.accessSigner, g.Visit, a, "visit"); ok && Gated(a) {
-		kind, exp = rawVisit, minTime(exp, visitExp)
+		kind, limit = rawVisit, visitExp
 	} else if prevExp, ok := grantExpiry(s.previewSigner, g.Preview, a, "preview"); ok {
-		kind, exp = rawPreview, minTime(exp, prevExp)
+		kind, limit = rawPreview, prevExp
 	}
 	host := rawHostFor(a, snap)
 	c := rawClaim{ID: a.ID, Gen: a.AccessGen, Version: host.Version(), Kind: kind, Frame: ids.Random(8)}
+	streamExp := now.Add(rawCookieMax * 12)
+	if !limit.IsZero() {
+		c.Limit, streamExp = limit.Unix(), limit
+	}
+	enterExp := now.Add(enterTTL)
+	if !limit.IsZero() {
+		enterExp = minTime(enterExp, limit)
+	}
 	return Frame{
 		RawOrigin: s.cfg.ContentOrigin(host),
-		Enter:     s.enterSigner.Sign(c.encode()+"|"+strconv.FormatInt(exp.Unix(), 10), minTime(now.Add(enterTTL), exp)),
-		Stream:    s.streamSigner.Sign(a.ID+"|"+strconv.Itoa(a.AccessGen)+"|"+c.Frame, exp),
+		Enter:     s.enterSigner.Sign(c.encode(), enterExp),
+		Stream:    s.streamSigner.Sign(rawClaim{ID: a.ID, Gen: a.AccessGen, Kind: "stream", Frame: c.Frame}.encode(), streamExp),
 	}
 }
 
@@ -154,6 +192,15 @@ func grantExpiry(signer *security.Signer, value string, a *store.Artifact, kind 
 	return exp, ok && p == grantPayload(a, kind)
 }
 
+// clock is the time raw grants are issued at; it follows the raw signer's
+// clock so tests can move both together.
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
 func minTime(a, b time.Time) time.Time {
 	if b.Before(a) {
 		return b
@@ -161,34 +208,63 @@ func minTime(a, b time.Time) time.Time {
 	return a
 }
 
-// RedeemEnter turns an enter token into the raw cookie for host. Tokens are
-// replayable until they expire (2 minutes); a replay grants nothing its
-// holder didn't already have.
+// RedeemEnter turns an enter token into the raw cookie for host.
 func (s *Service) RedeemEnter(a *store.Artifact, host ids.Host, token string) (*Grant, bool) {
 	p, ok := s.enterSigner.Verify(token)
 	if !ok {
 		return nil, false
 	}
-	claimS, expS, ok := cutLast(p, "|")
-	c, okc := parseRawClaim(claimS)
-	expUnix, err := strconv.ParseInt(expS, 10, 64)
-	if !ok || !okc || err != nil || !host.IsRaw() || c.ID != a.ID || c.Gen != a.AccessGen || c.Version != host.Version() {
+	c, ok := parseRawClaim(p)
+	if !ok || !host.IsRaw() || c.ID != a.ID || c.Gen != a.AccessGen || c.Version != host.Version() || !s.entered.use(c.Frame, s.clock()) {
 		return nil, false
 	}
-	exp := time.Unix(expUnix, 0)
-	ttl := time.Until(exp)
-	if ttl <= 0 {
-		return nil, false
-	}
-	return &Grant{Value: s.rawSigner.Sign(c.encode(), exp), TTL: ttl}, true
+	return s.rawCookie(c, s.clock())
 }
 
-func cutLast(s, sep string) (string, string, bool) {
-	i := strings.LastIndex(s, sep)
-	if i < 0 {
-		return "", "", false
+// usedFrames makes enter tokens single-use: it remembers the frame ids
+// redeemed within the last enterTTL (a token can't be valid longer). It is
+// bounded; when full of unexpired ids it refuses new redemptions (the frame
+// shows the miss page) rather than forgetting ids that could be replayed.
+type usedFrames struct {
+	mu   sync.Mutex
+	seen map[string]time.Time // frame id -> when it may be forgotten
+}
+
+const maxUsedFrames = 100_000
+
+func (u *usedFrames) use(frame string, now time.Time) bool {
+	if frame == "" {
+		return false
 	}
-	return s[:i], s[i+len(sep):], true
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.seen == nil {
+		u.seen = map[string]time.Time{}
+	}
+	if _, used := u.seen[frame]; used {
+		return false
+	}
+	if len(u.seen) >= maxUsedFrames {
+		for id, until := range u.seen {
+			if now.After(until) {
+				delete(u.seen, id)
+			}
+		}
+		if len(u.seen) >= maxUsedFrames {
+			return false
+		}
+	}
+	u.seen[frame] = now.Add(enterTTL)
+	return true
+}
+
+// rawCookie signs c as a raw cookie issued at now.
+func (s *Service) rawCookie(c rawClaim, now time.Time) (*Grant, bool) {
+	exp := c.cookieExpiry(now)
+	if !exp.After(now) {
+		return nil, false
+	}
+	return &Grant{Value: s.rawSigner.Sign(c.encode(), exp), TTL: exp.Sub(now)}, true
 }
 
 // RedeemRawPreview exchanges a dashboard preview token (the same token the
@@ -198,14 +274,17 @@ func (s *Service) RedeemRawPreview(a *store.Artifact, host ids.Host, token strin
 	if !ok || p != previewTokenPayload(a) || !host.IsRaw() || host.Version() != 0 || a.Status(time.Now()) == api.StatusRevoked {
 		return nil, false
 	}
-	c := rawClaim{ID: a.ID, Gen: a.AccessGen, Kind: rawPreview}
-	return &Grant{Value: s.rawSigner.Sign(c.encode(), time.Now().Add(previewWindow)), TTL: previewWindow}, true
+	c := rawClaim{ID: a.ID, Gen: a.AccessGen, Kind: rawPreview, Limit: s.clock().Add(previewWindow).Unix()}
+	return s.rawCookie(c, s.clock())
 }
 
 // RawAccess is an admitted raw-host request.
 type RawAccess struct {
 	Snapshot Snapshot
 	Frame    string // frame id for the address-bar relay; "" for previews
+	// Refresh, when set, is a renewed raw cookie for the response: a page
+	// left open keeps working past one rawCookieMax, up to the grant's limit.
+	Refresh *Grant
 }
 
 // AuthorizeRaw admits a raw-host request carrying cookie. Everything is
@@ -213,7 +292,7 @@ type RawAccess struct {
 // view limit, expiry, turning the info button off, or turning older versions
 // off takes effect on the next request. Raw requests never count views.
 func (s *Service) AuthorizeRaw(ctx context.Context, a *store.Artifact, host ids.Host, cookie string, now time.Time) (RawAccess, bool) {
-	p, ok := s.rawSigner.Verify(cookie)
+	p, exp, ok := s.rawSigner.VerifyExpiry(cookie)
 	if !ok {
 		return RawAccess{}, false
 	}
@@ -246,7 +325,13 @@ func (s *Service) AuthorizeRaw(ctx context.Context, a *store.Artifact, host ids.
 	if s.Mode(a, snap) != ModeFramed {
 		return RawAccess{}, false
 	}
-	return RawAccess{Snapshot: snap, Frame: c.Frame}, true
+	acc := RawAccess{Snapshot: snap, Frame: c.Frame}
+	// Sliding refresh: renew once less than half the lifetime is left, if
+	// that actually extends it (the grant's limit may not allow more).
+	if exp.Sub(now) < rawCookieMax/2 && c.cookieExpiry(now).Sub(exp) > time.Minute {
+		acc.Refresh, _ = s.rawCookie(c, now)
+	}
+	return acc, true
 }
 
 // StreamFrame verifies an address-bar relay token for a and returns its frame
@@ -256,10 +341,10 @@ func (s *Service) StreamFrame(a *store.Artifact, token string) (string, time.Tim
 	if !ok {
 		return "", time.Time{}, false
 	}
-	id, rest, _ := strings.Cut(p, "|")
-	gen, frame, _ := strings.Cut(rest, "|")
-	if id != a.ID || gen != strconv.Itoa(a.AccessGen) || frame == "" || a.Status(time.Now()) == api.StatusRevoked {
+	c, ok := parseRawClaim(p)
+	if status := a.Status(s.clock()); !ok || c.Kind != "stream" || c.ID != a.ID || c.Gen != a.AccessGen || c.Frame == "" ||
+		status == api.StatusRevoked || status == api.StatusExpired {
 		return "", time.Time{}, false
 	}
-	return frame, exp, true
+	return c.Frame, exp, true
 }

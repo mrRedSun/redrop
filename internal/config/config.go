@@ -44,8 +44,9 @@ type Config struct {
 	ChunkSize         int64
 	KeepVersions      int // 0 = unlimited
 
-	// InfoButtonDefault shows the viewer info button on HTML artifacts that
-	// have no explicit setting of their own.
+	// InfoButtonDefault shows the info button (and, for HTML artifacts and
+	// bundles, the viewer frame) on artifacts that have no explicit setting
+	// of their own; file pages show the panel natively.
 	InfoButtonDefault bool
 
 	ViewWindowLimited  time.Duration

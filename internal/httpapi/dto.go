@@ -44,7 +44,7 @@ func mapItems[T, U any](in []T, f func(T) U) []U {
 
 func versionDTO(v sharing.Version) api.Version {
 	return api.Version{Number: v.Number, Kind: v.Kind, Size: v.Size, Files: v.Files, Entry: v.Entry, SPA: v.SPA,
-		Note: v.Note, CreatedAt: v.CreatedAt, TokenName: v.TokenName, Current: v.Current}
+		Note: v.Note, NotePublic: v.NotePublic, CreatedAt: v.CreatedAt, TokenName: v.TokenName, Current: v.Current}
 }
 
 func fileListDTO(f sharing.FileList) api.FileList {

@@ -138,7 +138,7 @@ type PublishRequest struct {
 	Filename string `json:"filename,omitempty" description:"Original file name for html/file kinds"`
 	Entry    string `json:"entry,omitempty" description:"Entry page for bundles (default index.html)"`
 	SPA      bool   `json:"spa,omitempty" description:"Serve the entry page for unknown extension-less paths"`
-	Note     string `json:"note,omitempty"`
+	Note     string `json:"note,omitempty" description:"Change note; viewers see it in the info panel's version list"`
 }
 
 type CreateArtifactRequest struct {
@@ -164,16 +164,17 @@ type UpdateArtifactRequest struct {
 }
 
 type Version struct {
-	Number    int       `json:"number"`
-	Kind      string    `json:"kind"`
-	Size      int64     `json:"size"`
-	Files     int       `json:"files"`
-	Entry     string    `json:"entry"`
-	SPA       bool      `json:"spa"`
-	Note      string    `json:"note"`
-	CreatedAt time.Time `json:"created_at"`
-	TokenName string    `json:"token_name,omitempty"`
-	Current   bool      `json:"current"`
+	Number     int       `json:"number"`
+	Kind       string    `json:"kind"`
+	Size       int64     `json:"size"`
+	Files      int       `json:"files"`
+	Entry      string    `json:"entry"`
+	SPA        bool      `json:"spa"`
+	Note       string    `json:"note"`
+	NotePublic bool      `json:"note_public" description:"Viewers see this note in the info panel (false for notes written before notes were shown)"`
+	CreatedAt  time.Time `json:"created_at"`
+	TokenName  string    `json:"token_name,omitempty"`
+	Current    bool      `json:"current"`
 }
 
 type Artifact struct {

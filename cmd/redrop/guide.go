@@ -82,17 +82,24 @@ chunked and resume automatically after network errors.
 - Info button and viewer: shared pages show a small "i" button in the
   bottom-right corner with the title, version and publish time, the expiry
   countdown, remaining views, whether a password is set, the size, and the
-  list of versions with their --note text (viewers see change notes). It never
-  shows who shared the page. HTML artifacts open in redrop's viewer: the
-  artifact itself loads, byte for byte as uploaded, in a full-page frame from
-  a separate raw origin (<slug>--raw.CONTENT-DOMAIN). The address bar follows
-  links clicked inside the frame; single-page-app route and hash changes are
-  not reflected. Files keep redrop's own file page. Your artifact needs
-  nothing redrop-specific.
-  --no-info on share, update, or set serves pages directly instead (no
-  button, no frame); --info turns it back on (the server default is usually
-  on). Append ?redrop-info=0 to a link for one direct, frameless load, e.g.
-  for screenshots.
+  list of versions with their --note text. Notes you add from now on are shown
+  to viewers; notes written before this release stay private ("redrop
+  versions" marks public notes with *). It never shows who shared the page.
+  HTML artifacts open in redrop's viewer: the artifact itself loads, byte for
+  byte as uploaded, in a full-page frame from a separate raw origin
+  (<slug>--raw.CONTENT-DOMAIN). The address bar follows links clicked inside
+  the frame; single-page-app route and hash changes are not reflected. Files
+  keep redrop's own file page. Your artifact needs nothing redrop-specific.
+  --no-info on share, update, or set serves pages directly instead (no button,
+  no frame); --info turns it back on (the server default is usually on).
+  Append ?redrop-info=0 to a link for a direct, frameless view, e.g. for
+  screenshots; it lasts for that browser's visit (30 minutes), and
+  ?redrop-info=1 goes back to the viewer. The address bar does not follow
+  clicks made in a frame nested inside your page, or in an older tab of the
+  same link. In the frame, popups lose window.opener, so sign-in popups that
+  report back through it need the direct view.
+- Service workers are not available to shared pages, and an SVG or HTML file
+  shared as a file is sandboxed when opened from its file page.
 - Older versions: --old-versions lets viewers open earlier versions from the
   info panel (?redrop-version=N); --no-old-versions (the default) shows them
   the list only.

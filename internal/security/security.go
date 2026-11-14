@@ -87,13 +87,19 @@ func ValidatePassword(pw string) error {
 
 // --- HMAC-signed values ---
 
-type Signer struct{ key []byte }
+type Signer struct {
+	key []byte
+	now func() time.Time
+}
 
 func NewSigner(secret []byte, purpose string) *Signer {
 	m := hmac.New(sha256.New, secret)
 	m.Write([]byte("redrop/" + purpose))
-	return &Signer{key: m.Sum(nil)}
+	return &Signer{key: m.Sum(nil), now: time.Now}
 }
+
+// SetClock replaces the clock Verify checks expiry against (tests).
+func (s *Signer) SetClock(now func() time.Time) { s.now = now }
 
 // Sign returns payload.signature (base64url) with an expiry.
 func (s *Signer) Sign(payload string, exp time.Time) string {
@@ -130,7 +136,7 @@ func (s *Signer) VerifyExpiry(v string) (string, time.Time, bool) {
 		return "", time.Time{}, false
 	}
 	var exp int64
-	if _, err := fmt.Sscanf(expS, "%d", &exp); err != nil || time.Now().Unix() >= exp {
+	if _, err := fmt.Sscanf(expS, "%d", &exp); err != nil || s.now().Unix() >= exp {
 		return "", time.Time{}, false
 	}
 	return payload, time.Unix(exp, 0), true

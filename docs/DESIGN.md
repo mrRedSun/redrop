@@ -199,9 +199,15 @@ lives on redrop's own pages instead.
   or XML file gets `CSP: sandbox` when opened, since the file page shares its
   origin.
 * **Raw hosts.** A raw host serves the stored bytes exactly, with the blob
-  ETag and normal Range/conditional handling, and
-  `frame-ancestors 'self' <shared link> <dashboard>` (`'self'` lets an
-  artifact frame its own pages). It handles requests as follows:
+  ETag and normal Range/conditional handling. Its headers:
+  * `frame-ancestors 'self' <shared link>` (`'self'` lets an artifact frame
+    its own pages), plus the dashboard on the `--raw` host only, for
+    previews;
+  * `Cross-Origin-Resource-Policy: same-origin`, so another artifact on the
+    same site can't include its bytes as scripts or images with the
+    visitor's raw cookie. Frames are navigations and are not affected.
+
+  It handles requests as follows:
   * A top-level navigation (`Sec-Fetch-Dest: document`, as from
     `target=_top` links) gets `303` to the same path on the shared link, plus
     `redrop-version=N` for a pinned host. This is decided from the host label
@@ -216,12 +222,21 @@ lives on redrop's own pages instead.
     give that same miss.
 * **Grants.** The viewer page mints one frame per load:
   * **Enter token:** artifact ID, access generation, host version, kind
-    (open, visit or preview), frame id and cookie expiry, signed, for 2
-    minutes. `/__redrop/enter?t=…&next=…` on the raw host verifies it, sets
-    the raw cookie, and redirects to `next`. A replay within 2 minutes grants
-    nothing its holder didn't already have, so no single-use state is kept.
-  * **Raw cookie** (`__Host-rd_raw`): the same claim. It lasts at most an
-    hour, and never longer than the visit grant it came from.
+    (open, visit or preview), frame id, and the expiry of the visit or
+    preview grant it came from; signed, for 2 minutes.
+    `/__redrop/enter?t=…&next=…` on the raw host verifies it, sets the raw
+    cookie, and redirects to `next`.
+  * **Single use:** the token can be redeemed once. The server remembers
+    redeemed frame ids for 2 minutes, in a set bounded at 100,000. When it
+    is full of unexpired ids, new frames get the miss page rather than old
+    ids being forgotten. A copy from the page source or a proxy log is
+    useless once the frame has loaded.
+  * **Raw cookie** (`__Host-rd_raw`): the same claim, valid for an hour.
+    **Sliding refresh:** an admitted raw request renews it once less than
+    half its life is left, so a page left open keeps loading. The renewal
+    never goes past the visit (or preview) grant the claim came from, so a
+    view-limited or password-protected visit still ends on time. An open
+    link renews indefinitely, but every request is re-checked live.
   * **Live checks:** every raw request re-checks the claim against the
     artifact. A changed access generation (password change, rotation,
     revocation), expiry, an "open" grant after a password or view limit was
@@ -249,14 +264,24 @@ lives on redrop's own pages instead.
   counts and skips gates. The viewer page therefore never needs a framing
   ancestor and keeps `frame-ancestors 'none'`. The preview shows the
   content without the viewer's chrome.
+* **Which requests get the viewer.** Only a top-level page load
+  (`Sec-Fetch-Dest: document`, or an HTML `Accept` without Fetch Metadata).
+  A viewer page in a frame could never render (its `frame-ancestors` is
+  `'none'`), so a frame on the shared link gets content, as do subresources.
 * **Direct views.** `?redrop-info=0` on a framed artifact, and every page of
   an artifact with the info button off, are served directly on the shared
-  link, as before. These pages run on the same origin as the viewer page, so
-  four measures keep them from reaching it:
-  * the viewer page's `Cross-Origin-Opener-Policy` (no window reference);
-  * `frame-ancestors 'none'` (they can't frame it);
-  * the service-worker refusal (they can't intercept its loads);
-  * the viewer reads no storage or cookies they could write.
+  link, as before.
+  * **The choice lasts for the visit.** `?redrop-info=0` sets a signed,
+    host-only cookie (30 minutes, bound to the artifact and its access
+    generation), so the pages and frames a direct view loads stay direct.
+    `?redrop-info=1` returns to the viewer and clears it.
+  * **Isolation.** These pages run on the same origin as the viewer page, so
+    four measures keep them from reaching it:
+    * the viewer page's `Cross-Origin-Opener-Policy: same-origin` (no window
+      reference);
+    * `frame-ancestors 'none'` (they can't frame it);
+    * the service-worker refusal (they can't intercept its loads);
+    * the viewer reads no storage or cookies they could write.
 
   A service worker registered by an artifact before this release keeps
   running in browsers that already have it until the browser drops it.
@@ -264,6 +289,15 @@ lives on redrop's own pages instead.
   content domain.
 * **Behaviour notes.**
   * **Address bar:** it follows in-frame navigation through the relay below.
+  * **Popups:** the viewer page's `Cross-Origin-Opener-Policy: same-origin`
+    also applies to popups the framed artifact opens. They get no
+    `window.opener`, so sign-in flows that report back through the opener
+    don't work inside the frame. Use `?redrop-info=0` or turn the info
+    button off for such artifacts.
+  * **Look-alikes:** the artifact can't touch the real button or panel, but
+    a full-page artifact can draw something that looks like them inside its
+    own frame. Only the real button opens the panel; nothing it shows comes
+    from the artifact.
   * **Tab title:** the artifact's title, not the frame document's title.
   * **Printing:** the browser prints the viewer page, with the button,
     panel and version bar hidden and the frame filling the page. An artifact's
@@ -278,8 +312,16 @@ lives on redrop's own pages instead.
   the only view"); "password-protected"; the shown version's size and file
   count; and "Shared with redrop" with the redrop mark.
 * **Versions:** every retained version is listed, newest first, with its
-  number, publish time and change note, and the current one marked. Change
-  notes are therefore visible to viewers, and the dashboard says so.
+  number and publish time, and the current one marked.
+* **Change notes:**
+  * **New notes are public.** A version published with this release or later
+    shows its change note (`--note`) to viewers.
+  * **Older notes stay private.** Notes written before this release were
+    owner-only, and they stay that way. Each version has a `note_public`
+    flag, false for migrated rows and true for new ones.
+  * **Where it's stated:** the CLI's `--note` help, `redrop versions` (`*`
+    marks public notes), the dashboard's version list ("shown to viewers" or
+    "private"), and the API (`note_public`).
 * **Never shown:** the owner's identity, usernames, emails, artifact or token
   IDs and names, the slug, other versions' sizes or contents (unless the
   owner lets viewers open them), or the view count of an unlimited link. The
@@ -308,26 +350,46 @@ lives on redrop's own pages instead.
 The address bar follows navigation inside the frame without anything from the
 artifact.
 
-* **Publishing:** a raw-host navigation (`Sec-Fetch-Mode: navigate`,
-  `Sec-Fetch-Dest: iframe`) admitted with a frame grant publishes its path
-  and query for that frame id.
+* **Publishing:** a raw-host navigation the visitor made (`Sec-Fetch-Mode:
+  navigate`, `Sec-Fetch-Dest: iframe`, `Sec-Fetch-User: ?1`, for a click or
+  a sent form) admitted with a frame grant publishes its path and query for
+  that frame id. These are never published:
+  * subresources and fetches;
+  * the frame's first load;
+  * scripted navigations;
+  * frames that load by themselves;
+  * requests without Fetch Metadata.
 * **Stream:** the viewer subscribes to
   `/__redrop/location?s=<token>`, a server-sent-events stream on the shared
   link. The token is minted with the frame and bound to the artifact, its
   access generation and the frame id.
-* **Applying:** `viewer.js` mirrors each path with `history.replaceState`
-  (never `pushState`, because the frame owns its history entries), keeping
+* **Applying:** `viewer.js` applies a reported path only when this page's
+  own frame fires `load` for it: the report arrives first and the frame
+  loads within 5 seconds, or the frame loaded at most 1 second before the
+  report arrived. Each load is used once. A report from a frame nested in
+  the artifact, or from another tab, finds no matching load of this frame and
+  expires unused. The path is mirrored with `history.replaceState` (never
+  `pushState`, because the frame owns its history entries), keeping
   `redrop-version`, so copying or reloading lands on the same page.
 * **Bounds:** paths up to 2 KiB; 10,000 remembered frames (least recently
   used without subscribers dropped, an hour at most); 4 streams per client
   and 1,000 in all (`429` beyond); a stream closes after 5 idle minutes,
   when its token expires, or at shutdown; a 25 s heartbeat.
-* **Limits:** one raw cookie serves every tab of an artifact version in a
-  browser, so the server can't tell which tab navigated. The viewer
-  therefore applies a path only around its own frame's `load` event, which
-  also ignores navigations of frames nested inside the artifact.
-  Single-page-app `pushState` and hash changes don't load a document, so they
-  are not reflected.
+* **Deployment:** the relay is in process memory, so it needs a single
+  server instance (as SQLite already does).
+* **Limits:**
+  * **Tabs:** one raw cookie serves every tab of an artifact version in a
+    browser, and the newest tab's frame id wins. An older tab's clicks
+    reach the newest tab's stream and are ignored there, so the older tab's
+    address bar stops following.
+  * **Nested frames:** a click inside a nested frame followed within 5
+    seconds by an unreported load of the outer frame (for example a
+    script-driven one) can still be mistaken for it.
+  * **Not reflected:** single-page-app `pushState` and hash changes, because
+    they don't load a document.
+  * **Fairness:** the per-client and global stream limits mean that many
+    clients holding streams open can deny other viewers the address bar,
+    but nothing else.
 
 ### Gates and view counting
 

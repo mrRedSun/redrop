@@ -184,6 +184,8 @@ J5="$WORK/c5"
 src=$(echo "$vp" | sed -n 's/.*<iframe id="rd-frame"[^>]* src="\([^"]*\)".*/\1/p' | sed 's/&amp;/\&/g')
 curl -fsSL -c "$J5" -b "$J5" -D "$WORK/raw.hdr" -o /dev/null -H 'Sec-Fetch-Dest: iframe' "$src"
 grep -qi "frame-ancestors 'self' ${URL%/} $BASE" "$WORK/raw.hdr" || die "raw frame-ancestors"
+grep -qi "cross-origin-resource-policy: same-origin" "$WORK/raw.hdr" || die "raw CORP"
+[ "$(code_of -H 'Sec-Fetch-Dest: iframe' "$src")" = 404 ] || die "enter token replayed"
 [ "$(code_of -H 'Sec-Fetch-Dest: serviceworker' "${URL}sw.js")" = 404 ] || die "service worker served"
 pass "viewer frame: raw bytes identical, grant required, top-level raw redirects, CSPs"
 
@@ -192,6 +194,7 @@ vp=$(curl -fsS -H 'Sec-Fetch-Dest: document' "$URL")
 echo "$vp" | grep -q 'Version 2' && echo "$vp" | grep -q 'v2' || die "versions listed with notes"
 echo "$vp" | grep -q 'redrop-version=2' && die "version 2 offered while closed"
 [ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Sec-Fetch-Dest: document' "${URL}?redrop-version=2")" = "303 $URL" ] || die "closed version redirects"
+$R versions "$ID" | grep -q '\* v2' || die "versions marks the new public note"
 $R set "$ID" --old-versions | grep -q 'older versions: *viewers can open them' || die "set --old-versions"
 curl -fsS -H 'Sec-Fetch-Dest: document' "${URL}?redrop-version=2" | grep -q 'Viewing version 2 of 2' || die "version bar"
 framed "${URL}?redrop-version=2" | grep -q second || die "version 2 content"
@@ -209,12 +212,14 @@ sleep 0.5
 J4="$WORK/c4"
 curl -fsSL -c "$J4" -b "$J4" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' "$src" >/dev/null
 BRAW=$(echo "$BURL" | sed -E 's#^(https?://)([^.]+)\.#\1\2--raw.#')
-curl -fsS -b "$J4" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' "${BRAW}some/route?x=1" >/dev/null
+curl -fsS -b "$J4" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' "${BRAW}docs/" >/dev/null   # not clicked: not relayed
+curl -fsS -b "$J4" -H 'Sec-Fetch-Dest: iframe' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-User: ?1' "${BRAW}some/route?x=1" >/dev/null
 curl -fsS -b "$J4" -H 'Sec-Fetch-Dest: style' -H 'Sec-Fetch-Mode: no-cors' "${BRAW}assets/app.css" >/dev/null
 wait $SSE || true
 grep -q '^data: /some/route?x=1$' "$WORK/sse.out" || die "address bar relay: $(cat "$WORK/sse.out")"
 grep -q 'app.css' "$WORK/sse.out" && die "subresource relayed"
-pass "address bar follows frame navigations (not subresources)"
+grep -q 'docs/' "$WORK/sse.out" && die "a navigation nobody clicked was relayed"
+pass "address bar follows clicked frame navigations (not automatic loads or subresources)"
 
 # --no-info: served directly as before; non-HTML files keep the file page
 NURL=$($R share "$WORK/page.html" --no-info -q)
@@ -223,10 +228,14 @@ curl -fsS "$NURL" | cmp -s - "$WORK/page.html" || die "--no-info is not the dire
 $R set "$NURL" --info | grep -q 'info button: *shown' || die "set --info output"
 curl -fsS -H 'Sec-Fetch-Dest: document' "$NURL" | grep -q 'rd-frame' || die "frame after set --info"
 curl -fsS "${URL}?redrop-info=0" | cmp -s - "$WORK/page-v1.html" || die "redrop-info=0 direct view"
+curl -fsS -H 'Sec-Fetch-Dest: iframe' "${BURL}index.html" | grep -q spa || die "a frame on the shared link gets content, not the viewer"
+J6="$WORK/c6"
+curl -fsS -c "$J6" -o /dev/null "${BURL}?redrop-info=0"
+curl -fsS -b "$J6" -H 'Sec-Fetch-Dest: document' "${BURL}some/route" | grep -q 'rd-frame' && die "direct choice not kept for the visit"
 fp=$(curl -fsS "$FURL")
 echo "$fp" | grep -q 'id="rd-info"' && echo "$fp" | grep -q 'Download' || die "file page with the info panel"
 echo "$fp" | grep -q 'rd-frame' && die "file page framed"
-pass "--no-info and ?redrop-info=0 are direct; file page has the panel natively"
+pass "--no-info and ?redrop-info=0 (kept for the visit) are direct; file page has the panel natively"
 
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)

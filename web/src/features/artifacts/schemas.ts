@@ -58,6 +58,8 @@ export const Version = Schema.Struct({
   entry: Schema.String,
   spa: Schema.Boolean,
   note: Schema.String,
+  /** Viewers see the note in the info panel. False for notes written before notes were shown. */
+  note_public: Schema.Boolean,
   created_at: Timestamp,
   token_name: Schema.optionalKey(Schema.String),
   current: Schema.Boolean,

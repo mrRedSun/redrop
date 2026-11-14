@@ -158,7 +158,7 @@ func (s *Store) ListArtifacts(ctx context.Context, f ListFilter) ([]*Artifact, e
 }
 
 func insertVersion(ctx context.Context, tx *sql.Tx, artifactID string, number int, v *NewVersion) error {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO versions (artifact_id, number, kind, size, files, entry, spa, note, token_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO versions (artifact_id, number, kind, size, files, entry, spa, note, note_public, token_name, created_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)`,
 		artifactID, number, v.Kind, v.size(), len(v.Files), v.Entry, v.SPA, v.Note, v.TokenName, now()); err != nil {
 		return err
 	}
@@ -368,23 +368,24 @@ func (s *Store) DeleteArtifact(ctx context.Context, id string) error {
 }
 
 type VersionRow struct {
-	Number    int
-	Kind      string
-	Size      int64
-	Files     int
-	Entry     string
-	SPA       bool
-	Note      string
-	TokenName string
-	CreatedAt time.Time
+	Number     int
+	Kind       string
+	Size       int64
+	Files      int
+	Entry      string
+	SPA        bool
+	Note       string
+	NotePublic bool // shown to viewers; false for notes written before they could be
+	TokenName  string
+	CreatedAt  time.Time
 }
 
 // VersionAt returns one version's row, or ErrNotFound when it is not retained.
 func (s *Store) VersionAt(ctx context.Context, artifactID string, number int) (VersionRow, error) {
 	var v VersionRow
 	var created int64
-	err := s.DB.QueryRowContext(ctx, `SELECT number, kind, size, files, entry, spa, note, token_name, created_at FROM versions WHERE artifact_id = ? AND number = ?`, artifactID, number).
-		Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.TokenName, &created)
+	err := s.DB.QueryRowContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at FROM versions WHERE artifact_id = ? AND number = ?`, artifactID, number).
+		Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created)
 	if err != nil {
 		return VersionRow{}, notFound(err)
 	}
@@ -393,7 +394,7 @@ func (s *Store) VersionAt(ctx context.Context, artifactID string, number int) (V
 }
 
 func (s *Store) ListVersions(ctx context.Context, artifactID string) ([]VersionRow, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT number, kind, size, files, entry, spa, note, token_name, created_at FROM versions WHERE artifact_id = ? ORDER BY number DESC`, artifactID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at FROM versions WHERE artifact_id = ? ORDER BY number DESC`, artifactID)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +403,7 @@ func (s *Store) ListVersions(ctx context.Context, artifactID string) ([]VersionR
 	for rows.Next() {
 		var v VersionRow
 		var created int64
-		if err := rows.Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.TokenName, &created); err != nil {
+		if err := rows.Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = ts(created)

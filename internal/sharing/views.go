@@ -53,16 +53,17 @@ type AdminArtifact struct {
 
 // Version is one entry of an artifact's version history.
 type Version struct {
-	Number    int
-	Kind      string
-	Size      int64
-	Files     int
-	Entry     string
-	SPA       bool
-	Note      string
-	TokenName string
-	CreatedAt time.Time
-	Current   bool
+	Number     int
+	Kind       string
+	Size       int64
+	Files      int
+	Entry      string
+	SPA        bool
+	Note       string
+	NotePublic bool // viewers see the note in the info panel
+	TokenName  string
+	CreatedAt  time.Time
+	Current    bool
 }
 
 // FileEntry is one file of a version.
@@ -125,7 +126,7 @@ func (s *Service) infoButton(a *store.Artifact) bool {
 }
 
 // ViewerInfo is what an artifact's info panel tells a visitor. DESIGN.md
-// ("Info panel") fixes its contents: only what the visitor can already see
+// ("Info panel and versions") fixes its contents: only what the visitor can already see
 // or infer from the page they were let into, plus the owner's revision
 // history (numbers, times and change notes). It has no owner, ID, slug, token
 // name, view count of an unlimited link, or other versions' contents or sizes.
@@ -146,7 +147,8 @@ type ViewerInfo struct {
 }
 
 // Revision is one retained version as viewers see it: never its size, files,
-// kind, uploader or token.
+// kind, uploader or token. Note is empty unless the note was written when
+// notes were shown to viewers.
 type Revision struct {
 	Number    int
 	Published time.Time
@@ -169,7 +171,11 @@ func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snaps
 		s.log.Error("list versions for viewer", "error", err)
 	}
 	for _, v := range rows {
-		info.Revisions = append(info.Revisions, Revision{Number: v.Number, Published: v.CreatedAt, Note: v.Note, Current: v.Number == a.CurrentVersion})
+		rev := Revision{Number: v.Number, Published: v.CreatedAt, Current: v.Number == a.CurrentVersion}
+		if v.NotePublic {
+			rev.Note = v.Note // notes from before viewers could see them stay private
+		}
+		info.Revisions = append(info.Revisions, rev)
 		info.Latest = max(info.Latest, v.Number)
 	}
 	return info
@@ -201,7 +207,7 @@ func versionsView(current int, rows []store.VersionRow) []Version {
 	out := make([]Version, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Version{Number: v.Number, Kind: v.Kind, Size: v.Size, Files: v.Files, Entry: v.Entry, SPA: v.SPA,
-			Note: v.Note, TokenName: v.TokenName, CreatedAt: v.CreatedAt, Current: v.Number == current})
+			Note: v.Note, NotePublic: v.NotePublic, TokenName: v.TokenName, CreatedAt: v.CreatedAt, Current: v.Number == current})
 	}
 	return out
 }

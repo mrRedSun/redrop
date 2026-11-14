@@ -25,6 +25,8 @@ var (
 	streamRE   = regexp.MustCompile(`data-stream="([^"]+)"`)
 	inFrame    = map[string]string{"Sec-Fetch-Dest": "iframe", "Sec-Fetch-Mode": "navigate", "Accept": "text/html"}
 	asset      = map[string]string{"Sec-Fetch-Dest": "script", "Sec-Fetch-Mode": "no-cors"}
+	// userNav is a navigation the visitor made inside the frame (a click).
+	userNav = map[string]string{"Sec-Fetch-Dest": "iframe", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-User": "?1", "Accept": "text/html"}
 )
 
 // rawURL is the raw host of a viewer URL with the given suffix ("raw", "v2").
@@ -118,6 +120,13 @@ func TestViewerFrame(t *testing.T) {
 	if fa := r.Header.Get("Content-Security-Policy"); fa != "frame-ancestors 'self' "+viewer+" http://app.test" {
 		t.Errorf("raw CSP %q", fa)
 	}
+	if corp := r.Header.Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
+		t.Errorf("raw CORP %q: other artifacts could include these bytes", corp)
+	}
+	// The enter token is single-use: a copy from the page source is useless.
+	if r, _ := h.page("GET", src, src[len(raw)-1:], inFrame); r.StatusCode != 404 {
+		t.Errorf("replayed enter token: %d", r.StatusCode)
+	}
 
 	// Views: one per viewer load (de-duplicated as before); raw never counts.
 	for range 5 {
@@ -204,6 +213,46 @@ func TestDirectViews(t *testing.T) {
 	if got, _ := c.GetArtifact(context.Background(), framed.ID); !got.InfoButton || got.Views != 1 {
 		t.Fatalf("redrop-info=0 changed the setting or did not count: %+v", got)
 	}
+
+	// A direct view stays direct for its own frames and pages.
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte(`<iframe src="/frame.html"></iframe><a href="/page.html">p</a>`), 0o600)
+	os.WriteFile(filepath.Join(dir, "frame.html"), []byte("<p>framed part</p>"), 0o600)
+	os.WriteFile(filepath.Join(dir, "page.html"), []byte("<p>second page</p>"), 0o600)
+	b, err := c.Share(context.Background(), &client.Source{Path: dir}, client.PublishOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := h.page("GET", b.URL, "/?redrop-info=0", nav)
+	var choice *http.Cookie
+	for _, ck := range r.Cookies() {
+		if ck.Name == "rd_direct" {
+			choice = ck
+		}
+	}
+	if choice == nil || !choice.HttpOnly {
+		t.Fatal("no direct-view choice recorded")
+	}
+	// The page's own iframe gets content even without the choice: a viewer
+	// page can never render in a frame.
+	if _, got := h.page("GET", b.URL, "/frame.html", map[string]string{"Sec-Fetch-Dest": "iframe"}); got != "<p>framed part</p>" {
+		t.Fatalf("iframe inside a direct view got %q", got)
+	}
+	if _, got := h.page("GET", b.URL, "/page.html", nav, choice); got != "<p>second page</p>" {
+		t.Fatalf("link inside a direct view got %q", got)
+	}
+	forged := &http.Cookie{Name: "rd_direct", Value: "x.y"}
+	if _, got := h.page("GET", b.URL, "/page.html", nav, forged); !strings.Contains(got, `id="rd-frame"`) {
+		t.Fatal("a forged direct choice skipped the viewer")
+	}
+	r, got := h.page("GET", b.URL, "/page.html?redrop-info=1", nav, choice)
+	cleared := false
+	for _, ck := range r.Cookies() {
+		cleared = cleared || (ck.Name == "rd_direct" && ck.MaxAge < 0)
+	}
+	if !strings.Contains(got, `id="rd-frame"`) || !cleared {
+		t.Fatal("redrop-info=1 did not return to the viewer and clear the choice")
+	}
 }
 
 func TestOlderVersions(t *testing.T) {
@@ -233,6 +282,13 @@ func TestOlderVersions(t *testing.T) {
 	if strings.Contains(b, "redrop-version=1") || strings.Contains(b, a.ID) || strings.Contains(b, "test</") {
 		t.Error("panel offers version 1, or shows the artifact ID or token name")
 	}
+	// A note written before notes were shown to viewers (as migrated) stays private.
+	if _, err := h.app.db.DB.Exec(`UPDATE versions SET note_public = 0 WHERE artifact_id = ? AND number = 1`, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, b := h.page("GET", a.URL, "/", nav); strings.Contains(b, "first draft") || !strings.Contains(b, "Version 1") {
+		t.Error("a private note reached the panel, or its version vanished")
+	}
 	for _, q := range []string{"1", "abc", "-1", "0x1"} {
 		if r, _ := h.page("GET", a.URL, "/?redrop-version="+q, nav); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/" {
 			t.Errorf("version %q: %d %q", q, r.StatusCode, r.Header.Get("Location"))
@@ -259,8 +315,12 @@ func TestOlderVersions(t *testing.T) {
 		t.Fatalf("version 1 viewer: src %q", src)
 	}
 	old, _ := h.enterFrame(src)
-	if _, got := h.page("GET", v1, "/", inFrame, old); got != "<p>one</p>" {
+	r, got := h.page("GET", v1, "/", inFrame, old)
+	if got != "<p>one</p>" {
 		t.Fatalf("v1 bytes %q", got)
+	}
+	if fa := r.Header.Get("Content-Security-Policy"); strings.Contains(fa, "app.test") {
+		t.Errorf("a pinned host is frameable by the dashboard: %q", fa)
 	}
 	if r, _ := h.page("GET", rawURL(a.URL, "raw"), "/", inFrame, old); r.StatusCode != 404 {
 		t.Error("a version-1 cookie opened the latest host")
@@ -298,6 +358,27 @@ func TestFilePagePanel(t *testing.T) {
 	svg := shareFile(t, c, "x.svg", `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`, client.PublishOptions{})
 	if r, _ := h.page("GET", svg.URL, "/x.svg", nav); r.Header.Get("Content-Security-Policy") != "sandbox" {
 		t.Errorf("SVG file opened on the shared link is not sandboxed: %q", r.Header.Get("Content-Security-Policy"))
+	}
+	// Revisions on the file page, and an older file version opened there.
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "notes.txt")
+	os.WriteFile(p, []byte("hello again"), 0o600)
+	if _, err := c.Update(ctx, a.ID, &client.Source{Path: p, Note: "second take"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, b := h.page("GET", a.URL, "/", nav); !strings.Contains(b, "second take") || strings.Contains(b, "redrop-version=1") {
+		t.Error("file page revisions: note missing, or version 1 offered while closed")
+	}
+	on := true
+	if _, err := c.UpdateArtifact(ctx, a.ID, &api.UpdateArtifactRequest{OldVersions: &on}); err != nil {
+		t.Fatal(err)
+	}
+	r, b = h.page("GET", a.URL, "/?redrop-version=1", nav)
+	if !strings.Contains(b, "Viewing version 1 of 2") || !strings.Contains(b, `href="/notes.txt?redrop-version=1"`) || !strings.Contains(b, `href="/notes.txt?redrop-version=1&amp;download"`) {
+		t.Fatalf("old file version page: %d", r.StatusCode)
+	}
+	if _, raw := h.page("GET", a.URL, "/notes.txt?redrop-version=1", nav); raw != "hello notes" {
+		t.Errorf("old file bytes %q", raw)
 	}
 	off := false
 	quiet := shareFile(t, c, "q.txt", "q", client.PublishOptions{InfoButton: &off})
@@ -402,18 +483,36 @@ func TestAddressBarRelay(t *testing.T) {
 	frame1, _ := h.enterFrame(src1) // two browsers: separate cookie jars
 	frame2, _ := h.enterFrame(src2)
 
-	h.page("GET", raw, "/b.html?x=1", inFrame, frame1)
+	h.page("GET", raw, "/b.html?x=1", userNav, frame1)
 	if got := next(t, ev1); got != "/b.html?x=1" {
 		t.Fatalf("frame 1 location %q", got)
 	}
 	none(t, ev2)
 	h.page("GET", raw, "/app.js", asset, frame1) // subresources don't move the address bar
+	// Loads nobody clicked (a frame nested in the artifact, a scripted
+	// navigation, or a client without Fetch Metadata) aren't reported either.
+	h.page("GET", raw, "/b.html", inFrame, frame1)
+	h.page("GET", raw, "/b.html", map[string]string{"Accept": "text/html"}, frame1)
 	none(t, ev1)
-	h.page("GET", raw, "/", inFrame, frame2)
+	h.page("GET", raw, "/", userNav, frame2)
 	if got := next(t, ev2); got != "/" {
 		t.Fatalf("frame 2 location %q", got)
 	}
 	none(t, ev1)
+
+	// Two tabs in one browser share the raw cookie, so the newest frame's id
+	// wins: the older tab's clicks reach the newer tab's stream (where
+	// viewer.js ignores them unless that tab's own frame loads; see
+	// web/scripts/viewer-js.test.ts) and never another browser's.
+	_, _, src3, stream3 := h.viewerLoad(a.URL, "/")
+	ev3, _ := h.sse(ctx, a.URL, stream3)
+	shared, _ := h.enterFrame(src3) // the same browser as frame 1 now holds frame 3's cookie
+	h.page("GET", raw, "/b.html", userNav, shared)
+	if got := next(t, ev3); got != "/b.html" {
+		t.Fatalf("shared-cookie click went to %q", got)
+	}
+	none(t, ev1)
+	none(t, ev2)
 
 	// A stream token is scoped to its artifact and checked live.
 	other := shareFile(t, c, "o.html", "<p>o</p>", client.PublishOptions{})
@@ -423,8 +522,8 @@ func TestAddressBarRelay(t *testing.T) {
 	if _, code := h.sse(ctx, a.URL, "/__redrop/location?s=forged"); code != 404 {
 		t.Errorf("forged stream token: %d", code)
 	}
-	// At most four streams per client.
-	for range 2 {
+	// At most four streams per client (three are open).
+	for range 1 {
 		h.sse(ctx, a.URL, stream1)
 	}
 	if _, code := h.sse(ctx, a.URL, stream1); code != http.StatusTooManyRequests {

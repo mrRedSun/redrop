@@ -38,6 +38,9 @@ type Service struct {
 	enterSigner   *security.Signer // viewer frame: enter tokens for raw hosts
 	rawSigner     *security.Signer // viewer frame: raw-host cookies
 	streamSigner  *security.Signer // viewer frame: address-bar relay subscriptions
+	directSigner  *security.Signer // a visitor's choice of the direct, frameless view
+	entered       usedFrames       // enter tokens already redeemed
+	now           func() time.Time // nil = time.Now; tests set it with SetClock
 
 	unlockLimiter   *security.Limiter // per IP + artifact
 	unlockIPLimiter *security.Limiter // per IP across artifacts
@@ -53,6 +56,7 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		enterSigner:     security.NewSigner(secret, "raw-enter"),
 		rawSigner:       security.NewSigner(secret, "raw-access"),
 		streamSigner:    security.NewSigner(secret, "frame-stream"),
+		directSigner:    security.NewSigner(secret, "direct-view"),
 		unlockLimiter:   security.NewLimiter(5, 5*time.Minute),
 		unlockIPLimiter: security.NewLimiter(60, time.Hour),
 	}

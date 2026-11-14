@@ -34,14 +34,17 @@
   }
 
   // ---- the address bar follows the frame ----
-  // The raw host reports every page the frame navigates to; this mirrors it
-  // with replaceState (never pushState: the frame owns history entries).
-  // One raw cookie serves every tab of an artifact version in a browser, so a
-  // report is applied only around this frame's own load event.
+  // The raw host reports navigations a visitor makes inside a frame. The
+  // report can come from this frame, from a frame nested inside the artifact,
+  // or (one raw cookie serves every tab of an artifact version in a browser)
+  // from another tab. So a path is applied only when this page's own frame
+  // loads right after the report; anything else expires unused. replaceState,
+  // never pushState: the frame owns the history entries.
   var frame = doc.getElementById('rd-frame')
   if (!frame || !window.EventSource || !frame.getAttribute('data-stream')) return
   var version = frame.getAttribute('data-version')
-  var loadedAt = 0, pending = null
+  var REPORT_TTL = 5000, LOAD_GRACE = 1000
+  var pending = null, loadedAt = -1
   function apply(path) {
     if (typeof path !== 'string' || path.charAt(0) !== '/' || path.charAt(1) === '/' || path.charAt(1) === '\\') return
     var u = new URL(path, location.origin)
@@ -51,13 +54,23 @@
     if (next !== location.pathname + location.search) history.replaceState(history.state, '', next)
   }
   frame.addEventListener('load', function () {
-    loadedAt = Date.now()
-    if (pending && loadedAt - pending.at < 10000) apply(pending.path)
+    var now = Date.now()
+    if (pending && now - pending.at <= REPORT_TTL) {
+      apply(pending.path)
+      loadedAt = -1 // this load is used up
+    } else {
+      loadedAt = now // a report may still be on its way for this load
+    }
     pending = null
   })
   var es = new EventSource(frame.getAttribute('data-stream'))
   es.onmessage = function (e) {
-    if (Date.now() - loadedAt < 3000) { apply(e.data); return }
-    pending = { path: e.data, at: Date.now() }
+    var now = Date.now()
+    if (loadedAt >= 0 && now - loadedAt <= LOAD_GRACE) {
+      apply(e.data) // the page loaded a moment before its report arrived
+      loadedAt = -1
+      return
+    }
+    pending = { path: e.data, at: now }
   }
 })()

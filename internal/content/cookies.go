@@ -13,6 +13,7 @@ const (
 	cookiePreview = "preview" // owner preview from the dashboard
 	cookieSeen    = "seen"    // de-duplicates view counting
 	cookieRaw     = "raw"     // admits the viewer frame on a raw host
+	cookieDirect  = "direct"  // the visitor chose the direct view (?redrop-info=0)
 )
 
 func (h *Handler) cookieName(base string) string {

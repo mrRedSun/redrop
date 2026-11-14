@@ -29,7 +29,6 @@ import (
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
-	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 const maxInlineText = 1 << 20
@@ -266,8 +265,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 		return
 	}
 	mode := h.sharing.Mode(a, snap)
-	direct := q.Get(paramInfo) == "0"
-	if mode == sharing.ModeFramed && !direct && isDocument(r) {
+	direct := h.directView(w, r, a)
+	if mode == sharing.ModeFramed && !direct && pageNavigation(r) {
 		// Directory redirects and missing paths answer as they would without
 		// the frame; only real pages get the viewer.
 		switch t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind {
@@ -288,6 +287,34 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 	h.serveContent(w, r, a, snap, info)
 }
 
+// directView reports whether this request gets the direct, frameless view:
+// ?redrop-info=0 chooses it for the visit (a signed host-only cookie, so the
+// pages and frames that view loads stay direct), ?redrop-info=1 goes back.
+func (h *Handler) directView(w http.ResponseWriter, r *http.Request, a *store.Artifact) bool {
+	switch r.URL.Query().Get(paramInfo) {
+	case "0":
+		if r.Method == http.MethodGet {
+			h.setCookie(w, cookieDirect, h.sharing.DirectChoice(a), false)
+		}
+		return true
+	case "1":
+		http.SetCookie(w, &http.Cookie{Name: h.cookieName(cookieDirect), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: !h.cfg.Insecure, SameSite: http.SameSiteLaxMode})
+		return false
+	}
+	return h.sharing.Direct(a, h.cookieValue(r, cookieDirect))
+}
+
+// pageNavigation reports a top-level page load: the only request that gets
+// the viewer page. A viewer page in a frame could never render (its own
+// frame-ancestors is 'none'), so frames get content. Without Fetch Metadata
+// the Accept check decides, as for view counting.
+func pageNavigation(r *http.Request) bool {
+	if d := r.Header.Get("Sec-Fetch-Dest"); d != "" {
+		return d == "document"
+	}
+	return isDocument(r)
+}
+
 // withoutParams returns u's path and query without the named parameters.
 func withoutParams(u *url.URL, names ...string) string {
 	q := u.Query()
@@ -305,18 +332,27 @@ func withoutParams(u *url.URL, names ...string) string {
 // panel, nil without one.
 func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, info *sharing.ViewerInfo) {
 	t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path)
+	switch {
+	case t.Kind == sharing.TargetViewer:
+		h.pages.fileViewer(w, h.sharing, t.File, h.viewerOrigin(a), snap, info, r.URL)
+		return
+	case t.Kind != sharing.TargetFile:
+	case h.sharing.Mode(a, snap) == sharing.ModeFilePage && scriptable(t.File.ContentType):
+		// The file page carries trusted info on this origin; a shared SVG
+		// or HTML file opened here must not be able to script it.
+		w.Header().Set("Content-Security-Policy", "sandbox")
+	case r.Header.Get("Sec-Fetch-Dest") == "object" || r.Header.Get("Sec-Fetch-Dest") == "embed":
+		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+	}
+	h.sendTarget(w, r, snap, t)
+}
+
+// sendTarget answers a resolved path from snap's files: the file itself, a
+// directory listing, a directory redirect, or not found.
+func (h *Handler) sendTarget(w http.ResponseWriter, r *http.Request, snap sharing.Snapshot, t sharing.Target) {
 	switch t.Kind {
 	case sharing.TargetFile:
-		if snap.Kind == api.KindFile && scriptable(t.File.ContentType) {
-			// The file page carries trusted info on this origin; a shared SVG
-			// or HTML file opened here must not be able to script it.
-			w.Header().Set("Content-Security-Policy", "sandbox")
-		} else if d := r.Header.Get("Sec-Fetch-Dest"); d == "object" || d == "embed" {
-			w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
-		}
 		h.sendFile(w, r, t.File, r.URL.Query().Has("download"))
-	case sharing.TargetViewer:
-		h.pages.fileViewer(w, h.sharing, t.File, h.viewerOrigin(a), snap, info, r.URL)
 	case sharing.TargetListing:
 		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), snap, t.Dir))
 	case sharing.TargetRedirect:
@@ -443,14 +479,10 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 // consume a view.
 func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, host ids.Host) {
 	if host.IsRaw() {
-		if cookie := h.cookieValue(r, cookieRaw); cookie != "" {
-			if a, err := h.sharing.Lookup(r.Context(), host.Slug()); err == nil {
-				if acc, ok := h.sharing.AuthorizeRaw(r.Context(), a, host, cookie, time.Now()); ok {
-					if t := h.sharing.ResolvePath(r.Context(), acc.Snapshot, r.URL.Path); t.Kind == sharing.TargetFile {
-						h.sendFile(w, r, t.File, false)
-						return
-					}
-				}
+		if acc, ok := h.rawAccess(r, host); ok {
+			if t := h.sharing.ResolvePath(r.Context(), acc.Snapshot, r.URL.Path); t.Kind == sharing.TargetFile {
+				h.sendFile(w, r, t.File, false)
+				return
 			}
 		}
 		brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)

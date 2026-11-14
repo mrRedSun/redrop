@@ -107,7 +107,7 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             <div className="space-y-0.5">
               <FormLabel>Show info button</FormLabel>
               <FormDescription>
-                A small "i" in the corner shows viewers the title, version, expiry, remaining views, size, and the version list with change notes. Never who shared it.
+                A small "i" in the corner shows viewers the title, version, expiry, remaining views, size, and the version list with the change notes of new versions. Never who shared it.
                 {artifact.kind !== 'file' && ' Pages open in redrop\'s viewer, with the content in a frame; off serves them directly.'}
               </FormDescription>
             </div>
