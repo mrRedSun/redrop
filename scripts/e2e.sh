@@ -5,7 +5,8 @@
 set -euo pipefail
 BASE=${BASE:-http://$(hostname -I | awk '{print $1}'):8080}
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# A watcher started below is ours: stop it if a check fails first.
+trap '[ -z "${WPID:-}" ] || kill "$WPID" 2>/dev/null; rm -rf "$WORK"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
 R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
@@ -27,6 +28,15 @@ curl() {
   command curl --connect-timeout 10 --max-time 60 "$@" || rc=$?
   if [ "$rc" = 23 ] && [ -p /dev/stdout ]; then rc=0; fi
   return "$rc"
+}
+# wait_until SECONDS CMD...: poll CMD until it succeeds; fail after SECONDS.
+# The bound only has to catch a real hang.
+wait_until() {
+  local end=$((SECONDS + $1)); shift
+  until "$@"; do
+    [ "$SECONDS" -lt "$end" ] || return 1
+    sleep 0.2
+  done
 }
 code_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 # code and resolved redirect target of a request
@@ -132,22 +142,28 @@ WID=$($R info "$WATCH_URL" --json | python3 -c 'import json,sys;print(json.load(
 $R watch "$WID" "$WORK/watched.html" --debounce 300ms >"$WORK/watch.log" 2>"$WORK/watch.err" &
 WPID=$!
 w_versions() { $R info "$WID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["versions"])'; }
+w_ready() { grep -q "^watching" "$WORK/watch.err"; }
+w_published() { grep -q "version 2" "$WORK/watch.log"; }
+w_exited() { ! kill -0 "$WPID" 2>/dev/null; }
 # "watching" is printed only after the watches are registered, so an edit
 # made after it cannot fall into the startup gap.
-for _ in $(seq 1 50); do grep -q "^watching" "$WORK/watch.err" && break; sleep 0.2; done
-grep -q "^watching" "$WORK/watch.err" || { cat "$WORK/watch.err"; die "watch did not start"; }
-echo '<!doctype html><title>w2</title><p>third</p>' > "$WORK/watched.html"
-for _ in $(seq 1 50); do
-  curl -fsS "$WATCH_URL" | grep -q third && break
-  sleep 0.2
-done
-curl -fsS "$WATCH_URL" | grep -q third || { cat "$WORK/watch.log" "$WORK/watch.err"; die "watch published new content"; }
-grep -q "version 2" "$WORK/watch.log" || die "watch printed the version number"
-kill -TERM $WPID 2>/dev/null
-for _ in $(seq 1 50); do kill -0 $WPID 2>/dev/null || break; sleep 0.2; done
-kill -0 $WPID 2>/dev/null && die "watch did not exit on SIGTERM"
-wait $WPID; WRC=$?
+wait_until 60 w_ready || { cat "$WORK/watch.err"; die "watch did not start within 60s"; }
+# Save with a rename, so the change is one event: "echo > file" truncates
+# and then writes, and a stall between the two longer than the debounce
+# would publish the empty file as a version of its own.
+echo '<!doctype html><title>w2</title><p>third</p>' > "$WORK/watched.html.tmp"
+mv "$WORK/watched.html.tmp" "$WORK/watched.html"
+# The CLI prints the version after the server accepted it, so wait for the
+# line, not for the content.
+wait_until 60 w_published || { cat "$WORK/watch.log" "$WORK/watch.err"; die "watch did not report version 2 within 60s"; }
+curl -fsS "$WATCH_URL" | grep -q third || die "watch published new content"
+kill -TERM "$WPID" 2>/dev/null
+wait_until 60 w_exited || die "watch did not exit within 60s of SIGTERM"
+WRC=0; wait "$WPID" || WRC=$?
+WPID=
 [ "$WRC" = 0 ] || die "watch exit code $WRC after SIGTERM, want 0"
+# The watcher has exited, so the count is final: no wait is needed to
+# show that nothing else was published.
 [ "$(w_versions)" = 2 ] || die "watch made exactly one new version, got $(w_versions)"
 pass "watch: content change published, version printed, clean SIGTERM exit"
 
