@@ -274,6 +274,11 @@ type PublishOptions struct {
 	TTL      string
 	Password string
 	MaxViews int
+	// InfoButton shows or hides the info button (and the viewer frame for
+	// HTML); nil uses the server default.
+	InfoButton *bool
+	// OldVersions lets viewers open older versions from the info panel.
+	OldVersions bool
 }
 
 // Share prepares, uploads, and publishes a new artifact.
@@ -290,19 +295,56 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
 		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note},
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
+		InfoButton: opts.InfoButton, OldVersions: opts.OldVersions,
 	})
 }
 
 // Update uploads src as a new version of an existing artifact (same link).
 func (c *Client) Update(ctx context.Context, artifactID string, src *Source, progress Progress) (*api.Artifact, error) {
+	return c.UpdateWithOptions(ctx, artifactID, src, VersionOptions{}, progress)
+}
+
+// VersionOptions are artifact settings changed together with a new version.
+type VersionOptions struct {
+	// Settings that are set are saved explicitly before the upload starts,
+	// so a failed setting change never leaves a new version published.
+	InfoButton  *bool
+	OldVersions *bool
+}
+
+// ErrSettingsOnly reports that VersionOptions were saved but the new version
+// was not published. It wraps the publishing error.
+type ErrSettingsOnly struct{ Err error }
+
+func (e *ErrSettingsOnly) Error() string {
+	return "settings were saved, but the new version was not published: " + e.Err.Error()
+}
+func (e *ErrSettingsOnly) Unwrap() error { return e.Err }
+
+// UpdateWithOptions prepares src, applies opts, then uploads src as a new
+// version. A failure after opts were applied is an *ErrSettingsOnly.
+func (c *Client) UpdateWithOptions(ctx context.Context, artifactID string, src *Source, opts VersionOptions, progress Progress) (*api.Artifact, error) {
 	p, err := Prepare(src)
 	if err != nil {
 		return nil, err
 	}
 	defer p.Close()
-	id, sum, err := c.UploadFile(ctx, p.File, progress)
-	if err != nil {
-		return nil, err
+	applied := false
+	if opts.InfoButton != nil || opts.OldVersions != nil {
+		if _, err := c.UpdateArtifact(ctx, artifactID, &api.UpdateArtifactRequest{InfoButton: opts.InfoButton, OldVersions: opts.OldVersions}); err != nil {
+			return nil, err
+		}
+		applied = true
 	}
-	return c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
+	id, sum, err := c.UploadFile(ctx, p.File, progress)
+	if err == nil {
+		var a *api.Artifact
+		if a, err = c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note}); err == nil {
+			return a, nil
+		}
+	}
+	if applied {
+		return nil, &ErrSettingsOnly{Err: err}
+	}
+	return nil, err
 }

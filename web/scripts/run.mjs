@@ -1,13 +1,13 @@
 import { createJiti } from 'jiti'
 import { fileURLToPath } from 'node:url'
 
-const entry = {
-  test: './unit.test.ts',
-  contract: './contract-check.ts',
+const entries = {
+  test: ['./unit.test.ts', './viewer-js.test.ts'],
+  contract: ['./contract-check.ts'],
 }[process.argv[2]]
-if (!entry) throw new Error('Choose test or contract')
+if (!entries) throw new Error('Choose test or contract')
 
 const jiti = createJiti(import.meta.url, {
   alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) },
 })
-await jiti.import(entry)
+for (const entry of entries) await jiti.import(entry)

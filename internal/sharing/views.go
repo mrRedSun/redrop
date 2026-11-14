@@ -1,6 +1,7 @@
 package sharing
 
 import (
+	"context"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/store"
@@ -33,6 +34,8 @@ type ArtifactMeta struct {
 	ExpiresAt    *time.Time
 	PurgeAt      *time.Time // when expired or used-up content is deleted
 	TokenName    string     // API token that created it
+	InfoButton   bool       // effective: the artifact's setting or the server default
+	OldVersions  bool       // viewers may open older versions
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
@@ -50,16 +53,17 @@ type AdminArtifact struct {
 
 // Version is one entry of an artifact's version history.
 type Version struct {
-	Number    int
-	Kind      string
-	Size      int64
-	Files     int
-	Entry     string
-	SPA       bool
-	Note      string
-	TokenName string
-	CreatedAt time.Time
-	Current   bool
+	Number     int
+	Kind       string
+	Size       int64
+	Files      int
+	Entry      string
+	SPA        bool
+	Note       string
+	NotePublic bool // viewers see the note in the info panel
+	TokenName  string
+	CreatedAt  time.Time
+	Current    bool
 }
 
 // FileEntry is one file of a version.
@@ -110,8 +114,71 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		Size: a.Size, TotalSize: a.TotalSize, Files: a.Files, Version: a.CurrentVersion, Versions: a.Versions,
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
-		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName,
+		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a), OldVersions: a.OldVersions,
 	}
+}
+
+func (s *Service) infoButton(a *store.Artifact) bool {
+	if a.InfoButton != nil {
+		return *a.InfoButton
+	}
+	return s.cfg.InfoButtonDefault
+}
+
+// ViewerInfo is what an artifact's info panel tells a visitor. DESIGN.md
+// ("Info panel and versions") fixes its contents: only what the visitor can already see
+// or infer from the page they were let into, plus the owner's revision
+// history (numbers, times and change notes). It has no owner, ID, slug, token
+// name, view count of an unlimited link, or other versions' contents or sizes.
+type ViewerInfo struct {
+	Title     string
+	Version   int        // the version shown
+	Published time.Time  // when the shown version was published
+	ExpiresAt *time.Time // nil = never
+	MaxViews  int        // 0 = unlimited
+	ViewsLeft int        // only meaningful when MaxViews > 0
+	Password  bool
+	Size      int64 // the shown version
+	Files     int   // the shown version
+	Current   int   // the current version's number
+	Latest    int   // the highest retained version number ("version N of Latest")
+	CanOpen   bool  // viewers may open older versions
+	Revisions []Revision
+}
+
+// Revision is one retained version as viewers see it: never its size, files,
+// kind, uploader or token. Note is empty unless the note was written when
+// notes were shown to viewers.
+type Revision struct {
+	Number    int
+	Published time.Time
+	Note      string
+	Current   bool
+}
+
+// ViewerInfo returns the info panel contents for shown, a version of a.
+func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snapshot) ViewerInfo {
+	info := ViewerInfo{
+		Title: a.Title, Version: shown.Version, Published: shown.Published, ExpiresAt: a.ExpiresAt,
+		Password: a.PasswordHash != "", Size: shown.Size, Files: shown.Files,
+		Current: a.CurrentVersion, Latest: a.CurrentVersion, CanOpen: s.oldVersionsOpen(a),
+	}
+	if a.MaxViews > 0 {
+		info.MaxViews, info.ViewsLeft = a.MaxViews, max(a.MaxViews-a.Views, 0)
+	}
+	rows, err := s.db.ListVersions(ctx, a.ID)
+	if err != nil {
+		s.log.Error("list versions for viewer", "error", err)
+	}
+	for _, v := range rows {
+		rev := Revision{Number: v.Number, Published: v.CreatedAt, Current: v.Number == a.CurrentVersion}
+		if v.NotePublic {
+			rev.Note = v.Note // notes from before viewers could see them stay private
+		}
+		info.Revisions = append(info.Revisions, rev)
+		info.Latest = max(info.Latest, v.Number)
+	}
+	return info
 }
 
 func (s *Service) ownerView(a *store.Artifact) Artifact {
@@ -140,7 +207,7 @@ func versionsView(current int, rows []store.VersionRow) []Version {
 	out := make([]Version, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Version{Number: v.Number, Kind: v.Kind, Size: v.Size, Files: v.Files, Entry: v.Entry, SPA: v.SPA,
-			Note: v.Note, TokenName: v.TokenName, CreatedAt: v.CreatedAt, Current: v.Number == current})
+			Note: v.Note, NotePublic: v.NotePublic, TokenName: v.TokenName, CreatedAt: v.CreatedAt, Current: v.Number == current})
 	}
 	return out
 }

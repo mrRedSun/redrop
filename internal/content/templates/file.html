@@ -1,8 +1,9 @@
-{{template "head" .}}<main class="card wide">
+{{template "head" .}}{{with .Data}}{{with .Info}}<link rel="stylesheet" href="/__redrop/viewer.css"><script src="/__redrop/viewer.js" defer></script>{{end}}
+{{if .OldVersion}}<div class="rd-bar" role="status">Viewing version {{.OldVersion}} of {{.Info.Latest}} · <a href="{{.Latest}}">Back to latest</a></div>{{end}}{{end}}<main class="card wide">
 {{with .Data}}
 <div class="row">
   <div><h1>{{.Name}}</h1><div class="meta">{{bytes .Size}} · {{.Type}}</div></div>
-  <div class="actions"><a class="btn secondary" href="{{.Raw}}" target="_blank" rel="noopener">Open raw</a><a class="btn" href="{{.Raw}}?download">Download</a></div>
+  <div class="actions"><a class="btn secondary" href="{{.Raw}}" target="_blank" rel="noopener">Open raw</a><a class="btn" href="{{.Download}}">Download</a></div>
 </div>
 {{if .Image}}<div class="preview"><img src="{{.Raw}}" alt="{{.Name}}"></div>
 {{else if .Video}}<div class="preview"><video src="{{.Raw}}" controls preload="metadata"></video></div>
@@ -10,5 +11,6 @@
 {{else if .PDF}}<div class="preview"><iframe src="{{.Raw}}" title="{{.Name}}"></iframe></div>
 {{else if .Text}}<div class="preview"><pre>{{.Text}}</pre></div>{{if .Truncated}}<p class="meta note">Showing the first 1 MB. Download for the full file.</p>{{end}}
 {{end}}
+{{with .Info}}{{template "panel" .}}{{end}}
 {{end}}
 {{template "foot" .}}

@@ -20,6 +20,7 @@ export function VersionsPanel({ id }: { id: string }) {
     <AsyncResultView result={result}>
       {(versions) => (
         <>
+          <p className="text-muted-foreground mb-3 text-sm">Notes on new versions are shown to viewers in the info panel's version list. Notes written before that stay private.</p>
           <DataTable<Version>
             rows={[...versions]}
             rowKey={(v) => String(v.number)}
@@ -28,7 +29,7 @@ export function VersionsPanel({ id }: { id: string }) {
               { header: 'Version', cell: (v) => <span className="flex items-center gap-2">v{v.number}{v.current && <Badge>live</Badge>}</span> },
               { header: 'Published', cell: (v) => formatDate(v.created_at) },
               { header: 'Size', cell: (v) => `${formatBytes(v.size)} · ${v.files} file(s)` },
-              { header: 'Note', cell: (v) => <span className="text-muted-foreground">{v.note || (v.token_name ? `via ${v.token_name}` : '—')}</span> },
+              { header: 'Note', cell: (v) => <span className="text-muted-foreground">{v.note || (v.token_name ? `via ${v.token_name}` : '—')}{v.note && <Badge variant="outline" className="ml-2">{v.note_public ? 'shown to viewers' : 'private'}</Badge>}</span> },
               {
                 header: '',
                 className: 'text-right',

@@ -70,7 +70,12 @@ const program = Effect.gen(function* () {
     // Saving unchanged settings is idempotent (form -> request -> server).
     const values = Schema.decodeUnknownSync(ArtifactSettingsForm)(settingsDefaults(a, versions.find((v) => v.current)!.spa))
     const saved = yield* artifacts.update(a.id, toUpdateRequest(values, a.kind))
-    check('unchanged settings round-trip', saved.title === a.title && saved.max_views === a.max_views && saved.url === a.url)
+    check('unchanged settings round-trip', saved.title === a.title && saved.max_views === a.max_views && saved.url === a.url &&
+      saved.info_button === a.info_button && saved.viewer_old_versions === a.viewer_old_versions)
+    // Both viewer switches round-trip and can be put back.
+    const flipped = yield* artifacts.update(a.id, toUpdateRequest({ ...values, infoButton: !a.info_button, oldVersions: !a.viewer_old_versions }, a.kind))
+    check('viewer settings round-trip', flipped.info_button === !a.info_button && flipped.viewer_old_versions === !a.viewer_old_versions)
+    yield* artifacts.update(a.id, { info_button: a.info_button, viewer_old_versions: a.viewer_old_versions })
   }
 
   const created = yield* tokens.create({ name: 'contract-check', ttl: '1d' })
