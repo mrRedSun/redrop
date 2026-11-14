@@ -76,8 +76,8 @@ func TestLegacySlugStillResolves(t *testing.T) {
 	}
 	r := h.get(legacy+".content.test", nil)
 	expectStatus(t, r, 200, "legacy slug")
-	if !strings.Contains(body(r), `src="http://`+legacy+`--raw.content.test/__redrop/enter?`) {
-		t.Fatal("legacy slug did not frame its artifact from its raw host")
+	if !strings.Contains(body(r), "legacy content") {
+		t.Fatal("legacy slug did not serve its artifact")
 	}
 	got, err := c.GetArtifact(context.Background(), a.ID)
 	if err != nil || got.URL != "http://"+legacy+".content.test/" {

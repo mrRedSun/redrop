@@ -87,19 +87,13 @@ func ValidatePassword(pw string) error {
 
 // --- HMAC-signed values ---
 
-type Signer struct {
-	key []byte
-	now func() time.Time
-}
+type Signer struct{ key []byte }
 
 func NewSigner(secret []byte, purpose string) *Signer {
 	m := hmac.New(sha256.New, secret)
 	m.Write([]byte("redrop/" + purpose))
-	return &Signer{key: m.Sum(nil), now: time.Now}
+	return &Signer{key: m.Sum(nil)}
 }
-
-// SetClock replaces the clock Verify checks expiry against (tests).
-func (s *Signer) SetClock(now func() time.Time) { s.now = now }
 
 // Sign returns payload.signature (base64url) with an expiry.
 func (s *Signer) Sign(payload string, exp time.Time) string {
@@ -116,30 +110,23 @@ func (s *Signer) mac(v string) string {
 
 // Verify returns the payload if the value is authentic and unexpired.
 func (s *Signer) Verify(v string) (string, bool) {
-	payload, _, ok := s.VerifyExpiry(v)
-	return payload, ok
-}
-
-// VerifyExpiry is Verify that also returns the value's expiry, so a grant
-// derived from it can be made to expire no later.
-func (s *Signer) VerifyExpiry(v string) (string, time.Time, bool) {
 	enc, sig, ok := strings.Cut(v, ".")
 	if !ok || !hmac.Equal([]byte(sig), []byte(s.mac(enc))) {
-		return "", time.Time{}, false
+		return "", false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(enc)
 	if err != nil {
-		return "", time.Time{}, false
+		return "", false
 	}
 	expS, payload, ok := strings.Cut(string(raw), "|")
 	if !ok {
-		return "", time.Time{}, false
+		return "", false
 	}
 	var exp int64
-	if _, err := fmt.Sscanf(expS, "%d", &exp); err != nil || s.now().Unix() >= exp {
-		return "", time.Time{}, false
+	if _, err := fmt.Sscanf(expS, "%d", &exp); err != nil || time.Now().Unix() >= exp {
+		return "", false
 	}
-	return payload, time.Unix(exp, 0), true
+	return payload, true
 }
 
 // --- rate limiting (fixed window per key) ---

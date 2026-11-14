@@ -1,7 +1,7 @@
 // redrop viewer page and file page (DESIGN.md "Viewer frame"). Loaded from
 // /__redrop/viewer.js; the pages carry no inline script. It adds local and
 // relative times to the server-rendered info panel, a live expiry countdown
-// while the panel is open, and the address bar that follows the frame.
+// while the panel is open, and keeps the address bar on the frame's page.
 (function () {
   'use strict'
   var doc = document
@@ -34,43 +34,49 @@
   }
 
   // ---- the address bar follows the frame ----
-  // The raw host reports navigations a visitor makes inside a frame. The
-  // report can come from this frame, from a frame nested inside the artifact,
-  // or (one raw cookie serves every tab of an artifact version in a browser)
-  // from another tab. So a path is applied only when this page's own frame
-  // loads right after the report; anything else expires unused. replaceState,
-  // never pushState: the frame owns the history entries.
+  // The frame is on this origin, so its location is read directly after
+  // every load, hash change and history step inside it. Nothing is added to
+  // the artifact or patched in its window: the viewer only reads and listens.
+  // replaceState, never pushState: the frame owns the history entries.
   var frame = doc.getElementById('rd-frame')
-  if (!frame || !window.EventSource || !frame.getAttribute('data-stream')) return
-  var version = frame.getAttribute('data-version')
-  var REPORT_TTL = 5000, LOAD_GRACE = 1000
-  var pending = null, loadedAt = -1
-  function apply(path) {
-    if (typeof path !== 'string' || path.charAt(0) !== '/' || path.charAt(1) === '/' || path.charAt(1) === '\\') return
-    var u = new URL(path, location.origin)
-    if (u.origin !== location.origin) return
-    if (version && version !== '0') u.searchParams.set('redrop-version', version)
-    var next = u.pathname + u.search
-    if (next !== location.pathname + location.search) history.replaceState(history.state, '', next)
+  if (!frame) return
+  var OLD = /^\/__redrop\/v\/([1-9][0-9]*)(\/.*)$/
+  // barURL maps the frame's location to the address bar: version N's files
+  // (/__redrop/v/N/path) show as path?redrop-version=N. It returns null for
+  // another origin and for redrop's own pages.
+  function barURL(loc) {
+    if (loc.origin !== location.origin) return null
+    var path = loc.pathname, search = loc.search, m = OLD.exec(path)
+    if (m) {
+      var q = new URLSearchParams(search)
+      q.set('redrop-version', m[1])
+      path = m[2]
+      search = '?' + q.toString()
+    } else if (path.indexOf('/__redrop/') === 0) {
+      return null
+    }
+    return path + search + loc.hash
+  }
+  function sync() {
+    try {
+      var next = barURL(frame.contentWindow.location)
+      if (next !== null && next !== location.pathname + location.search + location.hash) {
+        history.replaceState(history.state, '', next)
+      }
+    } catch (e) {
+      // The frame navigated to another origin: leave the address bar alone.
+    }
   }
   frame.addEventListener('load', function () {
-    var now = Date.now()
-    if (pending && now - pending.at <= REPORT_TTL) {
-      apply(pending.path)
-      loadedAt = -1 // this load is used up
-    } else {
-      loadedAt = now // a report may still be on its way for this load
+    sync()
+    try {
+      // A new document has a new window: listen again on every load.
+      frame.contentWindow.addEventListener('hashchange', sync)
+      frame.contentWindow.addEventListener('popstate', sync)
+    } catch (e) {
+      // another origin
     }
-    pending = null
   })
-  var es = new EventSource(frame.getAttribute('data-stream'))
-  es.onmessage = function (e) {
-    var now = Date.now()
-    if (loadedAt >= 0 && now - loadedAt <= LOAD_GRACE) {
-      apply(e.data) // the page loaded a moment before its report arrived
-      loadedAt = -1
-      return
-    }
-    pending = { path: e.data, at: now }
-  }
+  // The server never sees the fragment: hand it to the frame.
+  if (location.hash) frame.src = frame.getAttribute('src') + location.hash
 })()

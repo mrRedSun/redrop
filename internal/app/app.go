@@ -45,7 +45,6 @@ type App struct {
 	API      *httpapi.API
 	janitor  *janitor.Janitor
 	handler  http.Handler
-	content  *content.Handler
 }
 
 // New opens storage and builds every component.
@@ -90,8 +89,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 		cfg: cfg, log: log, db: db, Accounts: acc, Sharing: sh, API: api,
 		janitor: janitor.New(sh, db, cfg.DataDir, log),
 	}
-	a.content = content.New(sh, cfg, clients, log, installers)
-	a.handler = hostRouter(cfg.ContentHost(), a.content, api.Handler())
+	a.handler = hostRouter(cfg.ContentHost(), content.New(sh, cfg, clients, log, installers), api.Handler())
 	return a, nil
 }
 
@@ -133,7 +131,6 @@ func (a *App) Run(ctx context.Context) error {
 		MaxHeaderBytes:    64 << 10,
 		// No read/write timeouts: uploads and downloads can be large and slow.
 	}
-	srv.RegisterOnShutdown(a.content.Close) // end the viewer's address-bar streams
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	a.log.Info("redrop listening", "addr", a.cfg.Listen, "public_url", a.cfg.PublicOrigin(), "content_url", a.cfg.ContentURL.String(), "version", httpapi.Version)

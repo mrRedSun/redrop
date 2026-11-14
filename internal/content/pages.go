@@ -107,15 +107,13 @@ type fileData struct {
 }
 
 // fileViewer renders redrop's own page for a file artifact, with the info
-// panel rendered natively when info is set (nothing is injected anywhere).
-func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self string, snap sharing.Snapshot, info *sharing.ViewerInfo, u *url.URL) {
+// panel rendered natively when info is set. base is where the shown
+// version's files are served ("" for the current version); self is this
+// origin, for the policy that allows the viewer's script and stylesheet.
+func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo) {
 	ct := f.ContentType
-	raw, download := "/"+url.PathEscape(f.Path), "?download"
-	if v := u.Query().Get(paramVersion); v != "" {
-		q := "?" + paramVersion + "=" + url.QueryEscape(v)
-		raw, download = raw+q, q+"&download"
-	}
-	d := fileData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: raw, Download: raw[:strings.IndexByte(raw+"?", '?')] + download, Size: f.Size, Latest: withoutParams(u, paramVersion)}
+	raw := base + "/" + url.PathEscape(f.Path)
+	d := fileData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: raw, Download: raw + "?download", Size: f.Size, Latest: "/"}
 	switch {
 	case strings.HasPrefix(ct, "image/"):
 		d.Image = true
@@ -132,13 +130,13 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 	}
 	csp := ""
 	if info != nil {
-		panel := panelFor(*info, u)
+		// The file page lives at "/" only; its version links point there.
+		panel := panelFor(*info, &url.URL{Path: "/"})
 		d.Info = &panel
 		if info.Version != info.Current {
 			d.OldVersion = info.Version
 		}
 		csp = fmt.Sprintf(p.fileCSP, self)
-		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	}
 	p.render(w, http.StatusOK, "file.html", f.Path, artifactIcons, d, csp)
 }

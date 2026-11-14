@@ -45,28 +45,24 @@ type Handler struct {
 	pages   *pages
 	install http.Handler // installers and CLI downloads, also served on the apex
 	misses  *security.TokenBucket
-	relay   *relay // address-bar locations of viewer frames
 }
 
 func New(sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger, installers http.Handler) *Handler {
 	return &Handler{
 		sharing: sh, cfg: cfg, clients: clients, log: log, pages: newPages(cfg), install: installers,
 		misses: security.NewTokenBucket(cfg.ContentMissBurst, cfg.ContentMissPerMinute, maxMissClients),
-		relay:  newRelay(),
 	}
 }
 
-// Close ends open address-bar streams; call it when the server shuts down.
-func (h *Handler) Close() { h.relay.close() }
-
-// host parses the artifact host of the request (ok=false for the apex, other
-// hosts, and labels that are not exactly an ids.Host).
-func (h *Handler) host(r *http.Request) (ids.Host, bool) {
+// slug extracts the artifact slug from the Host header ("" for the apex,
+// ok=false for hosts that are not a single-label subdomain carrying a
+// well-formed slug).
+func (h *Handler) slug(r *http.Request) (string, bool) {
 	label, ok := h.label(r)
-	if !ok || label == "" {
-		return ids.Host{}, false
+	if !ok || (label != "" && !ids.ValidSlug(label)) {
+		return "", false
 	}
-	return ids.ParseHostLabel(label)
+	return label, true
 }
 
 // label extracts the subdomain label from the Host header without checking
@@ -125,67 +121,55 @@ func (h *Handler) tooManyMisses(w http.ResponseWriter) {
 	h.pages.message(w, http.StatusTooManyRequests, "Too many requests", "Too many links from your network did not work. Wait a minute and try again.")
 }
 
-// tooManyFrames refuses a frame over its network's quota
-// (REDROP_CONTENT_FRAME_ENTRIES per sharing.EnterWindow). It is not a miss.
-func (h *Handler) tooManyFrames(w http.ResponseWriter) {
-	w.Header().Set("Retry-After", strconv.Itoa(int(sharing.EnterWindow.Seconds())))
-	h.pages.message(w, http.StatusTooManyRequests, "Too many requests", "Too many pages were opened from your network. Wait a few minutes and reload.")
-}
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.setHeaders(w)
 	if h.serveServerIcon(w, r) || serveViewerAsset(w, r) {
 		return
 	}
-	label, isContent := h.label(r)
-	host, ok := h.host(r)
+	slug, ok := h.slug(r)
 	switch {
-	case isContent && label == "":
-		h.serveApex(w, r)
-		return
 	case !ok && fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead) && h.singleLabel(r):
-		h.favicon(w, r, ids.Host{})
+		h.favicon(w, r, "")
 		return
 	case !ok:
 		h.miss(w, r)
+		return
+	case slug == "":
+		h.serveApex(w, r)
 		return
 	case r.URL.Path == "/robots.txt":
 		RobotsTxt(w, r)
 		return
 	case isServiceWorkerScript(r):
-		// Service workers would outlive revocation and could answer the
-		// viewer's own navigations, so no artifact host ever serves one.
+		// A service worker would outlive revocation and could answer the
+		// viewer page's own navigations, so no artifact host serves one.
 		h.pages.notFound(w)
 		return
 	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		h.favicon(w, r, host)
+		h.favicon(w, r, slug)
 		return
 	case h.misses.Exhausted(h.missKey(r)):
 		h.tooManyMisses(w)
 		return
-	case host.IsRaw():
-		h.serveRaw(w, r, host)
-		return
 	}
-	reserved := reservedPrefix
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == reserved+"open") {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == reservedPrefix+"open") {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	a, err := h.sharing.Lookup(r.Context(), host.Slug())
+	a, err := h.sharing.Lookup(r.Context(), slug)
 	if err != nil {
 		h.miss(w, r)
 		return
 	}
-	if rest, isReserved := strings.CutPrefix(r.URL.Path, reserved); isReserved {
-		switch rest {
-		case "preview":
+	if rest, reserved := strings.CutPrefix(r.URL.Path, reservedPrefix); reserved {
+		switch {
+		case rest == "preview":
 			h.preview(w, r, a)
-		case "open":
+		case rest == "open":
 			h.open(w, r, a)
-		case "location":
-			h.location(w, r, a)
+		case strings.HasPrefix(rest, versionPrefix):
+			h.serveOldVersion(w, r, a, strings.TrimPrefix(rest, versionPrefix))
 		default:
 			h.pages.notFound(w)
 		}
@@ -228,75 +212,142 @@ func isDocument(r *http.Request) bool {
 	return accept == "" || accept == "*/*" || strings.Contains(accept, "text/html")
 }
 
-// Query parameters the shared link understands. They are not passed to the
-// artifact's frame.
+// topLevelLoad reports a top-level page load, the only request that counts
+// a view: Sec-Fetch-Dest: document, or, without Fetch Metadata, a request
+// that looks like a page load. Frames (the viewer's own included) never count.
+func topLevelLoad(r *http.Request) bool {
+	if d := r.Header.Get("Sec-Fetch-Dest"); d != "" {
+		return d == "document"
+	}
+	return isDocument(r)
+}
+
+// wantsViewer reports a request that may get the viewer page: a top-level
+// navigation by a browser that says so. Frames, subresources and clients
+// without Fetch Metadata get the artifact itself.
+func wantsViewer(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Dest") == "document"
+}
+
+// Query parameters and paths the artifact link understands.
 const (
-	paramInfo    = "redrop-info"    // "0": a direct, frameless view (screenshots)
-	paramVersion = "redrop-version" // N: an older version, when the owner allows it
+	paramInfo     = "redrop-info"    // "0": the direct, frameless view; "1": back to the viewer
+	paramVersion  = "redrop-version" // N: an older version, when the owner allows it
+	versionPrefix = "v/"             // /__redrop/v/<N>/<path>: version N's files
 )
 
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
+// versionBase is where version n's files are served.
+func versionBase(n int) string { return reservedPrefix + versionPrefix + strconv.Itoa(n) }
+
+// admit runs the gates for a request on a. It returns false when it has
+// already answered the request (a miss or a gate).
+func (h *Handler) admit(w http.ResponseWriter, r *http.Request, a *store.Artifact) (sharing.Decision, bool) {
 	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
-	switch h.sharing.Decide(a, grants, time.Now()) {
+	d := h.sharing.Decide(a, grants, time.Now())
+	switch d {
 	case sharing.ShowGone:
 		h.miss(w, r)
-		return
+		return d, false
 	case sharing.ShowGate:
 		if !isDocument(r) {
 			http.Error(w, "access required", http.StatusForbidden)
-			return
+			return d, false
 		}
 		h.sharing.RecordGateImpression(r.Context(), a, h.visitor(r))
 		h.pages.gate(w, http.StatusOK, a, "", r.URL.RequestURI())
-		return
-	case sharing.Serve:
-		if !sharing.Gated(a) && r.Method == http.MethodGet && isDocument(r) {
-			if g := h.sharing.RecordView(r.Context(), a, h.visitor(r), h.cookieValue(r, cookieSeen)); g != nil {
-				h.setCookie(w, cookieSeen, g, false)
-			}
-		}
-	case sharing.ServeOwnerPreview:
+		return d, false
 	}
-	q := r.URL.Query()
-	version := 0
-	if v := q.Get(paramVersion); v != "" {
-		var err error
-		if version, err = strconv.Atoi(v); err != nil || version <= 0 {
-			version = -1 // unavailable: redirect to the current version
+	return d, true
+}
+
+// countView records a view of an ungated link for a top-level page load,
+// once per browser per window ("seen"). Gated links count at Open.
+func (h *Handler) countView(w http.ResponseWriter, r *http.Request, a *store.Artifact, d sharing.Decision) {
+	if d == sharing.Serve && !sharing.Gated(a) && r.Method == http.MethodGet && topLevelLoad(r) {
+		if g := h.sharing.RecordView(r.Context(), a, h.visitor(r), h.cookieValue(r, cookieSeen)); g != nil {
+			h.setCookie(w, cookieSeen, g, false)
 		}
 	}
-	snap, err := h.sharing.SelectVersion(r.Context(), a, version)
-	if err != nil {
-		// Not a miss: the visitor passed the gates. Show the current version.
-		http.Redirect(w, r, withoutParams(r.URL, paramVersion), http.StatusSeeOther)
+}
+
+// serve answers a path of the artifact link: the viewer page, the file page,
+// or the current version's files.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
+	d, ok := h.admit(w, r, a)
+	if !ok {
 		return
+	}
+	direct := h.directView(w, r, a)
+	snap := sharing.CurrentSnapshot(a)
+	if v := r.URL.Query().Get(paramVersion); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil {
+			snap, err = h.sharing.SelectVersion(r.Context(), a, n)
+		}
+		if err != nil {
+			// Not a miss: the visitor passed the gates. Show the current version.
+			http.Redirect(w, r, withoutParams(r.URL, paramVersion), http.StatusSeeOther)
+			return
+		}
 	}
 	mode := h.sharing.Mode(a, snap)
-	direct := h.directView(w, r, a)
-	if mode == sharing.ModeFramed && !direct && pageNavigation(r) {
-		// Directory redirects and missing paths answer as they would without
-		// the frame; only real pages get the viewer.
-		switch t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind {
-		case sharing.TargetRedirect:
-			http.Redirect(w, r, t.Location, http.StatusMovedPermanently)
-		case sharing.TargetNotFound:
-			h.pages.notFound(w)
-		default:
-			h.viewerPage(w, r, a, snap, grants)
-		}
+	old := snap.Version != a.CurrentVersion
+	switch {
+	case mode == sharing.ModeFramed && wantsViewer(r) && !direct:
+		h.viewer(w, r, a, snap, d)
+	case old && mode == sharing.ModeFilePage && r.URL.Path == "/":
+		h.countView(w, r, a, d)
+		h.serveContent(w, r, a, snap, versionBase(snap.Version), "/", direct)
+	case old:
+		// Version N's files live under its own path space.
+		http.Redirect(w, r, versionBase(snap.Version)+withoutParams(r.URL, paramVersion), http.StatusSeeOther)
+	default:
+		h.countView(w, r, a, d)
+		h.serveContent(w, r, a, snap, "", r.URL.Path, direct)
+	}
+}
+
+// serveOldVersion answers /__redrop/v/<N>/<path>: version N's files, only
+// when the owner lets viewers open older versions; otherwise the identical
+// miss. A top-level page load of a framed artifact goes to the viewer form,
+// <path>?redrop-version=N.
+func (h *Handler) serveOldVersion(w http.ResponseWriter, r *http.Request, a *store.Artifact, rest string) {
+	num, sub, _ := strings.Cut(rest, "/")
+	n, err := strconv.Atoi(num)
+	if err != nil || n <= 0 || num != strconv.Itoa(n) {
+		h.miss(w, r)
 		return
 	}
-	var info *sharing.ViewerInfo
-	if mode == sharing.ModeFilePage && !direct && h.sharing.InfoShown(a) {
-		v := h.sharing.ViewerInfo(r.Context(), a, snap)
-		info = &v
+	d, ok := h.admit(w, r, a)
+	if !ok {
+		return
 	}
-	h.serveContent(w, r, a, snap, mode, info)
+	snap, err := h.sharing.OldVersion(r.Context(), a, n)
+	if err != nil {
+		h.miss(w, r)
+		return
+	}
+	if !strings.HasPrefix(rest, num+"/") {
+		http.Redirect(w, r, versionBase(n)+"/"+withQuery("", r.URL.RawQuery), http.StatusMovedPermanently)
+		return
+	}
+	p, direct := "/"+sub, h.directView(w, r, a)
+	if h.sharing.Mode(a, snap) == sharing.ModeFramed && wantsViewer(r) && !direct {
+		u := *r.URL
+		u.Path, u.RawPath = p, ""
+		q := u.Query()
+		q.Set(paramVersion, strconv.Itoa(n))
+		u.RawQuery = q.Encode()
+		http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+		return
+	}
+	h.countView(w, r, a, d)
+	h.serveContent(w, r, a, snap, versionBase(n), p, direct)
 }
 
 // directView reports whether this request gets the direct, frameless view:
 // ?redrop-info=0 chooses it for the visit (a signed host-only cookie, so the
-// pages and frames that view loads stay direct), ?redrop-info=1 goes back.
+// pages that view loads stay direct), ?redrop-info=1 goes back.
 //
 // The choice is only recorded (or cleared) by a top-level navigation the
 // visitor started: typed, bookmarked, or followed from the same origin. A
@@ -328,72 +379,54 @@ func visitorNavigation(r *http.Request) bool {
 	return r.Header.Get("Sec-Fetch-Dest") == "document" && (site == "none" || site == "same-origin")
 }
 
-// pageNavigation reports a top-level page load: the only request that gets
-// the viewer page. A viewer page in a frame could never render (its own
-// frame-ancestors is 'none'), so frames get content. Without Fetch Metadata
-// the Accept check decides, as for view counting.
-func pageNavigation(r *http.Request) bool {
-	if d := r.Header.Get("Sec-Fetch-Dest"); d != "" {
-		return d == "document"
-	}
-	return isDocument(r)
-}
-
 // withoutParams returns u's path and query without the named parameters.
 func withoutParams(u *url.URL, names ...string) string {
 	q := u.Query()
 	for _, n := range names {
 		q.Del(n)
 	}
-	if len(q) == 0 {
-		return u.EscapedPath()
-	}
-	return u.EscapedPath() + "?" + q.Encode()
+	return withQuery(u.EscapedPath(), q.Encode())
 }
 
-// serveContent answers from snap's files on the shared link: the direct view,
-// subresources of a direct view, and the file page. info is the file page's
-// panel, nil without one.
-func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, mode sharing.Mode, info *sharing.ViewerInfo) {
-	t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path)
-	switch {
-	case t.Kind == sharing.TargetViewer:
-		h.pages.fileViewer(w, h.sharing, t.File, h.viewerOrigin(a), snap, info, r.URL)
-		return
-	case t.Kind != sharing.TargetFile:
-	case mode == sharing.ModeFilePage && scriptable(t.File.ContentType):
-		// The file page carries trusted info on this origin; a shared SVG
-		// or HTML file opened here must not be able to script it.
-		w.Header().Set("Content-Security-Policy", "sandbox")
-	case r.Header.Get("Sec-Fetch-Dest") == "object" || r.Header.Get("Sec-Fetch-Dest") == "embed":
-		w.Header().Set("Content-Security-Policy", "sandbox allow-scripts")
+func withQuery(p, rawQuery string) string {
+	if rawQuery == "" {
+		return p
 	}
-	h.sendTarget(w, r, snap, t)
+	return p + "?" + rawQuery
 }
 
-// sendTarget answers a resolved path from snap's files: the file itself, a
-// directory listing, a directory redirect, or not found.
-func (h *Handler) sendTarget(w http.ResponseWriter, r *http.Request, snap sharing.Snapshot, t sharing.Target) {
+// serveContent answers path p from snap's files: the file itself, the file
+// page, a directory listing or redirect, or not found. base is where snap's
+// files are served ("" for the current version); direct leaves the info
+// panel off the file page.
+func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, base, p string, direct bool) {
+	if h.sharing.Mode(a, snap) == sharing.ModeFramed {
+		// The same URL is the viewer page for a top-level navigation.
+		w.Header().Add("Vary", "Sec-Fetch-Dest")
+	}
+	t := h.sharing.ResolvePath(r.Context(), snap, p)
 	switch t.Kind {
 	case sharing.TargetFile:
 		h.sendFile(w, r, t.File, r.URL.Query().Has("download"))
+	case sharing.TargetViewer:
+		var info *sharing.ViewerInfo
+		if !direct && h.sharing.InfoShown(a) {
+			v := h.sharing.ViewerInfo(r.Context(), a, snap)
+			info = &v
+		}
+		h.pages.fileViewer(w, h.sharing, t.File, h.selfOrigin(a), base, info)
 	case sharing.TargetListing:
 		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), snap, t.Dir))
 	case sharing.TargetRedirect:
-		http.Redirect(w, r, t.Location, http.StatusMovedPermanently)
+		http.Redirect(w, r, base+t.Location, http.StatusMovedPermanently)
 	default:
 		h.pages.notFound(w)
 	}
 }
 
-// scriptable reports content types a browser runs scripts in when opened.
-func scriptable(contentType string) bool {
-	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
-	return ct == "text/html" || ct == "image/svg+xml" || ct == "application/xhtml+xml" || ct == "application/xml" || ct == "text/xml"
-}
-
-func (h *Handler) viewerOrigin(a *store.Artifact) string {
-	return h.cfg.ContentOrigin(ids.ViewerHost(a.Slug))
+// selfOrigin is the artifact's own origin, scheme://<slug>.<content domain>[:port].
+func (h *Handler) selfOrigin(a *store.Artifact) string {
+	return strings.TrimSuffix(h.cfg.ArtifactURL(a.Slug), "/")
 }
 
 func (h *Handler) sendFile(w http.ResponseWriter, r *http.Request, f *store.File, download bool) {
@@ -403,19 +436,15 @@ func (h *Handler) sendFile(w http.ResponseWriter, r *http.Request, f *store.File
 		return
 	}
 	defer fh.Close()
-	fileHeaders(w, f, `"`+f.Blob+`"`, download)
-	http.ServeContent(w, r, "", time.Time{}, fh)
-}
-
-func fileHeaders(w http.ResponseWriter, f *store.File, etag string, download bool) {
 	hd := w.Header()
 	hd.Set("Content-Type", f.ContentType)
-	hd.Set("ETag", etag)
+	hd.Set("ETag", `"`+f.Blob+`"`)
 	disposition := "inline"
 	if download {
 		disposition = "attachment"
 	}
 	hd.Set("Content-Disposition", disposition+"; filename*=UTF-8''"+url.PathEscape(path.Base(f.Path)))
+	http.ServeContent(w, r, "", time.Time{}, fh)
 }
 
 func (h *Handler) preview(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
@@ -463,7 +492,8 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 }
 
 // reservedPrefix is redrop's own path space on every content host: gates,
-// frame entry, viewer assets, icons. Artifacts can't upload under it.
+// previews, viewer assets, icons, and older versions' files. Artifacts can't
+// upload under it.
 const reservedPrefix = "/" + sharing.ReservedPrefix + "/"
 
 // fallbackIcons are the paths browsers request without being told to. On an
@@ -501,37 +531,22 @@ func (h *Handler) serveServerIcon(w http.ResponseWriter, r *http.Request) bool {
 // live) gets the identical default response and no lookup is made: free
 // icon requests cannot tell hits from misses. Icon requests never record or
 // consume a view.
-func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, host ids.Host) {
-	if snap, ok := h.provenIconSource(r, host); ok {
-		if t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind == sharing.TargetFile {
-			h.sendFile(w, r, t.File, false)
-			return
+func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
+	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
+	seen := h.cookieValue(r, cookieSeen)
+	if slug != "" && (grants.Visit != "" || grants.Preview != "" || seen != "") {
+		if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
+			d := h.sharing.Decide(a, grants, time.Now())
+			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
+			if proven {
+				if t := h.sharing.ResolvePath(r.Context(), sharing.CurrentSnapshot(a), r.URL.Path); t.Kind == sharing.TargetFile {
+					h.sendFile(w, r, t.File, false)
+					return
+				}
+			}
 		}
 	}
 	brand.Serve(w, r, strings.TrimPrefix(r.URL.Path, "/"), cacheFallbackIcon)
-}
-
-// provenIconSource returns the version whose own icon this visitor may get:
-// on a raw host, the one its raw cookie admits; on the shared link, the
-// current one when the visitor holds a visit or preview grant or the "seen"
-// cookie of an ungated link. Without such proof no lookup is made.
-func (h *Handler) provenIconSource(r *http.Request, host ids.Host) (sharing.Snapshot, bool) {
-	if host.IsRaw() {
-		acc, ok := h.rawAccess(r, host)
-		return acc.Snapshot, ok
-	}
-	grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
-	seen := h.cookieValue(r, cookieSeen)
-	if host.Slug() == "" || (grants.Visit == "" && grants.Preview == "" && seen == "") {
-		return sharing.Snapshot{}, false
-	}
-	a, err := h.sharing.Lookup(r.Context(), host.Slug())
-	if err != nil {
-		return sharing.Snapshot{}, false
-	}
-	d := h.sharing.Decide(a, grants, time.Now())
-	proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
-	return sharing.CurrentSnapshot(a), proven
 }
 
 // safeNext only allows same-host relative paths outside the reserved space.

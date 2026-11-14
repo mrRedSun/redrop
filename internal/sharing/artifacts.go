@@ -13,7 +13,6 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/blob"
-	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -403,14 +402,7 @@ func (s *Service) Preview(ctx context.Context, actor Actor, id string) (PreviewL
 	}
 	exp := time.Now().Add(previewTTL)
 	tok := s.previewSigner.Sign(previewTokenPayload(a), exp)
-	// Framed artifacts preview on their raw host: the dashboard frames the
-	// content directly, so the viewer page never needs to allow a framing
-	// ancestor.
-	host := ids.ViewerHost(a.Slug)
-	if s.Mode(a, CurrentSnapshot(a)) == ModeFramed {
-		host = ids.RawHost(a.Slug, 0)
-	}
-	return PreviewLink{URL: s.cfg.ContentOrigin(host) + "/" + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
+	return PreviewLink{URL: s.cfg.ArtifactURL(a.Slug) + ReservedPrefix + "/preview?t=" + tok, ExpiresAt: exp.UTC()}, nil
 }
 
 func (s *Service) Versions(ctx context.Context, actor Actor, id string) ([]Version, error) {

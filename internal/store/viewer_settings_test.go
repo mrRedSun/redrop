@@ -72,7 +72,7 @@ func TestViewerSettingsMigration(t *testing.T) {
 	}
 }
 
-// TestVersionNumbersNeverReused: a raw origin is pinned to a version number,
+// TestVersionNumbersNeverReused: links to an older version name its number,
 // so deleting the newest version must not let the next publish reuse it.
 func TestVersionNumbersNeverReused(t *testing.T) {
 	ctx := context.Background()

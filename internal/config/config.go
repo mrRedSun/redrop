@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
@@ -56,9 +55,6 @@ type Config struct {
 	// per client network: a burst, then a steady refill per minute.
 	ContentMissBurst     int
 	ContentMissPerMinute int
-	// ContentFrameEntries is how many viewer frames one client network may
-	// open (redeem an enter token for) per 2-minute window.
-	ContentFrameEntries int
 
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
@@ -231,9 +227,6 @@ func Load() (*Config, error) {
 	if c.ContentMissPerMinute, err = envPositiveInt("REDROP_CONTENT_MISS_PER_MINUTE", "5"); err != nil {
 		return nil, err
 	}
-	if c.ContentFrameEntries, err = envPositiveInt("REDROP_CONTENT_FRAME_ENTRIES", "200"); err != nil {
-		return nil, err
-	}
 
 	for _, cidr := range strings.FieldsFunc(env("REDROP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128"), func(r rune) bool { return r == ',' || r == ' ' }) {
 		if !strings.Contains(cidr, "/") {
@@ -290,18 +283,13 @@ func Load() (*Config, error) {
 // ContentHost returns the bare content domain (no port).
 func (c *Config) ContentHost() string { return c.ContentURL.Hostname() }
 
-// ArtifactURL builds https://<slug>.<content-domain>[:port]/, the shared link.
+// ArtifactURL builds https://<slug>.<content-domain>[:port]/.
 func (c *Config) ArtifactURL(slug string) string {
-	return c.ContentOrigin(ids.ViewerHost(slug)) + "/"
-}
-
-// ContentOrigin is scheme://<label>.<content-domain>[:port] for an artifact host.
-func (c *Config) ContentOrigin(h ids.Host) string {
-	host := h.Label() + "." + c.ContentURL.Hostname()
+	host := slug + "." + c.ContentURL.Hostname()
 	if p := c.ContentURL.Port(); p != "" {
 		host += ":" + p
 	}
-	return c.ContentURL.Scheme + "://" + host
+	return c.ContentURL.Scheme + "://" + host + "/"
 }
 
 // ContentFrameSource is the CSP source matching every artifact origin.

@@ -22,7 +22,7 @@ const schemaV2 = `ALTER TABLE artifacts ADD COLUMN info_button INTEGER;`
 
 // schemaV3 adds whether viewers may open older versions (off unless the owner
 // enables it); a version high-water mark, so each version number is used
-// once per artifact and a deleted version's raw origin never serves other
+// once per artifact and a saved ?redrop-version=N link never shows other
 // bytes; and whether a version's note may be shown to viewers. Notes written
 // before viewers could see them stay private (0); new notes are public.
 const schemaV3 = `ALTER TABLE artifacts ADD COLUMN viewer_old_versions INTEGER NOT NULL DEFAULT 0;

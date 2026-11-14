@@ -1,95 +1,108 @@
 // Unit test for the viewer page script (internal/content/static/viewer.js):
-// the address bar follows only this page's own frame. It runs the real
-// source in a VM against a minimal fake page.
+// the address bar follows the same-origin frame. It runs the real source in a
+// VM against a minimal fake page, without a browser.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import vm from 'node:vm'
 
 const source = readFileSync(new URL('../../internal/content/static/viewer.js', import.meta.url), 'utf8')
+const ORIGIN = 'https://amber-otter-quilt-river.usercontent.example'
 
-function page(version = '0') {
-  let now = 1_000_000
-  const listeners: Record<string, () => void> = {}
+type Listener = () => void
+
+function page(start = '/', src = '/') {
+  const top = new URL(start, ORIGIN)
+  const location = { origin: ORIGIN, pathname: top.pathname, search: top.search, hash: top.hash }
+  const frameListeners: Record<string, Listener> = {}
+  let win: { listeners: Record<string, Listener[]>; location: URL | null } = { listeners: {}, location: null }
   const frame = {
-    attrs: { 'data-stream': '/__redrop/location?s=t', 'data-version': version } as Record<string, string>,
-    getAttribute(k: string) { return this.attrs[k] ?? null },
-    addEventListener(type: string, fn: () => void) { listeners[type] = fn },
-  }
-  const streams: Array<{ onmessage?: (e: { data: string }) => void }> = []
-  const replaced: string[] = []
-  const location = { origin: 'https://amber-otter-quilt-river.usercontent.example', pathname: '/', search: '' }
-  class FakeDate extends Date {
-    static override now() { return now }
-  }
-  const context = vm.createContext({
-    window: { EventSource: true, Intl },
-    document: { querySelectorAll: () => [], getElementById: (id: string) => (id === 'rd-frame' ? frame : null) },
-    EventSource: class {
-      onmessage?: (e: { data: string }) => void
-      constructor(url: string) { assert.equal(url, '/__redrop/location?s=t'); streams.push(this) }
+    src,
+    getAttribute(k: string) { return k === 'src' ? src : null },
+    addEventListener(type: string, fn: Listener) { frameListeners[type] = fn },
+    get contentWindow() {
+      return {
+        get location() {
+          if (!win.location || win.location.origin !== ORIGIN) throw new Error('SecurityError: cross-origin frame')
+          return win.location
+        },
+        addEventListener(type: string, fn: Listener) {
+          if (!win.location || win.location.origin !== ORIGIN) throw new Error('SecurityError: cross-origin frame')
+          ;(win.listeners[type] ??= []).push(fn)
+        },
+      }
     },
+  }
+  const replaced: string[] = []
+  const context = vm.createContext({
+    window: { Intl },
+    document: { querySelectorAll: () => [], getElementById: (id: string) => (id === 'rd-frame' ? frame : null) },
     history: {
       state: null,
       replaceState(_s: unknown, _t: string, url: string) {
         replaced.push(url)
-        const u = new URL(url, location.origin)
+        const u = new URL(url, ORIGIN)
         location.pathname = u.pathname
         location.search = u.search
+        location.hash = u.hash
       },
+      pushState() { throw new Error('the viewer must never push history entries') },
     },
-    location, URL, Date: FakeDate, Intl, setInterval, clearInterval, Array,
+    location, URL, URLSearchParams, Date, Intl, setInterval, clearInterval, Array,
   })
   vm.runInContext(source, context)
   return {
-    report: (path: string) => streams[0]!.onmessage!({ data: path }),
-    load: () => listeners.load!(),
-    wait: (ms: number) => { now += ms },
+    frame,
     replaced,
+    // The frame loads a new document at url (a new window, no listeners).
+    load(url: string) {
+      win = { listeners: {}, location: new URL(url, ORIGIN) }
+      frameListeners.load!()
+    },
+    // Same document: a fragment or history change inside the frame.
+    fire(type: 'hashchange' | 'popstate', url: string) {
+      win.location = new URL(url, ORIGIN)
+      for (const fn of win.listeners[type] ?? []) fn()
+    },
   }
 }
 
-await test('a navigation in this frame moves the address bar when the frame loads', () => {
+await test('every frame load replaces the address bar with the frame path and query', () => {
   const p = page()
-  p.report('/b.html?x=1')
-  assert.deepEqual(p.replaced, [], 'nothing before the frame loads')
-  p.wait(300)
-  p.load()
-  assert.deepEqual(p.replaced, ['/b.html?x=1'])
+  p.load('/') // the first load: nothing changes
+  p.load('/b.html?x=1')
+  p.load('/docs/c.html')
+  assert.deepEqual(p.replaced, ['/b.html?x=1', '/docs/c.html'])
 })
 
-await test('a report arriving just after the frame loaded still applies', () => {
+await test('fragments and in-frame history are reflected', () => {
   const p = page()
-  p.load()
-  p.wait(200)
-  p.report('/c.html')
-  assert.deepEqual(p.replaced, ['/c.html'])
+  p.load('/a.html')
+  p.fire('hashchange', '/a.html#part-2')
+  p.fire('popstate', '/a.html')
+  p.fire('popstate', '/a.html?tab=2')
+  assert.deepEqual(p.replaced, ['/a.html', '/a.html#part-2', '/a.html', '/a.html?tab=2'])
 })
 
-await test('a nested frame or another tab never sets the address bar', () => {
-  const p = page()
-  p.load() // initial load
-  p.wait(5000)
-  p.report('/nested.html') // a nested frame navigated; this frame does not load
-  p.wait(6000) // the report expires
-  p.load() // a later, unreported load (e.g. scripted) must not use it
+await test('an older version shows as ?redrop-version=N; leaving it drops the parameter', () => {
+  const p = page('/a.html?x=1&redrop-version=3', '/__redrop/v/3/a.html?x=1')
+  p.load('/__redrop/v/3/a.html?x=1')
+  p.load('/__redrop/v/3/sub/b.html')
+  p.load('/root.html') // a root-absolute link leads to the current version
+  assert.deepEqual(p.replaced, ['/sub/b.html?redrop-version=3', '/root.html'])
+})
+
+await test('another origin and redrop pages leave the address bar alone', () => {
+  const p = page('/start.html')
+  p.load('https://elsewhere.example/page') // reading its location throws
+  p.load('/__redrop/open')
+  p.load('/__redrop/v/0/x.html')
   assert.deepEqual(p.replaced, [])
-  p.wait(5000)
-  p.report('/other-tab.html') // another tab's report arrives while this frame is idle
-  p.wait(10000)
-  assert.deepEqual(p.replaced, [])
 })
 
-await test('a load is used once; foreign paths are ignored; the old version stays selected', () => {
-  const p = page('3')
-  p.load()
-  p.wait(100)
-  p.report('/a.html')
-  p.report('/b.html') // a second report for the same load does not apply at once
-  assert.deepEqual(p.replaced, ['/a.html?redrop-version=3'])
-  for (const bad of ['//evil.example/x', '/\\evil.example', 'https://evil.example/', 'javascript:alert(1)']) {
-    p.report(bad)
-    p.load()
-  }
-  assert.deepEqual(p.replaced, ['/a.html?redrop-version=3'])
+await test('the visitor\'s fragment is handed to the frame', () => {
+  const p = page('/guide.html#install', '/guide.html')
+  assert.equal(p.frame.src, '/guide.html#install')
+  p.load('/guide.html#install')
+  assert.deepEqual(p.replaced, [])
 })

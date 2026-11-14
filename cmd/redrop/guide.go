@@ -86,26 +86,25 @@ chunked and resume automatically after network errors.
   to viewers; notes written before this release stay private ("redrop
   versions" marks public notes with *). It never shows who shared the page.
   HTML artifacts open in redrop's viewer: the artifact itself loads, byte for
-  byte as uploaded, in a full-page frame from a separate raw origin
-  (<slug>--raw.CONTENT-DOMAIN). The address bar follows links clicked inside
-  the frame; single-page-app route and hash changes are not reflected. Files
-  keep redrop's own file page. Your artifact needs nothing redrop-specific.
+  byte as uploaded, in a full-page frame on the same link. The address bar
+  follows the frame, including #fragments and Back/Forward inside it, but not
+  single-page-app route changes made with pushState. Files keep redrop's own
+  file page. Your artifact needs nothing redrop-specific. Because the frame
+  is on the same origin, the info panel is a convenience, not a security
+  boundary: a page could draw a fake one.
   --no-info on share, update, or set serves pages directly instead (no button,
   no frame); --info turns it back on (the server default is usually on).
   Append ?redrop-info=0 to a link for a direct, frameless view, e.g. for
   screenshots. It is remembered for 30 minutes when the link is opened
   directly (typed, bookmarked, opened from another app) or from the same page;
   when it is clicked on another website, only that page is direct.
-  ?redrop-info=1 goes back to the viewer. The address bar does not follow
-  clicks made in a frame nested inside your page or in an older tab of the
-  same link, nor Back and Forward inside the frame. In the frame, popups lose
-  window.opener, so sign-in popups that report back through it need the direct
-  view.
-- Service workers are not available to shared pages, and an SVG or HTML file
-  shared as a file is sandboxed when opened from its file page.
+  ?redrop-info=1 goes back to the viewer. curl, scripts and very old browsers
+  (no Fetch Metadata headers) always get the artifact directly.
+- Service workers are not available to shared pages.
 - Older versions: --old-versions lets viewers open earlier versions from the
   info panel (?redrop-version=N); --no-old-versions (the default) shows them
-  the list only.
+  the list only. Inside an older version, a root-absolute link (/x.html)
+  leads to the current version; relative links stay in the older one.
 - Links are unguessable, not indexed (noindex + robots.txt), and send no
   Referer to third parties. Unknown, expired, used-up and revoked links all
   answer the same "Not found", and clients that hit many of them are
