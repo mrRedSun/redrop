@@ -270,3 +270,79 @@ func TestWatchLocalErrorExitCode(t *testing.T) {
 		t.Fatalf("local error: %v", err)
 	}
 }
+
+// watch builds its source like share and update, so --render and --entry
+// reach the uploader, and an invalid mode is a usage error before any
+// network access.
+func TestWatchPassesRenderOptions(t *testing.T) {
+	t.Setenv("REDROP_URL", "http://redrop.example.com")
+	t.Setenv("REDROP_TOKEN", "rdp_test")
+	t.Setenv("REDROP_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	dir := t.TempDir()
+	note := writeCLIFile(t, dir, "notes.md", "# Notes\n")
+	site := filepath.Join(dir, "site")
+	if err := os.Mkdir(site, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, site, "README.md", "# Readme\n")
+	var got *client.Source
+	orig := watchArtifact
+	watchArtifact = func(_ context.Context, up client.Uploader, id string, src *client.Source, _ client.WatchOptions) error {
+		if _, ok := up.(*client.Client); !ok || id != "artifact-id" {
+			t.Errorf("uploader=%T id=%q", up, id)
+		}
+		got = src
+		return nil
+	}
+	defer func() { watchArtifact = orig }()
+
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		check func(*client.Prepared) bool
+	}{
+		{"none keeps the file raw", []string{note, "--render", "none"}, func(p *client.Prepared) bool {
+			return p.Kind == api.KindFile && p.Filename == "notes.md"
+		}},
+		{"markdown with an entry renders the folder", []string{site, "--render", "markdown", "--entry", "README.md"}, func(p *client.Prepared) bool {
+			return p.Kind == api.KindBundle && p.Entry == "index.html"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got = nil
+			captureCLIOutput(t, func() {
+				cmd := newRootCmd()
+				cmd.SetArgs(append([]string{"watch", "artifact-id"}, tc.args...))
+				if err := cmd.Execute(); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if got == nil {
+				t.Fatal("watch did not start")
+			}
+			if got.Warn == nil || got.OnSkipped != nil {
+				t.Errorf("warnings must be printed and skip counts not: Warn=%v OnSkipped=%v", got.Warn != nil, got.OnSkipped != nil)
+			}
+			p, err := client.Prepare(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if !tc.check(p) {
+				t.Fatalf("prepared kind=%s entry=%s filename=%s render=%q", p.Kind, p.Entry, p.Filename, got.Render)
+			}
+		})
+	}
+
+	t.Run("bogus mode", func(t *testing.T) {
+		got = nil
+		captureCLIOutput(t, func() {
+			cmd := newRootCmd()
+			cmd.SetArgs([]string{"watch", "artifact-id", note, "--render", "bogus"})
+			requireExitCode(t, cmd.Execute(), exitUsage)
+		})
+		if got != nil {
+			t.Fatal("watch started with an invalid render mode")
+		}
+	})
+}

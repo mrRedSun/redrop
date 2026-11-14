@@ -1056,3 +1056,33 @@ func TestWatchClassifiesRootRelativePaths(t *testing.T) {
 		t.Fatalf("publishError(%v) = %v; want a tree change", err, got)
 	}
 }
+
+// A directory whose name only the file rule matches ("drafts~") is packed,
+// so a new one is registered like registerAll would register it; a new
+// skip-named directory is not.
+func TestWatchRegistersNewDirectoriesLikeTheWalk(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	h := newHarness(t, &fakeUploader{}, dir)
+	for _, name := range []string{"drafts~", "node_modules"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		h.event(filepath.Join(dir, name), fsnotify.Create)
+	}
+	h.sync()
+	watched := map[string]bool{}
+	for _, p := range h.w.fw.WatchList() {
+		watched[p] = true
+	}
+	if !watched[filepath.Join(dir, "drafts~")] || watched[filepath.Join(dir, "node_modules")] {
+		t.Fatalf("watch list %v", h.w.fw.WatchList())
+	}
+	write(t, dir, "x~", "temp")
+	write(t, dir, ".#x", "temp")
+	for name, want := range map[string]bool{"drafts~": false, "node_modules": true, "x~": true, ".#x": true} {
+		if got := h.w.ignored(filepath.Join(dir, name)); got != want {
+			t.Errorf("ignored(%s)=%v; want %v", name, got, want)
+		}
+	}
+}

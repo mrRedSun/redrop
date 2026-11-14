@@ -812,3 +812,86 @@ func TestSymlinkRootIsConfinedToResolvedFolder(t *testing.T) {
 		t.Fatal("symlinked root digest differs from the resolved folder's")
 	}
 }
+
+// The skip rule runs before an entry is followed: an Emacs lock (a dangling
+// symlink) is skipped and counted without a warning, a node_modules link out
+// of the root is skipped without failing the upload, and a .git file (a
+// worktree or submodule link naming a local path) is skipped. hashTree
+// agrees with the pack.
+func TestSkipRuleAppliesBeforeFollowing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "page")
+	write(t, dir, ".git", "gitdir: /home/user/repo/.git/worktrees/site\n")
+	shared := t.TempDir()
+	write(t, shared, "node_modules/pkg/index.js", "module")
+	if err := os.Symlink("user@host.1234:1700000000", filepath.Join(dir, ".#index.html")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(shared, "node_modules"), filepath.Join(dir, "node_modules")); err != nil {
+		t.Fatal(err)
+	}
+	var warnings []string
+	skipped := 0
+	p, err := Prepare(&Source{Path: dir, Warn: func(w string) { warnings = append(warnings, w) }, OnSkipped: func(n int) { skipped = n }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	files, err := readPack(p.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(sortedKeys(files)) != "[index.html]" || len(warnings) != 0 || p.skipped != 2 {
+		t.Fatalf("files=%v warnings=%v skipped=%d (callback %d)", sortedKeys(files), warnings, p.skipped, skipped)
+	}
+	if want, err := hashTree(dir); err != nil || p.Digest != want {
+		t.Fatalf("hashTree=%s err=%v; pack digest %s", want, err, p.Digest)
+	}
+}
+
+// A skipped temp file that vanishes after its directory was listed is not a
+// source change: the walk never stats it.
+func TestSkippedFileVanishingMidWalk(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "a.html", "page")
+	for _, name := range []string{"z~", ".goutputstream-ABC123", "z.html___jb_tmp___"} {
+		write(t, dir, name, "temp")
+	}
+	p, err := Prepare(&Source{Path: dir, beforeRead: func(rel string) {
+		if rel == "a.html" {
+			for _, name := range []string{"z~", ".goutputstream-ABC123", "z.html___jb_tmp___"} {
+				if err := os.Remove(filepath.Join(dir, name)); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	}})
+	if err != nil {
+		t.Fatalf("vanished skipped files failed the pack: %v", err)
+	}
+	p.Close()
+}
+
+// A Markdown --entry the walk would skip is rejected, since the watch
+// digest and event filter could never see it.
+func TestMarkdownEntryMustNotBeSkipped(t *testing.T) {
+	dir := t.TempDir()
+	for _, entry := range []string{"notes~", ".#notes.md", "node_modules/readme.md", "docs/.git"} {
+		write(t, dir, entry, "# Notes\n")
+		_, err := Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: entry})
+		var usage *UsageError
+		if !errors.As(err, &usage) || !strings.Contains(err.Error(), "skip rule") {
+			t.Errorf("entry %s: err=%v; want a skip-rule usage error", entry, err)
+		}
+	}
+}
+
+// A single source that Prepare stat'ed and that is gone when opened was
+// deleted in between: a source change that share retries, not exit 2.
+func TestStatedSourceVanishedIsSourceChange(t *testing.T) {
+	_, err := openStatedSource(filepath.Join(t.TempDir(), "gone.md"))
+	var usage *UsageError
+	if !errors.Is(err, ErrSourceChanged) || errors.As(err, &usage) {
+		t.Fatalf("err=%v; want ErrSourceChanged without a usage error", err)
+	}
+}

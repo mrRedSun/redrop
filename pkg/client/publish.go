@@ -217,27 +217,27 @@ func Prepare(src *Source) (*Prepared, error) {
 		return p, nil
 	}
 
-	packed, err := newTemp()
+	out, err := newTemp()
 	if err != nil {
 		return fail(err)
 	}
 	switch {
 	case isDir:
-		p.Digest, p.skipped, err = packDir(srcPath, packed, walkHooks{warn: p.warn, beforeRead: src.beforeRead})
+		p.Digest, p.skipped, err = packDir(srcPath, out, walkHooks{warn: p.warn, beforeRead: src.beforeRead})
 	case strings.HasSuffix(lower, ".zip"):
-		p.Digest, err = zipToTarGz(srcPath, src.beforeRead, packed)
+		p.Digest, err = zipToTarGz(srcPath, src.beforeRead, out)
 	case strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm"):
-		p.Digest, err = packSingle(srcPath, "index.html", packed)
+		p.Digest, err = packSingle(srcPath, "index.html", out)
 	default:
-		p.Digest, err = packSingle(srcPath, name, packed)
+		p.Digest, err = packSingle(srcPath, name, out)
 	}
-	if cerr := packed.Close(); err == nil {
+	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		return fail(err)
 	}
-	p.File = packed.Name()
+	p.File = out.Name()
 	p.reportWarnings(src.Warn)
 	return p, nil
 }

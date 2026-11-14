@@ -76,6 +76,13 @@ CLI's usual exit codes.`,
 			if _, err := os.Stat(args[1]); err != nil {
 				return withCode(exitUsage, "cannot watch %s: %v", args[1], err)
 			}
+			// The same source as share and update: --render, --entry and
+			// warnings. Skipped-file counts are not printed on every publish.
+			src, err := cf.source(args[1])
+			if err != nil {
+				return err
+			}
+			src.OnSkipped = nil
 			c, err := newClient()
 			if err != nil {
 				return err
@@ -84,10 +91,8 @@ CLI's usual exit codes.`,
 			if err != nil {
 				return err
 			}
-			src := &client.Source{Path: args[1], Kind: cf.as, Entry: cf.entry, SPA: cf.spa, Note: cf.note}
-
 			opts := watchOptions(id, args[1], debounce)
-			err = client.Watch(cmd.Context(), c, id, src, opts)
+			err = watchArtifact(cmd.Context(), c, id, src, opts)
 			if err != nil {
 				return mapErr(err)
 			}
@@ -101,6 +106,9 @@ CLI's usual exit codes.`,
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
 	return cmd
 }
+
+// watchArtifact is client.Watch; tests replace it to inspect the source.
+var watchArtifact = client.Watch
 
 // watchOptions keeps streaming output separate from command validation.
 func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {

@@ -29,6 +29,14 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 		}
 		sourceName = src.Entry
 		base = path.Dir(sourceName)
+		// The walk skips these names, so the watch digest and event filter
+		// would never see the entry.
+		parts := strings.Split(sourceName, "/")
+		for i, part := range parts {
+			if skipEntryName(part, i < len(parts)-1) {
+				return nil, usageErrorf("--entry %s is excluded from folder uploads (%s matches the skip rule; see redrop guide)", sourceName, part)
+			}
+		}
 	} else if src.Entry != "" && src.Entry != "index.html" {
 		return nil, usageErrorf("rendered Markdown uses --entry index.html; share a directory to select a Markdown entry")
 	}
@@ -57,7 +65,7 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 		defer f.Close()
 		return packMarkdown(sourceName, base, f, root, src.beforeRead)
 	}
-	f, err := openSingleSource(srcPath)
+	f, err := openStatedSource(srcPath)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +107,7 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root, beforeRead
 		if root != nil {
 			p.Digest = result.digest.digest()
 		} else {
-			p.Digest = result.digest.entries[0].sum // the snapshot, as hashFile would hash it
+			p.Digest = result.digest.single()
 		}
 	}
 	if closeErr := f.Close(); err == nil {

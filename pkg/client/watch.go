@@ -2,8 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -451,9 +449,12 @@ func (w *watcher) markDirty(name string) {
 
 // ignored reports whether events for this name never affect published
 // content: any name outside the root (the parent watch sees siblings too)
-// and any name whose last component, or a parent component below the
-// root, matches the shared skip predicate (so .git/objects/... and
-// node_modules/... events are ignored too).
+// and any name the bundle walk skips, itself or through a parent below the
+// root (so .git/objects/... and node_modules/... events are ignored too).
+// Parents are directories. When the file and directory rules disagree on
+// the last component (a directory named "drafts~"), its type decides, as
+// in the walk; a name that is gone is not ignored, since it may have been
+// a directory with packed content.
 func (w *watcher) ignored(name string) bool {
 	rel, err := filepath.Rel(w.root, name)
 	if err != nil {
@@ -467,12 +468,26 @@ func (w *watcher) ignored(name string) bool {
 		return true // outside the root: only root events matter
 	}
 	parts := strings.Split(rel, "/")
-	for i, part := range parts {
-		if skipEntryName(part, i < len(parts)-1) {
+	for _, part := range parts[:len(parts)-1] {
+		if skipEntryName(part, true) {
 			return true
 		}
 	}
-	return false
+	last := parts[len(parts)-1]
+	asFile, asDir := skipEntryName(last, false), skipEntryName(last, true)
+	if asFile == asDir {
+		return asFile
+	}
+	info, err := os.Lstat(name)
+	switch {
+	case err != nil:
+		return false
+	case info.IsDir():
+		return asDir
+	case info.Mode()&fs.ModeSymlink != 0:
+		return true // the walk skips a link either rule names
+	}
+	return asFile
 }
 
 func (w *watcher) notify(n Notice) {
@@ -658,7 +673,7 @@ func (w *watcher) registerAll() error {
 func (w *watcher) watchTree(start string) error {
 	root, err := os.OpenRoot(w.root)
 	if err != nil {
-		return err
+		return filePathError(w.root, err, os.Lstat)
 	}
 	defer root.Close()
 	walk := &bundleWalk{fsys: root.FS(), dir: func(name string) error {
@@ -691,17 +706,16 @@ func scanTree(root string) (string, int, error) {
 	}
 	dir, err := os.OpenRoot(root)
 	if err != nil {
-		return "", 0, err
+		return "", 0, filePathError(root, err, os.Lstat)
 	}
 	defer dir.Close()
 	db := &treeDigestBuilder{}
 	walk := &bundleWalk{fsys: dir.FS(), file: func(name string, content io.Reader, size int64) error {
-		h := sha256.New()
-		if _, err := io.CopyN(h, content, size); err != nil {
-			return err
+		sum, err := copyHashed(io.Discard, content, size)
+		if err == nil {
+			db.add(name, sum)
 		}
-		db.add(name, hex.EncodeToString(h.Sum(nil)))
-		return nil
+		return err
 	}}
 	if err := walk.run("."); err != nil {
 		return "", 0, err
@@ -715,9 +729,5 @@ func hashFile(p string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return copyHashed(io.Discard, f, -1)
 }

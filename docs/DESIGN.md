@@ -436,7 +436,9 @@ network lookups or timestamps in the output.
   refuses an existing root `index.html`. Ordinary and Markdown bundles share one
   `fs.FS` packer, with the symlink, skip and regular-file rules in
   [Directory uploads](#directory-uploads). `--entry` is opened through the
-  same `os.OpenRoot`. Archive rendering is unsupported.
+  same `os.OpenRoot`. An `--entry` with a path component the skip rule
+  excludes is a usage error, since the watch digest and event filter could
+  never see it. Archive rendering is unsupported.
 - Sources are limited to 8 MiB. Unknown code languages and blocks over 64 KiB stay
   escaped plain text rather than invoking a lexer. Rendering does not support
   `--spa`. Invalid render options return a typed client usage error, mapped to
@@ -567,7 +569,8 @@ When `share`, `update`, or `watch` packs a directory, it skips:
 
 - Directories named `.git`, `.svn`, `.hg`, `node_modules`, `__pycache__`, or
   `.DS_Store`, including their contents.
-- Files named `.DS_Store` or `Thumbs.db`.
+- Files named `.git` (a worktree or submodule link, `gitdir: /abs/path`, which
+  would publish a local path), `.DS_Store`, or `Thumbs.db`.
 - Editor backups `*~`, Emacs locks `.#*`, and Emacs autosaves `#...#` only
   when the name is longer than two characters.
 - Hidden Vim swaps: dot-prefixed names ending in `.swa` to `.swp`, or `.swx`,
@@ -575,7 +578,14 @@ When `share`, `update`, or `watch` packs a directory, it skips:
 - JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
   `.goutputstream-*` files.
 
-File-name filters are case-insensitive; directory names match exactly.
+File-name filters are case-insensitive; directory names match exactly. The
+walk applies the rule before it follows an entry: a listed directory's own
+type picks the directory or file rule, and a symlink is skipped without being
+followed when either rule matches its name. An Emacs lock (`.#x`, a dangling
+symlink) is therefore skipped and counted rather than warned about, a
+`node_modules` link out of the folder does not fail the upload, and a skipped
+temp file that vanishes mid-walk is not a source change. The watch event
+filter decides a last path component the same way.
 Names `4913`, `#`, `##`, non-hidden `x.swp`, and hidden files such as
 `.logo.svg`, `.schema.sql`, `.subs.srt`, and `.key.sig` remain valid. Filtering applies
 only to entries inside directories. An explicitly named single file is always
@@ -614,7 +624,9 @@ paths and entry types.
 
 ### Watching an artifact
 
-`redrop watch ID|URL PATH` reuses the update path, debounces edits for 500ms by
+`redrop watch ID|URL PATH` reuses the update path, including the CLI's source
+construction, so `--render`, `--entry` and warnings behave as on `update` (the
+skipped-file count is not printed per publish). It debounces edits for 500ms by
 default, and publishes only changed content. The directory upload rule above
 applies. An explicitly named single file is not filtered. Uploads run one at
 a time, with one trailing publish for edits received during an upload.

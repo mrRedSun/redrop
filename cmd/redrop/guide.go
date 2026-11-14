@@ -60,10 +60,12 @@ PATH decides the kind (override with --as html|file|bundle):
   Other non-regular paths, such as a pipe from <(cmd), are rejected.
 - site.zip / site.tar.gz with --as bundle -> unpacked as a static site.
 
-Directory uploads (share, update, and watch) skip these entries:
+Folder rules (share, update, and watch; plain and Markdown folders alike).
+Folder uploads skip these entries:
 - Directories .git, .svn, .hg, node_modules, __pycache__, and .DS_Store,
   including their contents.
-- Files .DS_Store and Thumbs.db.
+- Files .git (a worktree or submodule link, which names a local path),
+  .DS_Store, and Thumbs.db.
 - Editor backups ending in ~, Emacs locks starting with .#, and Emacs
   autosaves #...# only when the name is longer than two characters.
 - Hidden Vim swaps: dot-prefixed names ending in .swa to .swp, or .swx,
@@ -71,16 +73,24 @@ Directory uploads (share, update, and watch) skip these entries:
 - JetBrains files ending in ___jb_tmp___ or ___jb_old___, and gedit files
   starting with .goutputstream-.
 File-name filters are case-insensitive; directory names match exactly.
+A symlink with a skipped name is skipped without being followed.
 Legitimate names 4913, #, ##, non-hidden x.swp, and hidden files such as
 .logo.svg, .schema.sql, .subs.srt, and .key.sig are kept. These rules apply
 only inside directories: an explicitly named single file is always uploaded.
 Share and update print one stderr line with the number of excluded file
 entries encountered, when nonzero. Files inside excluded directory trees
 are not counted. No skipped-file line is printed when the count is zero.
-A folder with no files to upload fails with exit code 2. A PATH that is a
-symlink is resolved once: a link to a folder uploads that folder, walked
-with the symlink rules below, and a link to a file uploads the target's
-bytes under the link's name.
+A folder with no files to upload fails with exit code 2.
+
+Symlinks inside a folder: relative links that stay inside it are followed;
+absolute, outside-root, and cyclic links are usage errors (exit 2). Broken
+links and non-regular entries (pipes, devices) are skipped with stderr
+warnings. A PATH that is itself a symlink is resolved once: a link to a
+folder uploads that folder under these rules, and a link to a file uploads
+the target's bytes under the link's name. Explicitly named single files
+follow symlinks normally, including absolute links or links into other
+directories. Sources and Markdown entries must resolve to regular files;
+Unix opens use nonblocking mode and re-check the descriptor before reading.
 
 Supplied .zip/.tar.gz bundle entries are not editor-filtered. A .zip is
 converted to tar.gz using the existing archive conventions: strip a common
@@ -88,7 +98,7 @@ top-level folder and omit ._* files, __MACOSX/ entries, and non-regular
 entries. A .tar.gz is passed through. The server still validates archive
 paths and entry types.
 
-Markdown options (also available on update):
+Markdown options (also available on update and watch):
 
     redrop share notes.md                         # auto-render .md
     redrop share notes.txt --render markdown       # force Markdown
@@ -103,14 +113,9 @@ relative image/link paths are rebased from that source to the root index.html.
 A single .md file does not upload siblings. Use a directory for local images.
 Archives are not rendered: unpack them into a directory first. Existing
 index.html files are never overwritten. --spa is not supported with rendering.
-Ordinary and Markdown directories share one confined packer, and watch hashes
-with the same walk. Relative symlinks
-within the directory are followed; outside-root, absolute, and cyclic links are
-usage errors. Broken asset symlinks and non-regular bundle entries are skipped
-with stderr warnings. Explicitly named single files follow symlinks normally,
-including absolute links or links into other directories. Only directory walks
-and --entry are root-confined. Sources and entries must resolve to regular files;
-Unix opens use nonblocking mode and re-check the descriptor before reading.
+Markdown folders follow the folder rules above, and --entry is confined to
+the folder the same way. An --entry that the skip rule excludes (such as
+notes.md~ or a path under node_modules) is a usage error.
 Missing local references in single-file uploads produce a stderr warning
 suggesting directory publishing. Rejected image sources produce a warning for
 both files and directories, once per distinct source, naming it and the local-image
@@ -215,8 +220,11 @@ e.g. amber-otter-quilt-river) works too.
 Watches PATH (a file or folder, same rules as update) and publishes a new
 version of the same link whenever the content changes: ideal while iterating
 on a page with an agent. Edits settle first (--debounce, default 500ms).
-The directory skip rule in Share applies; explicitly named files are still
-uploaded. Identical content publishes nothing. Each publish prints its
+The folder rules in Share apply; explicitly named files are still
+uploaded. --render, --entry, --as, --spa and --note work as on update, so a
+watched .md file is re-rendered on each change and --render none keeps it
+raw. Warnings print on stderr; the skipped-file count does not. Identical
+content publishes nothing. Each publish prints its
 version number and time. With --json, each publish or non-fatal notice is
 one JSON line:
 

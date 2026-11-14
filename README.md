@@ -82,14 +82,8 @@ highlighting and copy buttons, tables, task lists, blockquotes, and responsive
 light/dark styles. Share a directory with `--render markdown --entry PATH` to
 include images and links relative to the selected Markdown file. A single file
 never uploads its siblings. Directory rendering refuses an existing root
-`index.html` and does not support `--spa`. Ordinary and Markdown bundles use the
-same packer and follow relative symlinks only within the selected directory.
-Outside-root, absolute, and cyclic symlinks fail with usage errors. Broken asset
-symlinks and other non-regular bundle entries are skipped with stderr warnings.
-Explicitly named single files follow normal filesystem symlinks, including links
-into other directories; only directory walks and `--entry` are root-confined.
-Selected sources must resolve to regular files. Unix source and entry opens use
-nonblocking mode and re-check the descriptor to reject a swapped-in FIFO.
+`index.html` and does not support `--spa`. Markdown folders and `--entry` follow
+the [folder rules](#folder-uploads).
 Unpack archives before rendering.
 Missing local references in a single-file upload produce a stderr warning and a
 directory-publishing suggestion. Rejected image sources produce warnings for
@@ -105,15 +99,29 @@ The original download and other bundle files remain unmodified and untrusted. Ma
 to 8 MiB. Code blocks larger than 64 KiB and unknown languages stay plain text.
 Use `--render none` for larger sources.
 
+### Folder uploads
+
+`share`, `update` and `watch` pack plain and Markdown folders the same way.
+They skip VCS and dependency directories, OS metadata and editor temp files;
+the full skip rule is in `redrop guide` under Share and in
+[`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads). Relative symlinks are
+followed only within the selected folder. Outside-root, absolute, and cyclic
+symlinks fail with usage errors. Broken symlinks and other non-regular entries
+are skipped with stderr warnings. A `PATH` that is itself a symlink is resolved
+once and then walked as that folder. Explicitly named single files follow normal
+filesystem symlinks, including links into other directories. Selected sources
+must resolve to regular files. Unix source and entry opens use nonblocking mode
+and re-check the descriptor to reject a swapped-in FIFO.
+
 ### Watch for changes
 
 `redrop watch ID|URL PATH` republishes the artifact as a new version
 whenever the file or folder changes, debounced and deduplicated by content
 hash. It prints each version as it publishes; `--json` streams publish and
-typed notice events. Ctrl-C stops it. It takes the same content options as
-`update`, so a watched `.md` file is re-rendered on every change. Directory
-uploads use the skip rule in `redrop guide` under Share, also documented in
-[`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads).
+typed notice events. Ctrl-C stops it. It takes `update`'s content options
+(`--render`, `--entry`, `--as`, `--spa`, `--note`), so a watched `.md` file is
+re-rendered on every change and `--render none` keeps it raw. Folders follow
+the [folder rules](#folder-uploads).
 
 ## Develop
 

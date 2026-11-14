@@ -59,14 +59,48 @@ type bundleWalk struct {
 
 // run walks start ("." for the whole tree) and everything below it.
 func (b *bundleWalk) run(start string) error {
-	return b.walk(start, nil)
+	return b.walk(start, nil, nil)
 }
 
-func (b *bundleWalk) walk(name string, ancestors []fs.FileInfo) error {
+// skip applies the skip rule to name before anything follows it, so a
+// skipped entry is never stat'ed through a symlink, warned about, or
+// reported as changed. A directory entry's own type decides between the
+// file and directory rules; a symlink is not followed, and is skipped when
+// either rule matches its name. Skipped file entries are counted.
+func (b *bundleWalk) skip(name string, entry fs.DirEntry) bool {
+	if name == "." {
+		return false
+	}
+	if entry == nil { // a start below the root: its type is not listed yet
+		info, err := fs.Lstat(b.fsys, name)
+		if err != nil {
+			return false // the stat in walk reports it
+		}
+		entry = fs.FileInfoToDirEntry(info)
+	}
+	base := path.Base(name)
+	switch {
+	case entry.IsDir():
+		return skipEntryName(base, true)
+	case skipEntryName(base, false):
+		b.skipped++
+		return true
+	case entry.Type()&fs.ModeSymlink != 0:
+		return skipEntryName(base, true)
+	}
+	return false
+}
+
+// walk visits name. entry is how its directory listed it (nil for the
+// start), used to apply the skip rule before the entry is followed.
+func (b *bundleWalk) walk(name string, entry fs.DirEntry, ancestors []fs.FileInfo) error {
 	if b.claim != nil {
 		if claimed, err := b.claim(name); claimed || err != nil {
 			return err
 		}
+	}
+	if b.skip(name, entry) {
+		return nil
 	}
 	info, err := fs.Stat(b.fsys, name)
 	if err != nil {
@@ -81,12 +115,6 @@ func (b *bundleWalk) walk(name string, ancestors []fs.FileInfo) error {
 			}
 		}
 		return bundlePathError(b.fsys, name, err)
-	}
-	if name != "." && skipEntryName(path.Base(name), info.IsDir()) {
-		if !info.IsDir() {
-			b.skipped++
-		}
-		return nil
 	}
 	if info.IsDir() {
 		// SameFile detects real-directory cycles immediately. The depth
@@ -111,8 +139,8 @@ func (b *bundleWalk) walk(name string, ancestors []fs.FileInfo) error {
 			}
 			return bundlePathError(b.fsys, name, err)
 		}
-		for _, entry := range entries {
-			if err := b.walk(path.Join(name, entry.Name()), append(ancestors, info)); err != nil {
+		for _, child := range entries {
+			if err := b.walk(path.Join(name, child.Name()), child, append(ancestors, info)); err != nil {
 				return err
 			}
 		}
@@ -238,8 +266,8 @@ func packFS(fsys fs.FS, w io.Writer, hooks walkHooks, extras ...bundleFile) (*pa
 // skipEntryName is the single skip rule for publishable content: the
 // bundle walk (packing, the watch content digest, watch registration) and
 // the watch event filter all consult it, so they can never disagree about
-// what counts. Directories: VCS and dependency caches. Files: OS junk and
-// editor temp/swap/backup files (vim swaps .swp down to .swa plus .swx on
+// what counts. Directories: VCS and dependency caches. Files: a .git file
+// (worktrees and submodules), OS junk and editor temp/swap/backup files (vim swaps .swp down to .swa plus .swx on
 // dot-prefixed names, JetBrains ___jb_tmp___/___jb_old___, gedit
 // .goutputstream-*, *~ backups, emacs .# lock files and #…# autosave),
 // which never belong in a published artifact. Applied only to entries
@@ -255,6 +283,8 @@ func skipEntryName(base string, isDir bool) bool {
 	lower := strings.ToLower(base)
 	switch {
 	case lower == ".ds_store" || lower == "thumbs.db":
+		return true
+	case base == ".git": // a worktree or submodule link; it names a local path
 		return true
 	case strings.HasPrefix(lower, ".goutputstream-"): // gedit temp
 		return true
@@ -298,6 +328,17 @@ func (b *treeDigestBuilder) add(rel, sum string) {
 	b.entries = append(b.entries, digestEntry{rel, sum})
 }
 
+// single returns the hash of the only digested file, in the hashFile domain.
+// It is the digest of a pack of one explicitly named source: packSingle, or
+// single-file Markdown, where the Replace snapshot is the only digested
+// entry and generated files are not digested.
+func (b *treeDigestBuilder) single() string {
+	if len(b.entries) != 1 {
+		panic(fmt.Sprintf("single-source digest over %d entries", len(b.entries)))
+	}
+	return b.entries[0].sum
+}
+
 func (b *treeDigestBuilder) digest() string {
 	sort.Slice(b.entries, func(i, j int) bool { return b.entries[i].rel < b.entries[j].rel })
 	h := sha256.New()
@@ -329,7 +370,7 @@ func packDir(dir string, w io.Writer, hooks walkHooks) (string, int, error) {
 // packSingle packs one explicitly named file as a bundle and returns the
 // SHA-256 of the source bytes packed.
 func packSingle(src, name string, w io.Writer) (string, error) {
-	file, err := openSingleSource(src)
+	file, err := openStatedSource(src)
 	if err != nil {
 		return "", err
 	}
@@ -343,7 +384,7 @@ func packSingle(src, name string, w io.Writer) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return result.digest.entries[0].sum, nil
+	return result.digest.single(), nil
 }
 
 // addBundleFile writes one file into the tar and returns the SHA-256 of
@@ -352,8 +393,21 @@ func addBundleFile(tw *tar.Writer, name string, content io.Reader, size int64) (
 	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Typeflag: tar.TypeReg, Size: size}); err != nil {
 		return "", err
 	}
+	return copyHashed(tw, content, size)
+}
+
+// copyHashed copies n bytes of r to w (all of r when n < 0) and returns
+// the hex SHA-256 of the bytes copied.
+func copyHashed(w io.Writer, r io.Reader, n int64) (string, error) {
 	h := sha256.New()
-	if _, err := io.CopyN(io.MultiWriter(tw, h), content, size); err != nil {
+	dst := io.MultiWriter(w, h)
+	var err error
+	if n < 0 {
+		_, err = io.Copy(dst, r)
+	} else {
+		_, err = io.CopyN(dst, r, n)
+	}
+	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
