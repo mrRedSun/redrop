@@ -42,6 +42,9 @@ type Error struct {
 	Status int    `json:"status"`
 	Title  string `json:"title"`
 	Detail string `json:"detail"`
+	// RetryAfter is the server's minimum retry delay, parsed from the
+	// Retry-After header (delta-seconds or an HTTP date).
+	RetryAfter time.Duration `json:"-"`
 }
 
 func (e *Error) Error() string {
@@ -101,6 +104,7 @@ func (c *Client) send(req *http.Request, out any) error {
 			}
 		}
 		e.Status = resp.StatusCode
+		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return e
 	}
 	if out != nil && len(data) > 0 {
@@ -109,6 +113,21 @@ func (c *Client) send(req *http.Request, out any) error {
 		}
 	}
 	return nil
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		// Reject negatives and overflow instead of wrapping a large delay.
+		if seconds >= 0 && seconds <= int64((1<<63-1)/time.Second) {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {

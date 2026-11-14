@@ -50,9 +50,11 @@ that, run the installer without `REDROP_TOKEN`, then
 prompt. `redrop guide` explains everything else.
 
 `redrop watch ID|URL PATH` republishes the artifact as a new version
-whenever the file or folder changes (debounced, deduplicated by content
-hash), printing each version as it publishes — useful while iterating on a
-page. Ctrl-C stops it.
+whenever the file or folder changes, debounced and deduplicated by content
+hash. It prints each version as it publishes; `--json` streams publish and
+typed notice events. Ctrl-C stops it. Directory uploads use the skip rule in
+`redrop guide` under Share, also documented in
+[`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads).
 
 ## Develop
 

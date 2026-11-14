@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -33,6 +34,9 @@ type Source struct {
 	Entry string
 	SPA   bool
 	Note  string
+	// OnSkipped reports excluded file entries when preparing a directory.
+	// Excluded directory subtrees are not traversed or counted as files.
+	OnSkipped func(int)
 }
 
 // Prepared is a source packed into a single upload-ready file.
@@ -40,7 +44,14 @@ type Prepared struct {
 	File     string // path to upload
 	Kind     string
 	Filename string
-	cleanup  func()
+	// Digest is in the same domain as hashTree: sorted path/file hashes
+	// for a directory, or the source bytes' hash for an explicit file.
+	// It is computed as those bytes are read into the snapshot/pack.
+	Digest string
+	// Skipped is the number of file entries the folder walk excluded
+	// (editor/OS temp files); 0 for single-file sources.
+	Skipped int
+	cleanup func()
 }
 
 func (p *Prepared) Close() {
@@ -62,7 +73,9 @@ func DetectKind(name string, isDir bool) string {
 	return api.KindFile
 }
 
-// Prepare packs a Source into an upload-ready temporary file when needed.
+// Prepare snapshots a Source into upload-ready temporary files. File
+// content is immutable throughout hashing and upload, including when the
+// original path is overwritten by an editor during an upload.
 func Prepare(src *Source) (*Prepared, error) {
 	p := &Prepared{}
 	var tmpFiles []string
@@ -72,33 +85,35 @@ func Prepare(src *Source) (*Prepared, error) {
 		}
 	}
 	fail := func(err error) (*Prepared, error) { p.Close(); return nil, err }
+	newTemp := func() (*os.File, error) {
+		f, err := os.CreateTemp("", "redrop-source-*")
+		if err == nil {
+			tmpFiles = append(tmpFiles, f.Name())
+		}
+		return f, err
+	}
 
-	srcPath := src.Path
-	name := src.Name
+	srcPath, name := src.Path, src.Name
 	isDir := false
-	if src.Reader != nil {
+	var input io.Reader = src.Reader
+	if input != nil {
 		if name == "" {
 			return nil, errors.New("a file name is required when reading from stdin (use --name)")
 		}
-		tmp, err := os.CreateTemp("", "redrop-stdin-*")
-		if err != nil {
-			return nil, err
-		}
-		tmpFiles = append(tmpFiles, tmp.Name())
-		if _, err := io.Copy(tmp, src.Reader); err != nil {
-			tmp.Close()
-			return fail(err)
-		}
-		tmp.Close()
-		srcPath = tmp.Name()
 	} else {
 		st, err := os.Stat(srcPath)
 		if err != nil {
 			return nil, err
 		}
 		isDir = st.IsDir()
+		if !isDir && !st.Mode().IsRegular() {
+			return nil, errors.New("source must be a regular file or directory")
+		}
 		if name == "" {
-			abs, _ := filepath.Abs(srcPath)
+			abs, err := filepath.Abs(srcPath)
+			if err != nil {
+				return nil, err
+			}
 			name = filepath.Base(abs)
 		}
 	}
@@ -106,47 +121,66 @@ func Prepare(src *Source) (*Prepared, error) {
 	if kind == "" {
 		kind = DetectKind(name, isDir)
 	}
+	if kind != api.KindHTML && kind != api.KindFile && kind != api.KindBundle {
+		return nil, fmt.Errorf("unknown kind %q (use html, file, or bundle)", kind)
+	}
+	if isDir && kind != api.KindBundle {
+		return nil, fmt.Errorf("%s is a directory; share it as a bundle", srcPath)
+	}
 	p.Kind, p.Filename = kind, name
 
-	switch kind {
-	case api.KindHTML, api.KindFile:
-		if isDir {
-			return fail(fmt.Errorf("%s is a directory; share it as a bundle", srcPath))
-		}
-		p.File = srcPath
-	case api.KindBundle:
-		tmp, err := os.CreateTemp("", "redrop-bundle-*.tar.gz")
-		if err != nil {
-			return fail(err)
-		}
-		tmpFiles = append(tmpFiles, tmp.Name())
-		lower := strings.ToLower(name)
-		switch {
-		case isDir:
-			err = packDir(srcPath, tmp)
-		case strings.HasSuffix(lower, ".zip"):
-			err = zipToTarGz(srcPath, tmp)
-		case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):
-			var in *os.File
-			if in, err = os.Open(srcPath); err == nil {
-				_, err = io.Copy(tmp, in)
-				in.Close()
+	if !isDir {
+		if input == nil {
+			f, err := os.Open(srcPath)
+			if err != nil {
+				return nil, err
 			}
-		case strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm"):
-			err = packSingle(srcPath, "index.html", tmp)
-		default:
-			err = packSingle(srcPath, name, tmp)
+			defer f.Close()
+			input = f
 		}
-		if cerr := tmp.Close(); err == nil {
+		snapshot, err := newTemp()
+		if err != nil {
+			return nil, err
+		}
+		h := sha256.New()
+		_, err = io.Copy(snapshot, io.TeeReader(input, h))
+		if cerr := snapshot.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
 			return fail(err)
 		}
-		p.File = tmp.Name()
-	default:
-		return fail(fmt.Errorf("unknown kind %q (use html, file, or bundle)", kind))
+		srcPath = snapshot.Name()
+		p.File, p.Digest = srcPath, hex.EncodeToString(h.Sum(nil))
+		lower := strings.ToLower(name)
+		if kind != api.KindBundle || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") {
+			return p, nil
+		}
 	}
+
+	packed, err := newTemp()
+	if err != nil {
+		return fail(err)
+	}
+	switch {
+	case isDir:
+		p.Digest, p.Skipped, err = packDir(srcPath, packed)
+	case strings.HasSuffix(strings.ToLower(name), ".zip"):
+		err = zipToTarGz(srcPath, packed)
+	default:
+		entry := name
+		if strings.EqualFold(path.Ext(name), ".html") || strings.EqualFold(path.Ext(name), ".htm") {
+			entry = "index.html"
+		}
+		err = packSingle(srcPath, entry, packed)
+	}
+	if cerr := packed.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fail(err)
+	}
+	p.File = packed.Name()
 	return p, nil
 }
 
@@ -158,8 +192,11 @@ func skipEntry(rel string, d fs.DirEntry) bool {
 // packer, the watch content digest, and the watch event filter all consult
 // it, so they can never disagree about what counts. Directories: VCS and
 // dependency caches. Files: OS junk and editor temp/swap/backup files
-// (vim .swp/.swx and its 4913 probe, *~ backups, emacs .# lock files and
-// #*# autosave), which never belong in a published artifact.
+// (vim's swap range .swp through .saa plus .swx on dot-prefixed names,
+// JetBrains ___jb_tmp___/___jb_old___, gedit .goutputstream-*, *~
+// backups, emacs .# lock files and #…# autosave), which never belong in a
+// published artifact. Applied only to entries inside a directory: an
+// explicitly named single file is always published (m5).
 func skipEntryName(base string, isDir bool) bool {
 	if isDir {
 		switch base {
@@ -168,16 +205,45 @@ func skipEntryName(base string, isDir bool) bool {
 		}
 		return false
 	}
+	lower := strings.ToLower(base)
 	switch {
-	case base == ".DS_Store" || base == "Thumbs.db" || base == "4913":
+	case lower == ".ds_store" || lower == "thumbs.db":
 		return true
-	case strings.HasPrefix(base, ".#"), // emacs lock files
-		strings.HasPrefix(base, "#") && strings.HasSuffix(base, "#"),       // emacs autosave
-		strings.HasSuffix(base, "~"),                                       // editor backups
-		strings.HasSuffix(base, ".swp") || strings.HasSuffix(base, ".swx"): // vim swap
+	case strings.HasPrefix(lower, ".goutputstream-"): // gedit temp
+		return true
+	case strings.HasSuffix(lower, "___jb_tmp___"), // JetBrains safe-write
+		strings.HasSuffix(lower, "___jb_old___"):
+		return true
+	case strings.HasPrefix(base, ".#"): // emacs lock files
+		return true
+	case strings.HasPrefix(base, "#") && strings.HasSuffix(base, "#") && len(base) > 2: // emacs autosave
+		return true
+	case strings.HasSuffix(lower, "~"): // editor backups
+		return true
+	case vimSwapName(lower): // vim swap files on dot files
 		return true
 	}
 	return false
+}
+
+// vimSwapName matches vim's hidden swap-file names for dotfiles:
+// .file.swp, .file.swo, … down to .file.saa (vim counts the last letter
+// backwards), plus the rarer .swx. Only dot-prefixed names are matched so
+// a legitimate "site.map" style name is never dropped.
+func vimSwapName(lower string) bool {
+	if !strings.HasPrefix(lower, ".") {
+		return false
+	}
+	dot := strings.LastIndex(lower, ".")
+	if dot <= 0 || dot == len(lower)-1 {
+		return false
+	}
+	ext := lower[dot+1:]
+	// ext must be exactly s[a-w][a-z] (swp…saa) or swx.
+	if len(ext) != 3 || ext[0] != 's' {
+		return false
+	}
+	return (ext[1] >= 'a' && ext[1] <= 'w') && (ext[2] >= 'a' && ext[2] <= 'z') || ext == "swx"
 }
 
 // walkPackable walks the regular files under dir that the packer packs —
@@ -186,8 +252,8 @@ func skipEntryName(base string, isDir bool) bool {
 // path relative to dir, the walked path, and the followed file info; a
 // non-nil return from fn aborts the walk. It is the one walk behind both
 // packing and the watch content digest.
-func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) error {
-	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) (skipped int, err error) {
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -200,6 +266,7 @@ func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) 
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			skipped++
 			return nil
 		}
 		if d.IsDir() {
@@ -211,34 +278,71 @@ func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) 
 		}
 		return fn(rel, p, info)
 	})
+	return skipped, err
 }
 
-func packDir(dir string, w io.Writer) error {
+// treeDigestBuilder assembles the `path sha` digest that hashTree builds,
+// from hashes collected while packing, so a digest of what was packed is
+// available without re-reading files.
+type treeDigestBuilder struct {
+	entries []digestEntry
+}
+
+type digestEntry struct{ rel, sum string }
+
+func (b *treeDigestBuilder) add(rel, sum string) {
+	b.entries = append(b.entries, digestEntry{rel, sum})
+}
+
+func (b *treeDigestBuilder) digest() string {
+	sort.Slice(b.entries, func(i, j int) bool { return b.entries[i].rel < b.entries[j].rel })
+	h := sha256.New()
+	for _, e := range b.entries {
+		fmt.Fprintf(h, "%s %s\n", e.rel, e.sum)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func packDir(dir string, w io.Writer) (string, int, error) {
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
-	err := walkPackable(dir, func(rel, abs string, info fs.FileInfo) error {
-		return addFile(tw, abs, rel, info.Size())
+	db := &treeDigestBuilder{}
+	skipped, err := walkPackable(dir, func(rel, abs string, info fs.FileInfo) error {
+		sum, err := addFile(tw, abs, rel, info.Size())
+		if err != nil {
+			return err
+		}
+		db.add(rel, sum)
+		return nil
 	})
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	if err := tw.Close(); err != nil {
-		return err
+		return "", 0, err
 	}
-	return gz.Close()
+	if err := gz.Close(); err != nil {
+		return "", 0, err
+	}
+	return db.digest(), skipped, nil
 }
 
-func addFile(tw *tar.Writer, src, name string, size int64) error {
+// addFile streams one file into the tar and returns the SHA-256 of the
+// bytes actually read, so callers can digest content while packing.
+func addFile(tw *tar.Writer, src, name string, size int64) (string, error) {
 	f, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
 	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: size, Typeflag: tar.TypeReg}); err != nil {
-		return err
+		return "", err
 	}
-	_, err = io.CopyN(tw, f, size)
-	return err
+	h := sha256.New()
+	if _, err := io.CopyN(tw, io.TeeReader(io.LimitReader(f, size), h), size); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func packSingle(src, name string, w io.Writer) error {
@@ -248,7 +352,7 @@ func packSingle(src, name string, w io.Writer) error {
 	}
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
-	if err := addFile(tw, src, name, st.Size()); err != nil {
+	if _, err := addFile(tw, src, name, st.Size()); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
@@ -319,6 +423,9 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 		return nil, err
 	}
 	defer p.Close()
+	if p.Skipped > 0 && src.OnSkipped != nil {
+		src.OnSkipped(p.Skipped)
+	}
 	id, sum, err := c.UploadFile(ctx, p.File, progress)
 	if err != nil {
 		return nil, err
@@ -335,36 +442,24 @@ func (c *Client) Update(ctx context.Context, artifactID string, src *Source, pro
 	return a, err
 }
 
-// UpdateDigest is Update and also returns the SHA-256 of the exact bytes
-// it uploaded. Watch uses it so "what was hashed" and "what was packed"
-// can never diverge: the digest covers the packed content itself.
+// UpdateDigest is Update and also returns a content digest in the same
+// domain as hashTree: for folder bundles, the `path sha` digest of what
+// was actually packed; for an explicit file, the SHA-256 of its source
+// snapshot (including --as bundle and archives). The API separately gets
+// UploadFile's checksum of the transport blob.
 func (c *Client) UpdateDigest(ctx context.Context, artifactID string, src *Source, progress Progress) (string, *api.Artifact, error) {
 	p, err := Prepare(src)
 	if err != nil {
 		return "", nil, err
 	}
 	defer p.Close()
-	sum, err := fileSHA256(p.File)
+	if p.Skipped > 0 && src.OnSkipped != nil {
+		src.OnSkipped(p.Skipped)
+	}
+	id, blobSum, err := c.UploadFile(ctx, p.File, progress)
 	if err != nil {
 		return "", nil, err
 	}
-	id, _, err := c.UploadFile(ctx, p.File, progress)
-	if err != nil {
-		return "", nil, err
-	}
-	a, err := c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
-	return sum, a, err
-}
-
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	a, err := c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: blobSum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
+	return p.Digest, a, err
 }

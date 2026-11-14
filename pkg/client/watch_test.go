@@ -4,853 +4,596 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
-// fakeUploader records Update calls and can be programmed with failures.
+// The fake uses the real preparation path. In particular its return value
+// is Prepared.Digest, not an independently hashed live tree or a blob hash.
 type fakeUploader struct {
-	mu        sync.Mutex
-	updates   []string // relative paths recorded at each Update call
-	packs     [][]string
-	failures  []error // errors to return before successes, popped in order
-	inFlight  int     // current concurrent Update calls
-	maxInFlt  int     // high-water mark of concurrency
-	block     chan struct{}
-	artifacts []*api.Artifact
+	mu                    sync.Mutex
+	updates               int
+	packs                 [][]string
+	failures              []error
+	block                 <-chan struct{}
+	inFlight, maxInFlight int
 }
 
-// UpdateDigest records the packable files under the source path (so tests
-// can assert exactly what would be uploaded). Like the real client, it
-// snapshots the tree at call start (Prepare) — a mid-upload edit stays out
-// of the snapshot and therefore out of the returned digest, which is what
-// makes the trailing publish observable.
-func (f *fakeUploader) UpdateDigest(ctx context.Context, artifactID string, src *Source, progress Progress) (string, *api.Artifact, error) {
-	var names []string
-	if fi, err := os.Stat(src.Path); err == nil && !fi.IsDir() {
-		// A single-file source: the "pack" is the file itself.
-		if !skipEntryName(filepath.Base(src.Path), false) {
-			names = append(names, filepath.Base(src.Path))
+func (f *fakeUploader) UpdateDigest(ctx context.Context, id string, src *Source, _ Progress) (string, *api.Artifact, error) {
+	p, err := Prepare(src)
+	if err != nil {
+		return "", nil, err
+	}
+	defer p.Close()
+	names := []string{p.Filename}
+	if p.Kind == api.KindBundle {
+		files, err := readPack(p.File)
+		if err != nil {
+			return "", nil, err
 		}
-	} else {
-		_ = walkPackable(src.Path, func(rel, abs string, info fs.FileInfo) error {
-			names = append(names, rel)
-			return nil
-		})
+		names = sortedKeys(files)
 	}
-	snapshot, _ := hashTree(src.Path)
-
 	f.mu.Lock()
+	f.updates++
+	number := f.updates
+	f.packs = append(f.packs, names)
 	f.inFlight++
-	if f.inFlight > f.maxInFlt {
-		f.maxInFlt = f.inFlight
-	}
-	n := len(f.updates) + 1
-	f.updates = append(f.updates, src.Path)
+	f.maxInFlight = max(f.maxInFlight, f.inFlight)
 	block := f.block
+	var failure error
+	if len(f.failures) > 0 {
+		failure, f.failures = f.failures[0], f.failures[1:]
+	}
 	f.mu.Unlock()
+	defer func() { f.mu.Lock(); f.inFlight--; f.mu.Unlock() }()
 	if block != nil {
-		// A real upload aborts when the context ends; so must this.
 		select {
 		case <-block:
 		case <-ctx.Done():
-			f.mu.Lock()
-			f.inFlight--
-			f.mu.Unlock()
 			return "", nil, ctx.Err()
 		}
 	}
-	f.mu.Lock()
-	defer func() {
-		f.inFlight--
-		f.mu.Unlock()
-	}()
-	f.packs = append(f.packs, names)
-	if len(f.failures) > 0 {
-		err := f.failures[0]
-		f.failures = f.failures[1:]
-		return "", nil, err
+	if failure != nil {
+		return "", nil, failure
 	}
-	a := &api.Artifact{ID: artifactID, Version: n}
-	f.artifacts = append(f.artifacts, a)
-	return snapshot, a, nil
+	return p.Digest, &api.Artifact{ID: id, Version: number}, nil
 }
-
-func (f *fakeUploader) calls() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.updates)
-}
-
-// lastPack returns the file list of the most recent upload.
+func (f *fakeUploader) calls() int { f.mu.Lock(); defer f.mu.Unlock(); return f.updates }
 func (f *fakeUploader) lastPack() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.packs) == 0 {
-		return nil
-	}
-	return f.packs[len(f.packs)-1]
+	return append([]string(nil), f.packs[len(f.packs)-1]...)
 }
 
-// successes returns the number of completed (non-failed) updates.
-func (f *fakeUploader) successes() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.artifacts)
-}
-
-func (f *fakeUploader) concurrency() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.maxInFlt
-}
-
-// fakeClock drives debounce and backoff deterministically: After returns
-// channels the test fires in order, and firing advances Now.
+// All debounce/backoff and negative assertions run against this clock.
+// Real time is used only as a bounded failure timeout, never to establish
+// that an unchanged/ignored event does not publish.
 type fakeClock struct {
 	mu     sync.Mutex
 	now    time.Time
-	timers []*fakeTimer
+	timers []fakeTimer
+	armed  chan time.Duration
 }
-
 type fakeTimer struct {
-	fireAt time.Duration
-	ch     chan time.Time
+	at time.Time
+	ch chan time.Time
 }
 
 func newFakeClock() *fakeClock {
-	return &fakeClock{now: time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)}
+	return &fakeClock{now: time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC), armed: make(chan time.Duration, 128)}
 }
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
+func (c *fakeClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	t := &fakeTimer{fireAt: d, ch: make(chan time.Time, 1)}
-	c.timers = append(c.timers, t)
-	return t.ch
+	ch := make(chan time.Time, 1)
+	at := c.now.Add(d)
+	if d <= 0 {
+		ch <- c.now
+	} else {
+		c.timers = append(c.timers, fakeTimer{at, ch})
+	}
+	c.mu.Unlock()
+	c.armed <- d
+	return ch
 }
-
-// advance moves time forward by d, firing every pending timer whose
-// deadline is within d, in deadline order.
 func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Lock()
-	target := c.now.Add(d)
-	fired := make([]*fakeTimer, 0, len(c.timers))
-	remaining := c.timers[:0]
-	for _, t := range c.timers {
-		if !c.now.Add(t.fireAt).After(target) {
-			fired = append(fired, t)
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	pending := c.timers[:0]
+	for _, timer := range c.timers {
+		if timer.at.After(c.now) {
+			pending = append(pending, timer)
 		} else {
-			t.fireAt -= d // still pending, closer now
-			remaining = append(remaining, t)
+			timer.ch <- c.now
 		}
 	}
-	c.timers = remaining
-	c.now = target
-	c.mu.Unlock()
-	for _, t := range fired {
-		t.ch <- target
-	}
+	c.timers = pending
 }
 
-// pendingCount returns the number of unresolved fake timers.
-func (c *fakeClock) pendingCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.timers)
-}
-
-// pending reports whether any timer is still unresolved.
-func (c *fakeClock) pending() bool {
-	return c.pendingCount() > 0
-}
-
-// staticRetrier returns a fixed delay for every attempt.
 type staticRetrier struct{ d time.Duration }
 
 func (r staticRetrier) Next(int) time.Duration { return r.d }
 
-// watchOpts returns test options: a short real debounce and fast retries,
-// overridden with the fake clock where determinism matters.
-func watchOpts() WatchOptions {
-	return WatchOptions{
-		Debounce: 30 * time.Millisecond,
-		Retrier:  staticRetrier{20 * time.Millisecond},
+func receive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for watcher")
+		var zero T
+		return zero
+	}
+}
+func write(t *testing.T, dir, rel, contents string) {
+	t.Helper()
+	p := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+func atomicSave(t *testing.T, dir, rel, contents string) {
+	t.Helper()
+	write(t, dir, rel+".tmp-save", contents)
+	if err := os.Rename(filepath.Join(dir, rel+".tmp-save"), filepath.Join(dir, rel)); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// startWatch runs Watch with a ready channel and returns a stop function.
-// The returned function cancels and waits; cancellation exits nil.
-func startWatch(t *testing.T, up Uploader, root string, opts WatchOptions) (ready <-chan struct{}, stop func() error) {
+// An unbuffered event channel plus acknowledged error notices provides an
+// event-loop barrier. No sleeps are needed to wait for event consumption.
+type watchHarness struct {
+	t         *testing.T
+	w         *watcher
+	clk       *fakeClock
+	events    chan fsnotify.Event
+	errs      chan error
+	ack       chan struct{}
+	barrier   error
+	published chan WatchResult
+	notices   chan Notice
+	cancel    context.CancelFunc
+	done      chan error
+}
+
+func newHarness(t *testing.T, up Uploader, root string) *watchHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	readyCh := make(chan struct{})
-	opts.OnReady = func() { close(readyCh) }
-	src := &Source{Path: root}
-	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, up, "art", src, opts) }()
-	return readyCh, func() error {
+	fw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &watchHarness{t: t, clk: newFakeClock(), events: make(chan fsnotify.Event), errs: make(chan error), ack: make(chan struct{}), barrier: errors.New("test barrier"), published: make(chan WatchResult, 16), notices: make(chan Notice, 16), cancel: cancel, done: make(chan error, 1)}
+	ready := make(chan struct{})
+	h.w = &watcher{up: up, artifactID: "art", root: filepath.Clean(root), src: &Source{Path: root}, ctx: ctx, quit: ctx.Done(), fw: fw, events: h.events, errors: h.errs, opts: WatchOptions{Debounce: time.Second, Clock: h.clk, Retrier: staticRetrier{time.Second}, OnReady: func() { close(ready) }, OnPublish: func(r WatchResult) { h.published <- r }, OnNotice: func(n Notice) {
+		if n.Err == h.barrier {
+			h.ack <- struct{}{}
+		} else {
+			h.notices <- n
+		}
+	}}}
+	go func() { h.done <- h.w.run() }()
+	receive(t, ready)
+	t.Cleanup(func() {
 		cancel()
-		select {
-		case err := <-done:
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
-		case <-time.After(5 * time.Second):
-			t.Fatal("Watch did not return after cancel")
-			return nil
+		if err := receive(t, h.done); err != nil {
+			t.Errorf("watcher exit: %v", err)
 		}
-	}
+		fw.Close()
+	})
+	return h
 }
-
-func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+func (h *watchHarness) sync() {
+	h.t.Helper()
+	select {
+	case h.errs <- h.barrier:
+	case <-time.After(5 * time.Second):
+		h.t.Fatal("watcher failed to reach barrier")
 	}
-	t.Fatal("condition not met within timeout")
+	receive(h.t, h.ack)
 }
-
-func write(t *testing.T, dir, rel, content string) {
-	t.Helper()
-	p := filepath.Join(dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
+func (h *watchHarness) event(name string, op fsnotify.Op) {
+	h.t.Helper()
+	select {
+	case h.events <- fsnotify.Event{Name: name, Op: op}:
+	case <-time.After(5 * time.Second):
+		h.t.Fatal("watcher did not receive event")
 	}
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	h.sync()
 }
-
-// writeNew is write without t.Helper: usable inside goroutines.
-func writeNew(dir, rel, content string) error {
-	p := filepath.Join(dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(p, []byte(content), 0o644)
-}
-
-// atomicSave emulates an editor's safe write: temp file, rename over the
-// target. inotify drops a watch added directly on the old inode, which is
-// exactly what the parent-directory watch must survive.
-func atomicSave(t *testing.T, dir, rel, content string) {
-	t.Helper()
-	p := filepath.Join(dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tmp := p + ".tmp-save"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// --- HashTree ---
-
-func TestHashTreeStableAcrossMtimeAndOrder(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "b.txt", "bee")
-	write(t, dir, "a/c.txt", "sea")
-	h1, err := hashTree(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	past := time.Now().Add(-2 * time.Hour)
-	os.Chtimes(filepath.Join(dir, "b.txt"), past, past)
-	h2, err := hashTree(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if h1 != h2 {
-		t.Fatalf("hash changed with mtime only: %s -> %s", h1, h2)
-	}
-	write(t, dir, "a/c.txt", "bee") // same bytes, different path
-	h3, _ := hashTree(dir)
-	if h3 == h1 {
-		t.Fatal("path-level edit did not change the hash")
-	}
-}
-
-func TestHashTreeMatchesPackRules(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "keep.txt", "x")
-	write(t, dir, ".git/config", "git")
-	write(t, dir, "node_modules/pkg/index.js", "js")
-	write(t, dir, ".DS_Store", "junk")
-	write(t, dir, ".index.html.swp", "swap")
-	write(t, dir, "index.html~", "backup")
-	write(t, dir, ".#index.html", "lock")
-	write(t, dir, "#index.html#", "autosave")
-	h1, err := hashTree(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Everything skipped: touching them changes nothing.
-	write(t, dir, ".git/config", "changed")
-	write(t, dir, "node_modules/pkg/index.js", "changed2")
-	write(t, dir, ".index.html.swp", "swap2")
-	write(t, dir, "index.html~", "backup2")
-	h2, err := hashTree(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if h1 != h2 {
-		t.Fatal("skipped entries influenced the hash")
-	}
-	write(t, dir, "keep.txt", "y")
-	h3, _ := hashTree(dir)
-	if h3 == h1 {
-		t.Fatal("content change did not change the hash")
-	}
-	// A single file root hashes as itself.
-	f := filepath.Join(t.TempDir(), "one.html")
-	os.WriteFile(f, []byte("<p>hi</p>"), 0o644)
-	if _, err := hashTree(f); err != nil {
-		t.Fatal(err)
-	}
-	// A skipped single file root digests as empty content.
-	s := filepath.Join(t.TempDir(), "one.html~")
-	os.WriteFile(s, []byte("backup"), 0o644)
-	got, err := hashTree(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "" {
-		t.Fatalf("skipped single-file root digested to %q, want empty", got)
-	}
-}
-
-func TestHashTreeFollowsSymlinksLikePacker(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "page")
-	outside := t.TempDir()
-	os.WriteFile(filepath.Join(outside, "shared.css"), []byte("body{}"), 0o644)
-	if err := os.Symlink(filepath.Join(outside, "shared.css"), filepath.Join(dir, "shared.css")); err != nil {
-		t.Skip("symlinks unavailable")
-	}
-	h1, _ := hashTree(dir)
-	// The packer follows the symlink (os.Stat), so changing the target
-	// must change the digest.
-	os.WriteFile(filepath.Join(outside, "shared.css"), []byte("body{color:red}"), 0o644)
-	h2, _ := hashTree(dir)
-	if h1 == h2 {
-		t.Fatal("symlinked file content change not hashed; walk drifted from the packer")
-	}
-}
-
-// --- debounce and coalescing ---
-
-func TestWatchStartupDoesNotPublish(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	time.Sleep(200 * time.Millisecond)
-	if got := up.calls(); got != 0 {
-		t.Fatalf("startup published %d versions, want 0", got)
-	}
+func (h *watchHarness) advance(d time.Duration) {
+	h.t.Helper()
+	// After the first barrier, any timer from the previous event is armed.
+	h.sync()
+	h.clk.advance(d)
+	// The second barrier ensures a timer selected alongside the first
+	// barrier has completed its publish/hash pass before we assert counts.
+	h.sync()
+	h.sync()
 }
 
 func TestWatchDebounceCoalescesBursts(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")
 	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	// A burst of edits within the debounce window must publish once.
+	h := newHarness(t, up, dir)
 	for i := 0; i < 5; i++ {
-		write(t, dir, "index.html", fmt.Sprintf("burst-%d", i))
+		write(t, dir, "index.html", fmt.Sprintf("v%d", i+1))
+		h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+		h.advance(100 * time.Millisecond)
+		if up.calls() != 0 {
+			t.Fatal("published before restarted debounce elapsed")
+		}
 	}
-	waitFor(t, 2*time.Second, func() bool { return up.calls() >= 1 })
-	time.Sleep(150 * time.Millisecond) // catch late extra publishes
-	if got := up.calls(); got != 1 {
-		t.Fatalf("burst published %d times, want 1", got)
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatalf("burst made %d uploads", up.calls())
+	}
+	h.advance(time.Hour)
+	if up.calls() != 1 {
+		t.Fatal("late duplicate upload")
 	}
 }
 
-func TestWatchDebounceWithFakeClock(t *testing.T) {
+func TestWatchStartupAndIdenticalEdits(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "page.html", "same")
+	up := &fakeUploader{}
+	h := newHarness(t, up, dir)
+	h.advance(time.Hour)
+	if up.calls() != 0 {
+		t.Fatal("startup uploaded")
+	}
+	h.event(filepath.Join(dir, "page.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if up.calls() != 0 {
+		t.Fatal("identical content uploaded before first publish")
+	}
+	write(t, dir, "page.html", "new")
+	h.event(filepath.Join(dir, "page.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatalf("real edit uploads=%d", up.calls())
+	}
+	// The original regression occurred only AFTER the first publication.
+	write(t, dir, "page.html", "new")
+	h.event(filepath.Join(dir, "page.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatal("identical rewrite uploaded after publication")
+	}
+}
+
+func TestWatchIgnoresEditorAndDependencyChurn(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")
 	up := &fakeUploader{}
-	clk := newFakeClock()
-	opts := watchOpts()
-	opts.Clock = clk
-	ready, stop := startWatch(t, up, dir, opts)
-	defer stop()
-	<-ready
-
+	h := newHarness(t, up, dir)
+	for _, name := range []string{".index.html.swo", ".index.html.saa", ".index.html.swx", "index.html~", ".#index.html", "#index.html#", "index.html___jb_tmp___", "index.html___jb_old___", ".goutputstream-temp", ".git/index", "node_modules/pkg/index.js"} {
+		write(t, dir, name, "private")
+		h.event(filepath.Join(dir, name), fsnotify.Create)
+	}
+	h.advance(time.Hour)
+	if up.calls() != 0 {
+		t.Fatal("ignored changes published")
+	}
 	write(t, dir, "index.html", "v1")
-	// Let the watcher consume the event and arm its debounce timer, then
-	// advance half the window: nothing may publish yet.
-	waitFor(t, 2*time.Second, clk.pending)
-	clk.advance(15 * time.Millisecond)
-	if got := up.calls(); got != 0 {
-		t.Fatalf("published before the debounce window closed: %d", got)
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if names := up.lastPack(); len(names) != 1 || names[0] != "index.html" {
+		t.Fatalf("private files in upload: %v", names)
 	}
-	// A second edit restarts the window: the old timer is replaced by a
-	// fresh one, so wait for the count to change before advancing.
-	before := clk.pendingCount()
-	write(t, dir, "index.html", "v2")
-	waitFor(t, 2*time.Second, func() bool { return clk.pendingCount() != before })
-	time.Sleep(50 * time.Millisecond) // let the restarted window settle
-	clk.advance(15 * time.Millisecond)
-	if got := up.calls(); got != 0 {
-		t.Fatalf("restarted window published early: %d", got)
-	}
-	// The rest of the (restarted) window elapses: exactly one publish.
-	clk.advance(20 * time.Millisecond)
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	time.Sleep(100 * time.Millisecond)
-	if got := up.calls(); got != 1 {
-		t.Fatalf("coalesced edits published %d times, want 1", got)
-	}
+	// A skipped-looking explicitly named root is NOT ignored.
 }
 
-func TestWatchPublishesOnlyOnContentChange(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "page.html", "hello")
-	up := &fakeUploader{}
-	var pubMu sync.Mutex
-	var published []WatchResult
-	opts := watchOpts()
-	opts.OnPublish = func(r WatchResult) {
-		pubMu.Lock()
-		defer pubMu.Unlock()
-		published = append(published, r)
-	}
-	ready, stop := startWatch(t, up, dir, opts)
-	defer stop()
-	<-ready
-
-	// Rewrite the same bytes: no new version.
-	write(t, dir, "page.html", "hello")
-	time.Sleep(200 * time.Millisecond)
-	if got := up.calls(); got != 0 {
-		t.Fatalf("unchanged content published: %d calls", got)
-	}
-	// Real change: exactly one new version, reported via OnPublish.
-	write(t, dir, "page.html", "goodbye")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	pubMu.Lock()
-	defer pubMu.Unlock()
-	if len(published) != 1 {
-		t.Fatalf("OnPublish called %d times, want 1", len(published))
-	}
-	if published[len(published)-1].Version != 1 {
-		t.Fatalf("published version %d, want 1", published[len(published)-1].Version)
+func TestWatchExplicitBackupNamedFile(t *testing.T) {
+	for _, name := range []string{"notes~", ".page.swo", "#draft#", "4913"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, name, "before")
+			up := &fakeUploader{}
+			h := newHarness(t, up, filepath.Join(dir, name))
+			write(t, dir, name, "after")
+			h.event(filepath.Join(dir, name), fsnotify.Write)
+			h.advance(time.Second)
+			if up.calls() != 1 {
+				t.Fatalf("explicit file %s never uploaded", name)
+			}
+			h.event(filepath.Join(dir, "sibling"), fsnotify.Create)
+			h.advance(time.Hour)
+			if up.calls() != 1 {
+				t.Fatal("sibling uploaded")
+			}
+		})
 	}
 }
-
-// B2: swap and backup files must never reach the upload.
-func TestWatchSwapFilesNotUploaded(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	write(t, dir, ".index.html.swp", "swap-secret")
-	write(t, dir, "index.html~", "backup")
-	write(t, dir, ".#index.html", "lock")
-	write(t, dir, "#index.html#", "autosave")
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	write(t, dir, "index.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	pack := up.lastPack()
-	if len(pack) != 1 || pack[0] != "index.html" {
-		t.Fatalf("upload contains %v; want only [index.html] (swap/backup files leaked)", pack)
-	}
-	// Swap file churn (editing with vim open) must not publish either.
-	write(t, dir, ".index.html.swp", "swap-churn")
-	time.Sleep(200 * time.Millisecond)
-	if got := up.calls(); got != 1 {
-		t.Fatalf("swap file churn published: %d calls", got)
-	}
-}
-
-// --- single flight and trailing publish ---
 
 func TestWatchSingleFlightWithTrailingPublish(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")
 	block := make(chan struct{})
 	up := &fakeUploader{block: block}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
+	h := newHarness(t, up, dir)
 	write(t, dir, "index.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() >= 1 })
-
-	// More edits while the upload is in flight...
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	h.clk.advance(time.Second)
+	// A notice barrier is intentionally unavailable while an upload is in
+	// flight. Wait for the fake's snapshot, then edit that live source.
+	waitFor(t, func() bool { return up.calls() == 1 })
 	write(t, dir, "index.html", "v2")
-	// ...then unblock for good (all future uploads run straight through).
-	up.mu.Lock()
-	up.block = nil
-	up.mu.Unlock()
 	close(block)
-
-	// A trailing publish for the edits, then no more.
-	waitFor(t, 3*time.Second, func() bool { return up.calls() >= 2 })
-	time.Sleep(300 * time.Millisecond)
-	if got := up.calls(); got != 2 {
-		t.Fatalf("expected initial + one trailing publish, got %d calls", got)
+	receive(t, h.published)
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if up.calls() != 2 {
+		t.Fatalf("expected initial plus trailing, got %d", up.calls())
 	}
-	if up.concurrency() > 1 {
-		t.Fatalf("concurrent uploads observed: %d", up.concurrency())
+	h.advance(time.Hour)
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if up.updates != 2 || up.maxInFlight != 1 {
+		t.Fatalf("uploads=%d concurrency=%d", up.updates, up.maxInFlight)
 	}
 }
 
-// --- error classification ---
+// Polling is limited to a positive cross-goroutine milestone; no negative
+// assertion uses wall-clock delays.
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for !condition() {
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			t.Fatal("condition not reached")
+		}
+	}
+}
+
+func TestWatchRetryNoticesAndRetryAfter(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	up := &fakeUploader{failures: []error{&Error{Status: 429, RetryAfter: 10 * time.Second}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clk := newFakeClock()
+	notices := make(chan Notice, 1)
+	w := &watcher{ctx: ctx, quit: ctx.Done(), up: up, artifactID: "art", src: &Source{Path: dir},
+		opts: WatchOptions{Clock: clk, Retrier: staticRetrier{time.Second}, OnNotice: func(n Notice) { notices <- n }}}
+	done := make(chan error, 1)
+	go func() { _, _, err := w.publishWithRetry(); done <- err }()
+	notice := receive(t, notices)
+	if notice.Kind != NoticeRetry || notice.Attempt != 2 {
+		t.Fatalf("notice=%+v", notice)
+	}
+	if delay := receive(t, clk.armed); delay != 10*time.Second {
+		t.Fatalf("Retry-After ignored: %v", delay)
+	}
+	clk.advance(9 * time.Second)
+	if up.calls() != 1 {
+		t.Fatal("retried before Retry-After")
+	}
+	clk.advance(time.Second)
+	if err := receive(t, done); err != nil {
+		t.Fatal(err)
+	}
+	if up.calls() != 2 {
+		t.Fatal("retry never published")
+	}
+}
 
 func TestTransientClassification(t *testing.T) {
-	cases := map[error]bool{
-		&NetworkError{Err: errors.New("conn refused")}:  true,
-		&Error{Status: 500, Title: "internal"}:          true,
-		&Error{Status: 503, Title: "unavailable"}:       true,
-		&Error{Status: 429, Title: "too many requests"}: true,
-		&Error{Status: 401, Title: "unauthorized"}:      false,
-		&Error{Status: 403, Title: "forbidden"}:         false,
-		&Error{Status: 404, Title: "not found"}:         false,
-		&Error{Status: 413, Title: "too large"}:         false,
-		&Error{Status: 400, Title: "bad request"}:       false,
-		errors.New("weird"):                             false,
-	}
-	for err, want := range cases {
-		if got := transient(err); got != want {
-			t.Errorf("transient(%v) = %v, want %v", err, got, want)
+	for _, status := range []int{400, 401, 403, 404, 413, 422, 429, 500, 503} {
+		if got := transient(&Error{Status: status}); got != (status == 429 || status >= 500) {
+			t.Errorf("status=%d transient=%v", status, got)
 		}
 	}
+	if !transient(&NetworkError{Err: errors.New("offline")}) || transient(errors.New("invalid source")) {
+		t.Fatal("incorrect network/local error classification")
+	}
 }
-
 func TestExponentialRetrier(t *testing.T) {
-	r := ExponentialRetrier{Base: time.Second, Max: 60 * time.Second}
-	prev := time.Duration(0)
-	for attempt := 1; attempt <= 8; attempt++ {
-		d := r.Next(attempt)
-		if d < prev {
-			t.Errorf("attempt %d delay %v below previous %v", attempt, d, prev)
+	r := ExponentialRetrier{Base: time.Second, Max: time.Minute}
+	for attempt := 1; attempt <= 20; attempt++ {
+		nominal := min(time.Second*time.Duration(1<<min(attempt-1, 10)), time.Minute)
+		for i := 0; i < 10; i++ {
+			d := r.Next(attempt)
+			if d < nominal-nominal/10 || d > nominal {
+				t.Fatalf("attempt=%d delay=%v nominal=%v", attempt, d, nominal)
+			}
 		}
-		if d > r.Max+r.Max/4 {
-			t.Errorf("attempt %d delay %v exceeds max+jitter", attempt, d)
-		}
-		prev = d
 	}
-	if r.Next(100) > r.Max {
-		t.Errorf("uncapped delay %v", r.Next(100))
+	seen := map[time.Duration]bool{}
+	for i := 0; i < 20; i++ {
+		seen[r.Next(100)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatal("jitter disappeared at cap")
+	}
+	for _, r := range []ExponentialRetrier{{}, {Base: -1}, {Base: time.Nanosecond, Max: time.Nanosecond}, {Base: 1 << 62, Max: 1<<63 - 1}} {
+		if d := r.Next(100); d <= 0 {
+			t.Fatalf("invalid default/overflow delay %v", d)
+		}
 	}
 }
 
-func TestWatchRetriesTransientKeepsWatching(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{failures: []error{
-		&NetworkError{Err: errors.New("conn refused")},
-		&Error{Status: 503, Title: "unavailable"},
-		&Error{Status: 429, Title: "slow down"},
-	}}
-	clk := newFakeClock()
-	var logMu sync.Mutex
-	logged := 0
-	opts := watchOpts()
-	opts.Clock = clk
-	opts.Log = func(format string, a ...any) {
-		logMu.Lock()
-		defer logMu.Unlock()
-		logged++
+func TestWatchTypedErrorsAndNotices(t *testing.T) {
+	for _, kind := range []string{"events_closed", "errors_closed", "watch_error", "root_vanished", "rewatch_failed"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "index.html", "v0")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fw, err := fsnotify.NewWatcher()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fw.Close()
+			events := make(chan fsnotify.Event, 1)
+			errs := make(chan error, 1)
+			notices := make(chan Notice, 1)
+			w := &watcher{root: dir, ctx: ctx, quit: ctx.Done(), fw: fw, events: events, errors: errs, opts: WatchOptions{Clock: newFakeClock(), Debounce: time.Second, OnNotice: func(n Notice) { notices <- n }}}
+			switch kind {
+			case "events_closed":
+				close(events)
+				if err := w.waitEvent(0); !errors.Is(err, ErrWatchClosed) {
+					t.Fatalf("closed channel: %v", err)
+				}
+			case "errors_closed":
+				close(errs)
+				if err := w.waitEvent(0); !errors.Is(err, ErrWatchClosed) {
+					t.Fatalf("closed channel: %v", err)
+				}
+			case "watch_error":
+				errs <- errors.New("read failed")
+				if err := w.waitEvent(0); err != nil {
+					t.Fatal(err)
+				}
+				if n := receive(t, notices); n.Kind != NoticeWatchError || n.Attempt != 0 {
+					t.Fatalf("%+v", n)
+				}
+			case "root_vanished":
+				w.root = filepath.Join(dir, "missing")
+				if err := w.publishIfChanged(); err != nil {
+					t.Fatal(err)
+				}
+				if n := receive(t, notices); n.Kind != NoticeRootVanished || n.Attempt != 0 {
+					t.Fatalf("%+v", n)
+				}
+			case "rewatch_failed":
+				fw.Close()
+				w.onCreate(dir)
+				if n := receive(t, notices); n.Kind != NoticeRewatchFailed || n.Attempt != 0 {
+					t.Fatalf("%+v", n)
+				}
+			}
+		})
 	}
-	ready, stop := startWatch(t, up, dir, opts)
-	defer stop()
-	<-ready
-
-	write(t, dir, "index.html", "v1")
-	// Drive the three retry delays deterministically: close the debounce
-	// window, then after each failed attempt advance its retry timer.
-	waitFor(t, 2*time.Second, clk.pending)
-	clk.advance(50 * time.Millisecond)
-	for attempt := 1; attempt <= 3; attempt++ {
-		waitFor(t, 2*time.Second, func() bool { return up.calls() == attempt })
-		waitFor(t, 2*time.Second, clk.pending) // the retry timer for this failure
-		clk.advance(20 * time.Millisecond)
-	}
-	waitFor(t, 5*time.Second, func() bool { return up.successes() == 1 })
-	logMu.Lock()
-	n := logged
-	logMu.Unlock()
-	if n != 3 {
-		t.Fatalf("expected 3 retry logs, got %d", n)
-	}
-	// Watching continues after the retries: the next edit's debounce
-	// window is also on the fake clock.
-	before := clk.pendingCount()
-	write(t, dir, "index.html", "v2")
-	waitFor(t, 2*time.Second, func() bool { return clk.pendingCount() != before })
-	time.Sleep(50 * time.Millisecond) // let the restarted window settle
-	clk.advance(50 * time.Millisecond)
-	waitFor(t, 5*time.Second, func() bool { return up.successes() == 2 })
 }
 
-func TestWatchFatalErrorStops(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{failures: []error{&Error{Status: 401, Title: "unauthorized"}}}
+// Real fsnotify coverage is positive-only and synchronized with readiness
+// and publication callbacks, not startup sleeps.
+func runFilesystemWatch(t *testing.T, up Uploader, root string) (<-chan WatchResult, context.CancelFunc, <-chan error) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ready := make(chan struct{})
-	opts := watchOpts()
-	opts.OnReady = func() { close(ready) }
+	published := make(chan WatchResult, 16)
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, up, "art", &Source{Path: dir}, opts) }()
-	<-ready
-
-	write(t, dir, "index.html", "v1")
-	select {
-	case err := <-done:
-		var ae *Error
-		if !errors.As(err, &ae) || ae.Status != 401 {
-			t.Fatalf("want the 401 error back, got %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Watch kept running after a fatal error")
-	}
+	opts := WatchOptions{Debounce: 10 * time.Millisecond, OnReady: func() { close(ready) }, OnPublish: func(r WatchResult) { published <- r }}
+	go func() { done <- Watch(ctx, up, "art", &Source{Path: root}, opts) }()
+	receive(t, ready)
+	return published, cancel, done
 }
-
-// --- shutdown ---
-
-func TestWatchCancelDuringUploadExitsCleanly(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{block: make(chan struct{})}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	ready := make(chan struct{})
-	opts := watchOpts()
-	opts.OnReady = func() { close(ready) }
-	go func() { done <- Watch(ctx, up, "art", &Source{Path: dir}, opts) }()
-	<-ready
-
-	write(t, dir, "index.html", "v1") // trigger the blocked upload
-	waitFor(t, 2*time.Second, func() bool { return up.calls() >= 1 })
-	cancel()
-	select {
-	case err := <-done:
-		// m4: a clean shutdown returns nil, not context.Canceled.
-		if err != nil {
-			t.Fatalf("want nil on cancel during upload, got %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Watch did not exit on cancel during upload")
-	}
-}
-
-func TestWatchIdleCancelExitsZero(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	ready := make(chan struct{})
-	opts := watchOpts()
-	opts.OnReady = func() { close(ready) }
-	go func() { done <- Watch(ctx, up, "art", &Source{Path: dir}, opts) }()
-	<-ready
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("idle cancel returned %v, want nil", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("idle Watch did not exit on cancel")
-	}
-}
-
-// --- B1: rename-over saves, delete+recreate, root recreation ---
-
-func TestWatchRenameOverSavesFileRoot(t *testing.T) {
+func TestWatchAtomicSaveAndRecreateFileRoot(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "page.html", "v0")
 	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	// Two consecutive atomic saves must each publish.
-	atomicSave(t, dir, "page.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	atomicSave(t, dir, "page.html", "v2")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 2 })
-	// And an in-place write still works afterwards.
-	write(t, dir, "page.html", "v3")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 3 })
-}
-
-func TestWatchRenameOverSavesInsideDirRoot(t *testing.T) {
-	site := t.TempDir()
-	write(t, site, "index.html", "v0")
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, site, watchOpts())
-	defer stop()
-	<-ready
-
-	atomicSave(t, site, "index.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	atomicSave(t, site, "deep/new.css", "p{}") // rename into a new subdir
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 2 })
-}
-
-func TestWatchSingleFileRootByPath(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "page.html", "v0")
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, filepath.Join(dir, "page.html"), watchOpts())
-	defer stop()
-	<-ready
-
-	write(t, dir, "page.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	pack := up.lastPack()
-	if len(pack) != 1 || pack[0] != filepath.Base("page.html") && pack[0] != "page.html" {
-		t.Fatalf("single-file upload contains %v", pack)
+	pub, cancel, done := runFilesystemWatch(t, up, filepath.Join(dir, "page.html"))
+	defer func() {
+		cancel()
+		if err := receive(t, done); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	for i := 1; i <= 2; i++ {
+		atomicSave(t, dir, "page.html", fmt.Sprint(i))
+		receive(t, pub)
 	}
-	// A sibling file must not be published (it is not part of the root).
-	write(t, dir, "other.html", "x")
-	time.Sleep(200 * time.Millisecond)
-	if got := up.calls(); got != 1 {
-		t.Fatalf("sibling of file root published: %d calls", got)
+	if err := os.Remove(filepath.Join(dir, "page.html")); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestWatchDeleteAndRecreateFile(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "page.html", "v0")
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	os.Remove(filepath.Join(dir, "page.html"))
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
 	write(t, dir, "page.html", "recreated")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 2 })
+	receive(t, pub)
+	write(t, dir, "page.html", "still watching")
+	receive(t, pub)
+	if up.calls() != 4 {
+		t.Fatalf("atomic saves/recreation uploaded %d", up.calls())
+	}
 }
-
-func TestWatchDirRootRemovedAndRecreated(t *testing.T) {
+func TestWatchDirectoryRootRecreated(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "site")
 	write(t, root, "index.html", "v0")
 	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, root, watchOpts())
-	defer stop()
-	<-ready
-
-	write(t, root, "index.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	// Remove the whole root: nothing can be uploaded (the path is gone),
-	// but the watch must survive it...
-	os.RemoveAll(root)
-	time.Sleep(300 * time.Millisecond)
-	if got := up.calls(); got != 1 {
-		t.Fatalf("removal of the root published %d versions, want 1 (nothing to upload)", got)
-	}
-	// ...and the recreated root publishes as a normal change.
-	if err := writeNew(root, "index.html", "fresh"); err != nil {
-		t.Fatal(err)
-	}
-	waitFor(t, 3*time.Second, func() bool { return up.calls() == 2 })
-}
-
-// --- M1: unclean roots ---
-
-func TestWatchRelativeAndTrailingSlashRoots(t *testing.T) {
-	parent := t.TempDir()
-	root := filepath.Join(parent, "site")
-	write(t, root, "index.html", "v0")
-	write(t, root, "extra.css", "e")
-	up := &fakeUploader{}
-	// Deliberately unclean forms: trailing slash and ./ prefix.
-	ready, stop := startWatch(t, up, root+string(filepath.Separator), watchOpts())
-	defer stop()
-	<-ready
-
-	os.Remove(filepath.Join(root, "extra.css"))
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	if pack := up.lastPack(); len(pack) != 1 || pack[0] != "index.html" {
-		t.Fatalf("after delete, upload contains %v", pack)
-	}
-}
-
-// --- M2: skipped directories are not watched ---
-
-func TestWatchSkipsVCSAndDependencyDirs(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	for i := 0; i < 20; i++ {
-		write(t, dir, fmt.Sprintf(".git/objects/%02d", i), "x")
-		write(t, dir, fmt.Sprintf("node_modules/pkg%d/lib", i), "x")
-	}
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	// Activity under a skipped directory must not publish anything.
-	write(t, dir, ".git/objects/00", "churn")
-	write(t, dir, "node_modules/pkg0/lib", "churn")
-	time.Sleep(300 * time.Millisecond)
-	if got := up.calls(); got != 0 {
-		t.Fatalf("VCS/dependency churn published: %d calls", got)
-	}
-	// A real file still publishes exactly once, without the churn.
-	write(t, dir, "index.html", "v1")
-	waitFor(t, 2*time.Second, func() bool { return up.calls() == 1 })
-	pack := up.lastPack()
-	for _, name := range pack {
-		if strings.HasPrefix(name, ".git/") || strings.HasPrefix(name, "node_modules/") {
-			t.Fatalf("skipped directory content uploaded: %v", pack)
+	pub, cancel, done := runFilesystemWatch(t, up, root+"/")
+	defer func() {
+		cancel()
+		if err := receive(t, done); err != nil {
+			t.Fatal(err)
 		}
+	}()
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, "index.html", "recreated")
+	receive(t, pub)
+	write(t, root, "deep/nested/asset.css", "v1")
+	receive(t, pub)
+	atomicSave(t, root, "deep/nested/asset.css", "v2")
+	receive(t, pub)
+}
+func TestWatchUncleanRootDeletion(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	write(t, dir, "extra.css", "extra")
+	up := &fakeUploader{}
+	pub, cancel, done := runFilesystemWatch(t, up, dir+"/./")
+	defer func() {
+		cancel()
+		if err := receive(t, done); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Remove(filepath.Join(dir, "extra.css")); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, pub)
+	if names := up.lastPack(); len(names) != 1 || names[0] != "index.html" {
+		t.Fatalf("deleted file uploaded: %v", names)
+	}
+}
+func TestWatchRelativeRoot(t *testing.T) {
+	parent := t.TempDir()
+	write(t, parent, "site/index.html", "v0")
+	write(t, parent, "site/extra.css", "extra")
+	t.Chdir(parent)
+	up := &fakeUploader{}
+	pub, cancel, done := runFilesystemWatch(t, up, "./site/")
+	defer func() {
+		cancel()
+		if err := receive(t, done); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Remove("site/extra.css"); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, pub)
+	if names := up.lastPack(); len(names) != 1 || names[0] != "index.html" {
+		t.Fatalf("relative root deletion dropped: %v", names)
 	}
 }
 
-func TestWatchWatchListCount(t *testing.T) {
+func TestWatchSkippedDirectoriesNotRegistered(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")
 	for i := 0; i < 20; i++ {
-		write(t, dir, fmt.Sprintf(".git/objects/%02d", i), "x")
-		write(t, dir, fmt.Sprintf("node_modules/pkg%d/lib", i), "x")
+		write(t, dir, fmt.Sprintf(".git/objects/%d/file", i), "x")
+		write(t, dir, fmt.Sprintf("node_modules/pkg%d/lib/file", i), "x")
 	}
-	// watchTree is what registerAll uses; count its registrations
-	// directly, because the watcher's WatchList is not reachable from here.
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
@@ -859,72 +602,63 @@ func TestWatchWatchListCount(t *testing.T) {
 	if err := watchTree(fw, dir); err != nil {
 		t.Fatal(err)
 	}
-	// Only the root itself: none of the 42 skipped subdirectories.
-	if got := len(fw.WatchList()); got != 1 || fw.WatchList()[0] != dir {
-		t.Fatalf("watchTree registered %v; want only [%s]", fw.WatchList(), dir)
+	if paths := fw.WatchList(); len(paths) != 1 || paths[0] != dir {
+		t.Fatalf("registered skipped dirs: %v", paths)
 	}
 }
-
-func TestWatchOverflowReWalks(t *testing.T) {
-	// An fsnotify overflow error must mark the tree dirty and re-register
-	// the watches rather than being swallowed.
+func TestWatchOverflowRewalksAndHashesLostChanges(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")
 	up := &fakeUploader{}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	h := newHarness(t, up, dir)
+	// No normal file event is delivered: an overflow must find this change.
+	write(t, dir, "index.html", "lost event")
+	h.errs <- fsnotify.ErrEventOverflow
+	h.sync()
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatal("overflow lost content change")
+	}
+	if paths := h.w.fw.WatchList(); len(paths) != 2 {
+		t.Fatalf("missing root/parent after overflow: %v", paths)
+	}
+	h.errs <- fsnotify.ErrEventOverflow
+	h.sync()
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatal("unchanged overflow uploaded again")
+	}
+}
+func TestWatchShutdown(t *testing.T) {
+	for _, inFlight := range []bool{false, true} {
+		t.Run(fmt.Sprint(inFlight), func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "index.html", "v0")
+			up := &fakeUploader{}
+			if inFlight {
+				up.block = make(chan struct{})
+			}
+			_, cancel, done := runFilesystemWatch(t, up, dir)
+			defer cancel()
+			if inFlight {
+				write(t, dir, "index.html", "v1")
+				waitFor(t, func() bool { return up.calls() == 1 })
+			}
+			cancel()
+			if err := receive(t, done); err != nil {
+				t.Fatalf("cancel returned %v", err)
+			}
+		})
+	}
+}
+func TestWatchFatalError(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	up := &fakeUploader{failures: []error{&Error{Status: 401}}}
+	_, cancel, done := runFilesystemWatch(t, up, dir)
 	defer cancel()
-	ready := make(chan struct{})
-	opts := watchOpts()
-	opts.Clock = realClock{} // hand-built watcher skips Watch's defaults
-	opts.OnReady = func() { close(ready) }
-	done := make(chan error, 1)
-	// Inject an errors channel we control: build the watcher by hand.
-	fw, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fw.Close()
-	if err := watchTree(fw, dir); err != nil {
-		t.Fatal(err)
-	}
-	errs := make(chan error, 1)
-	w := &watcher{
-		up: up, artifactID: "art", root: dir,
-		src:  &Source{Path: dir},
-		opts: opts, ctx: ctx, fw: fw,
-		events: fw.Events, errors: errs,
-		quit: ctx.Done(),
-	}
-	go func() { done <- w.run() }()
-	<-ready
-
-	errs <- fsnotify.ErrEventOverflow
-	// The overflow handler re-walks the watches (root + parent) and marks
-	// the tree dirty; with unchanged content nothing publishes (the
-	// content-hash rule), but the next edit must still be seen.
-	waitFor(t, 2*time.Second, func() bool { return len(fw.WatchList()) == 2 })
-	time.Sleep(200 * time.Millisecond) // debounce for the overflow mark
-	if got := up.calls(); got != 0 {
-		t.Fatalf("overflow with unchanged content published %d versions", got)
-	}
 	write(t, dir, "index.html", "v1")
-	waitFor(t, 3*time.Second, func() bool { return up.calls() == 1 })
-	cancel()
-	<-done
-}
-
-func TestWatchNewSubdirectory(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{}
-	ready, stop := startWatch(t, up, dir, watchOpts())
-	defer stop()
-	<-ready
-
-	write(t, dir, "deep/nested/asset.css", "p{}")
-	waitFor(t, 3*time.Second, func() bool { return up.calls() == 1 })
-	// And a later change inside it too (the directory was added to the watch).
-	write(t, dir, "deep/nested/asset.css", "q{}")
-	waitFor(t, 3*time.Second, func() bool { return up.calls() == 2 })
+	if err := receive(t, done); StatusOf(err) != 401 {
+		t.Fatalf("expected 401, got %v", err)
+	}
 }

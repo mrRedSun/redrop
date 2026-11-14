@@ -5,13 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -39,13 +37,38 @@ type WatchOptions struct {
 	// and the initial content digest is seeded: changes made after OnReady
 	// are guaranteed to be picked up.
 	OnReady func()
-	// Log receives transient-failure notices (retried, not fatal).
-	Log func(format string, args ...any)
+	// OnNotice receives non-fatal watcher and retry notices (watch
+	// errors, retrying publishes, a vanished root). Kind distinguishes
+	// them; Attempt is set on KindRetry.
+	OnNotice func(Notice)
 	// Clock overrides timekeeping (tests). It drives both the debounce
 	// window and the retry delays.
 	Clock Clock
 	// Retrier overrides the transient-failure retry policy (tests).
 	Retrier Retrier
+}
+
+// NoticeKind labels the notices Watch reports through OnNotice.
+type NoticeKind string
+
+const (
+	// NoticeRetry: a publish failed transiently and will be retried.
+	NoticeRetry NoticeKind = "retry"
+	// NoticeWatchError: a non-fatal filesystem watcher error.
+	NoticeWatchError NoticeKind = "watch_error"
+	// NoticeRootVanished: the watched root disappeared; waiting for it.
+	NoticeRootVanished NoticeKind = "root_vanished"
+	// NoticeRewatchFailed: re-registering watches (e.g. after overflow)
+	// failed; watching continues with the old set.
+	NoticeRewatchFailed NoticeKind = "rewatch_failed"
+)
+
+// Notice is one non-fatal event during watching.
+type Notice struct {
+	Kind NoticeKind
+	// Attempt is the upcoming attempt number, set on KindRetry.
+	Attempt int
+	Err     error
 }
 
 // Clock is the subset of time Watch needs; injectable for deterministic
@@ -67,22 +90,34 @@ type Retrier interface {
 }
 
 // ExponentialRetrier grows the delay exponentially from Base up to Max,
-// with up to 25% jitter so many watchers on one host do not retry in
-// lockstep.
+// with jitter applied after the cap (a random value in [0.9d, d]) so even
+// many watchers at the cap do not retry in lockstep.
 type ExponentialRetrier struct {
 	Base, Max time.Duration
 }
 
 func (r ExponentialRetrier) Next(attempt int) time.Duration {
-	d := r.Base
-	for i := 1; i < attempt && d < r.Max; i++ {
-		d *= 2
+	base, limit := r.Base, r.Max
+	if base <= 0 {
+		base = time.Second
 	}
-	if d > r.Max {
-		d = r.Max
+	if limit <= 0 {
+		limit = time.Minute
 	}
-	jitter := time.Duration(rand.Int63n(int64(d) / 4))
-	return min(d+jitter, r.Max)
+	d := min(base, limit)
+	for i := 1; i < attempt && d < limit; i++ {
+		if d > limit/2 {
+			d = limit
+		} else {
+			d *= 2
+		}
+	}
+	// Apply jitter after capping, including during long outages. Very
+	// small injected delays must not call Int63n(0).
+	if spread := d / 10; spread > 0 {
+		return d - time.Duration(rand.Int63n(int64(spread)))
+	}
+	return d
 }
 
 // WatchResult reports one published version.
@@ -92,9 +127,10 @@ type WatchResult struct {
 	At       time.Time
 }
 
-// Uploader publishes a new version of an artifact and reports the digest
-// of the bytes it actually uploaded. *Client satisfies it through
-// UpdateDigest; tests use fakes.
+// Uploader publishes a new version and reports its source-content digest:
+// sorted path/file hashes for directory roots, or the raw source hash for
+// explicit files. It must match hashTree's domain, not the upload blob's
+// checksum. *Client implements this contract through UpdateDigest.
 type Uploader interface {
 	UpdateDigest(ctx context.Context, artifactID string, src *Source, progress Progress) (string, *api.Artifact, error)
 }
@@ -231,11 +267,14 @@ func (w *watcher) awaitSettled() error {
 			return err
 		}
 	}
-	for w.opts.Clock.Now().Before(w.quietAt) {
+	for {
 		if w.ctx.Err() != nil {
 			return context.Canceled
 		}
 		remaining := w.quietAt.Sub(w.opts.Clock.Now())
+		if remaining <= 0 {
+			break
+		}
 		if err := w.waitEvent(remaining); err != nil {
 			return err
 		}
@@ -273,7 +312,7 @@ func (w *watcher) waitEvent(timeout time.Duration) error {
 			}
 			return nil
 		}
-		w.logf("watch error: %v", err)
+		w.notify(Notice{Kind: NoticeWatchError, Err: err})
 		return nil
 	case ev, ok := <-w.events:
 		if !ok {
@@ -315,7 +354,7 @@ func (w *watcher) onCreate(name string) {
 		case w.root:
 			// The root directory was recreated: rebuild the whole watch.
 			if err := w.registerAll(); err != nil {
-				w.logf("re-watching %s failed: %v", name, err)
+				w.notify(Notice{Kind: NoticeRewatchFailed, Err: err})
 			}
 		case filepath.Dir(w.root):
 			// The parent changed; nothing to do beyond the dirty mark.
@@ -362,16 +401,15 @@ func (w *watcher) ignored(name string) bool {
 	return false
 }
 
-func (w *watcher) logf(format string, args ...any) {
-	if w.opts.Log != nil {
-		w.opts.Log(format, args...)
+func (w *watcher) notify(n Notice) {
+	if w.opts.OnNotice != nil {
+		w.opts.OnNotice(n)
 	}
 }
 
 // publishIfChanged publishes a version when the tree differs from the
-// last upload. The recorded state after an upload is the digest of the
-// packed bytes themselves (UpdateDigest), so "what was hashed" and "what
-// was uploaded" can never diverge.
+// last upload. UpdateDigest records the tree digest of the bytes actually
+// packed, using the same digest domain as hashTree.
 func (w *watcher) publishIfChanged() error {
 	sum, err := hashTree(w.root)
 	if err != nil {
@@ -382,7 +420,7 @@ func (w *watcher) publishIfChanged() error {
 			// and the recreated content publishes as a normal change
 			// (an identical recreation publishes nothing, which is the
 			// content-hash rule working as specified).
-			w.logf("%s disappeared; waiting for it to come back", w.root)
+			w.notify(Notice{Kind: NoticeRootVanished, Err: err})
 			return nil
 		}
 		return err
@@ -412,8 +450,13 @@ func (w *watcher) publishWithRetry() (string, *api.Artifact, error) {
 		if !transient(err) {
 			return "", nil, err
 		}
-		w.logf("publish failed (%v); retrying", err)
-		if !w.awaitRetry(w.opts.Retrier.Next(attempt)) {
+		delay := w.opts.Retrier.Next(attempt)
+		var apiErr *Error
+		if errors.As(err, &apiErr) && apiErr.Status == 429 {
+			delay = max(delay, apiErr.RetryAfter)
+		}
+		w.notify(Notice{Kind: NoticeRetry, Attempt: attempt + 1, Err: err})
+		if !w.awaitRetry(delay) {
 			return "", nil, context.Canceled
 		}
 	}
@@ -438,6 +481,9 @@ func (w *watcher) awaitRetry(d time.Duration) bool {
 // the root and its packable subdirectories. Skipped directories (.git,
 // node_modules, ...) are never registered: watching them would burn the
 // user's inotify budget and make every git command rehash the tree.
+// A directory renamed away can retain watches on the old inode until
+// shutdown. They may trigger harmless rehashes under the old path;
+// removing these stale registrations is left for a separate change.
 func (w *watcher) registerAll() error {
 	if fi, err := os.Stat(w.root); err == nil && !fi.IsDir() {
 		return w.fw.Add(filepath.Dir(w.root))
@@ -470,37 +516,30 @@ func watchTree(w *fsnotify.Watcher, dir string) error {
 // same files the packer would pack (one shared walk and skip predicate),
 // each path with the followed file's SHA-256, in sorted order. Identical
 // content hashes identically regardless of mtimes or traversal order, so
-// unchanged trees never publish.
+// unchanged trees never publish. The skip rule applies to entries inside
+// the tree; an explicitly named single-file root is always hashed (the
+// same rule `update` applies when publishing it).
 func hashTree(root string) (string, error) {
 	st, err := os.Stat(root)
 	if err != nil {
 		return "", err
 	}
 	if !st.IsDir() {
-		if skipEntryName(filepath.Base(root), false) {
-			return "", nil
-		}
 		return hashFile(root)
 	}
-	type entry struct{ rel, sum string }
-	var entries []entry
-	err = walkPackable(root, func(rel, abs string, info fs.FileInfo) error {
+	db := &treeDigestBuilder{}
+	_, err = walkPackable(root, func(rel, abs string, info fs.FileInfo) error {
 		sum, err := hashFile(abs)
 		if err != nil {
 			return err
 		}
-		entries = append(entries, entry{rel, sum})
+		db.add(rel, sum)
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
-	h := sha256.New()
-	for _, e := range entries {
-		fmt.Fprintf(h, "%s %s\n", e.rel, e.sum)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return db.digest(), nil
 }
 
 func hashFile(p string) (string, error) {

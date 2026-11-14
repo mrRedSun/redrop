@@ -50,11 +50,34 @@ PATH decides the kind (override with --as html|file|bundle):
   origin, so localStorage etc. are isolated.
 - directory      -> "bundle": a static site. index.html is the start page
   (change with --entry); without one, visitors get a file listing. Use --spa
-  for client-side routers. .git and node_modules are skipped.
+  for client-side routers.
 - any other file -> "file": a page with inline preview (image, video, audio,
   PDF, text/code) and a Download button.
 - "-"            -> read stdin; --name is required (e.g. --name report.html).
 - site.zip / site.tar.gz with --as bundle -> unpacked as a static site.
+
+Directory uploads (share, update, and watch) skip these entries:
+- Directories .git, .svn, .hg, node_modules, __pycache__, and .DS_Store,
+  including their contents.
+- Files .DS_Store and Thumbs.db.
+- Editor backups ending in ~, Emacs locks starting with .#, and Emacs
+  autosaves #...# only when the name is longer than two characters.
+- Hidden Vim swaps matching ^\..*\.s[a-w][a-z]$, including .page.swp,
+  .page.swo down to .page.saa, plus hidden .swx variants.
+- JetBrains files ending in ___jb_tmp___ or ___jb_old___, and gedit files
+  starting with .goutputstream-.
+File-name filters are case-insensitive; directory names match exactly.
+Legitimate names 4913, #, ##, and non-hidden x.swp are kept. These rules apply
+only inside directories: an explicitly named single file is always uploaded.
+Share and update print one stderr line with the number of excluded file
+entries encountered, when nonzero. Files inside excluded directory trees
+are not counted. No skipped-file line is printed when the count is zero.
+
+Supplied .zip/.tar.gz bundle entries are not editor-filtered. A .zip is
+converted to tar.gz using the existing archive conventions: strip a common
+top-level folder and omit ._* files, __MACOSX/ entries, and non-regular
+entries. A .tar.gz is passed through. The server still validates archive
+paths and entry types.
 
 The first line of normal output is "url: <link>". With --quiet, only the URL
 (and a generated password on the next line) is printed. With --json you get
@@ -108,23 +131,28 @@ e.g. amber-otter-quilt-river) works too.
 
 Watches PATH (a file or folder, same rules as update) and publishes a new
 version of the same link whenever the content changes: ideal while iterating
-on a page with an agent. Edits settle first (--debounce, default 500ms);
-editor temp/swap/backup files, .git, and node_modules are excluded from the
-upload itself; identical content publishes nothing. Each publish prints the
-version number and its time, or one JSON line per publish or retry with
---json:
+on a page with an agent. Edits settle first (--debounce, default 500ms).
+The directory skip rule in Share applies; explicitly named files are still
+uploaded. Identical content publishes nothing. Each publish prints its
+version number and time. With --json, each publish or non-fatal notice is
+one JSON line:
 
     {"event":"publish","id":"…","version":3,"url":"https://…","at":"…"}
-    {"event":"retry","id":"…","error":"cannot reach server: …","at":"…"}
+    {"event":"retry","id":"…","attempt":2,"error":"cannot reach server: …","at":"…"}
+
+Other notice events are watch_error, root_vanished, and rewatch_failed.
+Each includes id and at, plus error when available; only retry has attempt,
+the upcoming upload attempt number (2 for the first retry).
 
 Never two uploads at once; changes that land during an upload are published
 once more afterwards. Atomic editor saves (write temp file, rename) and
 delete+recreate are handled. Ctrl-C or SIGTERM stops watching and exits 0.
-Network errors, rate limiting, and server errors are retried with
-exponential backoff (1s to 60s); auth or not-found errors stop with exit
-codes 3/4. New subdirectories are picked up automatically. A watch session
-creates many versions; rely on the server's version retention
-(REDROP_KEEP_VERSIONS) or roll back with "redrop rollback" — there is
+Network errors, rate limiting, and server errors are retried with nominal
+exponential backoff from 1s to 60s, with jitter below the cap. Rate-limit
+responses honor Retry-After when supplied. Auth or not-found errors stop
+with exit codes 3/4. New subdirectories are picked up automatically. A watch
+session creates many versions; rely on the server's version retention
+(REDROP_KEEP_VERSIONS) or roll back with "redrop rollback". There is
 deliberately no way to rewrite a published version.
 
 ## Exit codes

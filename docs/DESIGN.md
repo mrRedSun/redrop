@@ -211,3 +211,50 @@ environment variables. Setting `REDROP_TOKEN` for the installer
 (`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
 command when a token is created. Every command supports `--json`; exit codes are stable
 (see `redrop guide`). The Go package `pkg/client` is the same client as a library.
+
+### Directory uploads
+
+When `share`, `update`, or `watch` packs a directory, it skips:
+
+- Directories named `.git`, `.svn`, `.hg`, `node_modules`, `__pycache__`, or
+  `.DS_Store`, including their contents.
+- Files named `.DS_Store` or `Thumbs.db`.
+- Editor backups `*~`, Emacs locks `.#*`, and Emacs autosaves `#...#` only
+  when the name is longer than two characters.
+- Hidden Vim swaps matching `^\..*\.s[a-w][a-z]$`, such as `.page.swp`,
+  `.page.swo` down to `.page.saa`, plus hidden `.swx` variants.
+- JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
+  `.goutputstream-*` files.
+
+File-name filters are case-insensitive; directory names match exactly.
+Names `4913`, `#`, `##`, and non-hidden `x.swp` remain valid. Filtering applies
+only to entries inside directories. An explicitly named single file is always
+uploaded, even when its name matches a filter. `share` and `update` print one
+stderr line with the number of excluded file entries encountered, when
+nonzero. They do not count files inside excluded directory trees, and print
+no skipped-file line when the count is zero. This notice never changes their
+stdout JSON.
+
+Archive entries supplied with `--as bundle` are not editor-filtered. ZIP input
+is converted to tar.gz using the existing archive conventions: strip a common
+top-level folder and omit `._*` files, `__MACOSX/` entries, and non-regular
+entries. tar.gz input is passed through. The server still validates archive
+paths and entry types.
+
+### Watching an artifact
+
+`redrop watch ID|URL PATH` reuses the update path, debounces edits for 500ms by
+default, and publishes only changed content. The directory upload rule above
+applies. An explicitly named single file is not filtered. Uploads run one at
+a time, with one trailing publish for edits received during an upload.
+
+With `--json`, each publish or non-fatal notice is one compact JSON line.
+Events are `publish`, `retry`, `watch_error`, `root_vanished`, and
+`rewatch_failed`. Every event has `id` and `at`. Publishes also have `version`
+and `url`; notices include `error` when available, and retries include
+`attempt`, the upcoming upload attempt number, starting at 2 for the first
+retry. Transient failures use nominal exponential backoff from 1s to 60s,
+with jitter below the cap, and rate-limit responses honor `Retry-After`.
+Authentication and not-found errors use the normal CLI exit codes. Cancellation
+returns success. The command creates immutable versions; it does not squash
+history or inject live-reload code into uploaded artifacts.

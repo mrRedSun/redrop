@@ -219,7 +219,7 @@ func (f *contentFlags) register(cmd *cobra.Command) {
 }
 
 func (f *contentFlags) source(arg string) (*client.Source, error) {
-	src := &client.Source{Kind: f.as, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note}
+	src := &client.Source{Kind: f.as, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, OnSkipped: reportSkippedFiles}
 	if arg == "-" {
 		if f.name == "" {
 			return nil, withCode(exitUsage, "--name is required when reading from stdin (e.g. --name report.html)")
@@ -232,6 +232,12 @@ func (f *contentFlags) source(arg string) (*client.Source, error) {
 		src.Path = arg
 	}
 	return src, nil
+}
+
+func reportSkippedFiles(n int) {
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "redrop: skipped %d file%s from folder upload\n", n, plural(n))
+	}
 }
 
 func shareCmd() *cobra.Command {
