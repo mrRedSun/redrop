@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -42,6 +43,9 @@ type Error struct {
 	Status int    `json:"status"`
 	Title  string `json:"title"`
 	Detail string `json:"detail"`
+	// RetryAfter is the server's minimum retry delay, parsed from the
+	// Retry-After header (delta-seconds or an HTTP date).
+	RetryAfter time.Duration `json:"-"`
 }
 
 func (e *Error) Error() string {
@@ -101,6 +105,7 @@ func (c *Client) send(req *http.Request, out any) error {
 			}
 		}
 		e.Status = resp.StatusCode
+		e.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		return e
 	}
 	if out != nil && len(data) > 0 {
@@ -109,6 +114,21 @@ func (c *Client) send(req *http.Request, out any) error {
 		}
 	}
 	return nil
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		// Reject negatives and overflow instead of wrapping a large delay.
+		if seconds >= 0 && seconds <= int64((1<<63-1)/time.Second) {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
@@ -218,8 +238,17 @@ func (c *Client) ListViews(ctx context.Context, id string) ([]api.View, error) {
 // Progress receives upload progress.
 type Progress func(sent, total int64)
 
+// ErrSourceChanged reports that a source file changed while it was being
+// read for packing or upload, so the bytes read are not one consistent
+// version of it. Share and Update retry once; Watch waits for the tree to
+// settle and tries again.
+var ErrSourceChanged = errors.New("source changed while it was being read")
+
 // UploadFile performs a resumable chunked upload of path and returns the
-// upload ID and SHA-256 to pass to CreateArtifact/CreateVersion.
+// upload ID and SHA-256 to pass to CreateArtifact/CreateVersion. The
+// checksum is taken before the upload and checked against the bytes
+// actually sent; a mismatch (the file changed mid-upload) returns an error
+// wrapping ErrSourceChanged.
 func (c *Client) UploadFile(ctx context.Context, path string, progress Progress) (string, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -232,10 +261,13 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 	}
 	size := st.Size()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if n, err := io.Copy(h, io.NewSectionReader(f, 0, size)); err != nil {
 		return "", "", err
+	} else if n != size {
+		return "", "", fmt.Errorf("%w: %s shrank before upload", ErrSourceChanged, path)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
+	sent := &sentHash{h: sha256.New()}
 
 	var up api.Upload
 	if err := c.do(ctx, http.MethodPost, "/api/v1/uploads", &api.CreateUploadRequest{Size: size}, &up); err != nil {
@@ -252,7 +284,15 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 		if size-offset < n {
 			n = size - offset
 		}
-		req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/uploads/"+esc(up.ID)+"?offset="+strconv.FormatInt(offset, 10), io.NewSectionReader(f, offset, n))
+		if offset < sent.next {
+			// Resuming below what was already hashed: the bytes from
+			// offset on are sent again and may differ from those hashed.
+			if err := sent.rewind(f, offset); err != nil {
+				return "", "", fmt.Errorf("%s: %w", path, err)
+			}
+		}
+		body := &sentReader{r: io.NewSectionReader(f, offset, n), left: n, sent: sent}
+		req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/uploads/"+esc(up.ID)+"?offset="+strconv.FormatInt(offset, 10), body)
 		if err != nil {
 			return "", "", err
 		}
@@ -267,6 +307,9 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 				progress(offset, size)
 			}
 			continue
+		}
+		if errors.Is(err, ErrSourceChanged) {
+			return "", "", fmt.Errorf("%s: %w", path, ErrSourceChanged)
 		}
 		if s := StatusOf(err); s != 0 && s != http.StatusConflict && s < 500 {
 			return "", "", err
@@ -286,5 +329,57 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 			offset = cur.Received
 		}
 	}
+	if hex.EncodeToString(sent.h.Sum(nil)) != sum {
+		return "", "", fmt.Errorf("%w: %s was modified during upload", ErrSourceChanged, path)
+	}
 	return up.ID, sum, nil
+}
+
+// sentHash hashes the uploaded bytes in file order; next is the offset
+// hashed up to. Every chunk starts at next: when a chunk is resumed below
+// it, rewind re-hashes the file up to the resume offset, so the final
+// comparison covers exactly the bytes the server holds and an edit in the
+// re-sent range is caught here instead of by the server's checksum.
+type sentHash struct {
+	h    hash.Hash
+	next int64
+}
+
+// rewind re-reads [0, offset) from the file as it is now, not from the
+// bytes the server holds. An edit in that range shows up as a mismatch
+// (conservatively, since the server may hold the old bytes), but an edit
+// that is reverted before the rewind (ABA) is invisible here and is left
+// to the server's checksum. Each failed chunk costs one re-read of the
+// prefix: several resumes of a 1 GB file read several GB locally.
+func (s *sentHash) rewind(f io.ReaderAt, offset int64) error {
+	s.h.Reset()
+	n, err := io.Copy(s.h, io.NewSectionReader(f, 0, offset))
+	if err != nil {
+		return err
+	}
+	if n != offset {
+		return fmt.Errorf("%w: file shrank during upload", ErrSourceChanged)
+	}
+	s.next = offset
+	return nil
+}
+
+// sentReader is one chunk's request body. It feeds sentHash and turns a
+// file that ends before the chunk does into ErrSourceChanged, instead of
+// a transport error that would be retried as a network failure.
+type sentReader struct {
+	r    io.Reader
+	left int64
+	sent *sentHash
+}
+
+func (s *sentReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	s.sent.h.Write(p[:n])
+	s.sent.next += int64(n)
+	s.left -= int64(n)
+	if err == io.EOF && s.left > 0 {
+		err = fmt.Errorf("%w: file shrank during upload", ErrSourceChanged)
+	}
+	return n, err
 }
