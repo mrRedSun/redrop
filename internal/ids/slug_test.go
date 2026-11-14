@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"testing"
@@ -66,7 +67,10 @@ func TestSlugFormat(t *testing.T) {
 
 // TestSlugUniformity is a sanity check, not a proof: over many draws each
 // word position should hit every bucket of the vocabulary about equally.
+// The draws come from a fixed-seed stream through slugFrom, the same code
+// Slug runs on crypto/rand, so the outcome never depends on chance.
 func TestSlugUniformity(t *testing.T) {
+	src := rand.NewChaCha8([32]byte{'r', 'e', 'd', 'r', 'o', 'p'})
 	index := make(map[string]int, len(words))
 	for i, w := range words {
 		index[w] = i
@@ -74,11 +78,11 @@ func TestSlugUniformity(t *testing.T) {
 	const buckets, draws = 16, 20000
 	var counts [SlugWords][buckets]int
 	for range draws {
-		for pos, w := range strings.Split(Slug(), "-") {
+		for pos, w := range strings.Split(slugFrom(src), "-") {
 			counts[pos][index[w]*buckets/len(words)]++
 		}
 	}
-	// Expected 1250 per bucket, sd ~34; 6 sd keeps flakes negligible.
+	// Expected 1250 per bucket, sd ~34; 6 sd catches a real bias.
 	for pos := range counts {
 		for b, n := range counts[pos] {
 			if math.Abs(float64(n)-draws/buckets) > 6*math.Sqrt(draws/buckets) {

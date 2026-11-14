@@ -12,6 +12,22 @@ R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
 export REDROP_CONFIG="$WORK/cli.json"
 pass() { printf '  ok  %s\n' "$*"; }
 die() { printf 'FAIL  %s\n' "$*" >&2; exit 1; }
+# Every request is bounded, so a stuck server fails the check that made it
+# (curl exits 28 and says "timed out") instead of hanging the run. The limits
+# are far above any healthy response time. The CLI's own client has a
+# 10-minute timeout; the installer runs under `timeout` below.
+#
+# `curl ... | grep -q X` must not depend on scheduling: grep -q exits at the
+# first match, and if curl still has bytes to write it fails with 23 (write
+# error), which pipefail turns into a failed check. When stdout is a pipe the
+# reader chose to stop, and its own status decides the check, so 23 is not
+# an error there.
+curl() {
+  local rc=0
+  command curl --connect-timeout 10 --max-time 60 "$@" || rc=$?
+  if [ "$rc" = 23 ] && [ -p /dev/stdout ]; then rc=0; fi
+  return "$rc"
+}
 code_of() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 # code and resolved redirect target of a request
 redirect_of() { curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$@"; }
@@ -44,15 +60,16 @@ IH="$WORK/install-home"
 iso() { env -u REDROP_CONFIG -u REDROP_URL -u REDROP_TOKEN -u XDG_CONFIG_HOME HOME="$IH" REDROP_INSTALL_DIR="$IH/bin" "$@"; }
 mkdir -p "$IH"
 STOKEN=$(curl -fsS -b "$CJ" "${H[@]}" -d '{"name":"e2e-setup"}' "$BASE/api/v1/tokens" | python3 -c 'import json,sys;print(json.load(sys.stdin)["secret"])')
-curl -fsSL "$BASE/install.sh" | iso REDROP_TOKEN="$STOKEN" sh > "$WORK/install.log" 2>&1 || { cat "$WORK/install.log"; die "one-line setup"; }
+curl -fsSL "$BASE/install.sh" | iso REDROP_TOKEN="$STOKEN" timeout 120s sh > "$WORK/install.log" 2>&1 || { cat "$WORK/install.log"; die "one-line setup (exit 124 means it hung for 120s)"; }
 grep -q 'redrop is set up' "$WORK/install.log" || die "setup success message"
 [ "$(stat -c %a "$IH/.config/redrop/config.json")" = 600 ] || die "saved config mode"
 iso "$IH/bin/redrop" whoami --json | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["me"]["token_name"]=="e2e-setup",d' \
   || die "saved login from one-line setup"
 pass "one-line setup: install.sh installs, logs in, and saves a working login"
 set +e
-curl -fsSL "$BASE/install.sh" | iso REDROP_TOKEN=rdp_bad sh > "$WORK/install-bad.log" 2>&1; rc=$?
+curl -fsSL "$BASE/install.sh" | iso REDROP_TOKEN=rdp_bad timeout 120s sh > "$WORK/install-bad.log" 2>&1; rc=$?
 set -e
+[ "$rc" != 124 ] || die "one-line setup with a bad token hung for 120s"
 [ "$rc" != 0 ] || die "one-line setup with a bad token should fail"
 grep -q 'redrop is installed at' "$WORK/install-bad.log" || die "bad-token message"
 pass "one-line setup with a bad token fails with a retry hint"
@@ -70,14 +87,14 @@ ID=$($R info "$URL" --json | python3 -c 'import json,sys;print(json.load(sys.std
 pass "share html -> $URL"
 # New links are four words (legacy 26-char links are covered by the Go tests).
 SLUG=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$URL")
-echo "$SLUG" | grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' || die "new link is not four words: $URL"
+grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' <<<"$SLUG" || die "new link is not four words: $URL"
 [ "$($R info "$SLUG" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')" = "$ID" ] || die "info by bare slug"
 pass "four-word link; CLI resolves it by link and by slug"
-body=$(curl -fsS "$URL"); echo "$body" | grep -q '<h1>hello</h1>' || die "html content"
+body=$(curl -fsS "$URL"); grep -q '<h1>hello</h1>' <<<"$body" || die "html content"
 hdr=$(curl -sSI "$URL")
-echo "$hdr" | grep -qi 'x-robots-tag: noindex' || die "noindex header"
-echo "$hdr" | grep -qi 'referrer-policy: no-referrer' || die "referrer header"
-echo "$hdr" | grep -qi 'cache-control: private' || die "cache header"
+grep -qi 'x-robots-tag: noindex' <<<"$hdr" || die "noindex header"
+grep -qi 'referrer-policy: no-referrer' <<<"$hdr" || die "referrer header"
+grep -qi 'cache-control: private' <<<"$hdr" || die "cache header"
 pass "html served with noindex/no-referrer/private cache"
 [ "$($R info "$ID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["title"])')" = "E2E Report" ] || die "title from <title>"
 pass "title taken from <title>"
@@ -229,10 +246,10 @@ pass "file viewer, range requests, download"
 # (same origin), subresources and clients without Fetch Metadata get the
 # artifact's bytes, untouched.
 vp=$(curl -fsS "${DOC[@]}" "${URL}?q=1")
-echo "$vp" | grep -q '<iframe id="rd-frame"[^>]* src="/?q=1"' || die "viewer frames the same path and query"
-echo "$vp" | grep -q 'id="rd-info"' || die "info panel"
-echo "$vp" | grep -q '<h1>hello</h1>' && die "artifact bytes in the viewer page"
-echo "$vp" | grep -q '<script>' && die "inline script in the viewer page"
+grep -q '<iframe id="rd-frame"[^>]* src="/?q=1"' <<<"$vp" || die "viewer frames the same path and query"
+grep -q 'id="rd-info"' <<<"$vp" || die "info panel"
+grep -q '<h1>hello</h1>' <<<"$vp" && die "artifact bytes in the viewer page"
+grep -q '<script>' <<<"$vp" && die "inline script in the viewer page"
 curl -fsSI "${DOC[@]}" "$URL" | grep -qi "content-security-policy: default-src 'none'.*frame-ancestors 'none'" || die "viewer CSP"
 curl -fsS "${FRAME[@]}" "$URL" | cmp -s - "$WORK/page-v1.html" || die "frame bytes differ from the upload"
 curl -fsS -H 'Sec-Fetch-Dest: script' "$URL" | cmp -s - "$WORK/page-v1.html" || die "subresource bytes differ from the upload"
@@ -275,15 +292,15 @@ pass "password gate before the viewer and in the frame; both open after unlock"
 # older versions: listed always, openable only when the owner allows it
 # ($URL is at version 1 after the rollback above; version 2 is older-but-newer)
 vp=$(curl -fsS "${DOC[@]}" "$URL")
-echo "$vp" | grep -q 'Version 2' && echo "$vp" | grep -q 'v2' || die "versions listed with notes"
-echo "$vp" | grep -q 'redrop-version=2' && die "version 2 offered while closed"
+grep -q 'Version 2' <<<"$vp" && grep -q 'v2' <<<"$vp" || die "versions listed with notes"
+grep -q 'redrop-version=2' <<<"$vp" && die "version 2 offered while closed"
 [ "$(code_of "${DOC[@]}" "${URL}?redrop-version=2")" = 404 ] || die "closed version is the miss"
 [ "$(code_of "${FRAME[@]}" "${URL}__redrop/v/2/")" = 404 ] || die "version path while closed"
-$R versions "$ID" | grep -q '\* v2' || die "versions marks the new public note"
-$R set "$ID" --old-versions | grep -q 'older versions: *viewers can open them' || die "set --old-versions"
+grep -q '\* v2' <<<"$($R versions "$ID")" || die "versions marks the new public note"
+grep -q 'older versions: *viewers can open them' <<<"$($R set "$ID" --old-versions)" || die "set --old-versions"
 vp=$(curl -fsS "${DOC[@]}" "${URL}?redrop-version=2")
-echo "$vp" | grep -q 'Viewing version 2 of 2' || die "version bar"
-echo "$vp" | grep -q '<iframe id="rd-frame"[^>]* src="/__redrop/v/2/"' || die "version 2 frame src"
+grep -q 'Viewing version 2 of 2' <<<"$vp" || die "version bar"
+grep -q '<iframe id="rd-frame"[^>]* src="/__redrop/v/2/"' <<<"$vp" || die "version 2 frame src"
 curl -fsS "${FRAME[@]}" "${URL}__redrop/v/2/" | grep -q second || die "version 2 content"
 [ "$(redirect_of "${DOC[@]}" "${URL}__redrop/v/2/")" = "303 ${URL}?redrop-version=2" ] || die "top-level version path goes to the viewer form"
 $R set "$ID" --no-old-versions >/dev/null
@@ -293,7 +310,7 @@ pass "older versions: metadata only, then openable under /__redrop/v/N/, then re
 # --no-info and ?redrop-info=0: served directly; files keep the file page
 NURL=$($R share "$WORK/page.html" --no-info -q)
 curl -fsS "${DOC[@]}" "$NURL" | cmp -s - "$WORK/page.html" || die "--no-info is not the direct view"
-$R set "$NURL" --info | grep -q 'info button: *shown' || die "set --info output"
+grep -q 'info button: *shown' <<<"$($R set "$NURL" --info)" || die "set --info output"
 curl -fsS "${DOC[@]}" "$NURL" | grep -q 'rd-frame' || die "frame after set --info"
 curl -fsS "${DOC[@]}" "${URL}?redrop-info=0" | cmp -s - "$WORK/page-v1.html" || die "redrop-info=0 direct view"
 J6="$WORK/c6"
@@ -302,8 +319,8 @@ curl -fsS -c "$WORK/c7" -o /dev/null -H 'Sec-Fetch-Dest: image' -H 'Sec-Fetch-Si
 grep -q rd_direct "$WORK/c7" && die "a same-site image recorded the direct choice"
 curl -fsS -b "$J6" "${DOC[@]}" "${BURL}some/route" | grep -q 'rd-frame' && die "direct choice not kept for the visit"
 fp=$(curl -fsS "${DOC[@]}" "$FURL")
-echo "$fp" | grep -q 'id="rd-info"' && echo "$fp" | grep -q 'Download' || die "file page with the info panel"
-echo "$fp" | grep -q 'rd-frame' && die "file page framed"
+grep -q 'id="rd-info"' <<<"$fp" && grep -q 'Download' <<<"$fp" || die "file page with the info panel"
+grep -q 'rd-frame' <<<"$fp" && die "file page framed"
 pass "--no-info and ?redrop-info=0 (kept for the visit) are direct; file page has the panel natively"
 
 # stdin + revoke/restore + rotate
@@ -344,7 +361,10 @@ ln -s loop "$WORK/loop-site/loop"
 $R share "$WORK/loop-site" >/dev/null 2> "$WORK/loop-error"; [ $? = 2 ] || die "exit code 2 for self-loop symlink"
 grep -q 'loop.*symlink cycle' "$WORK/loop-error" || die "self-loop diagnostic"
 mkfifo "$WORK/input.md"
-timeout 5s $R share "$WORK/input.md" >/dev/null 2>&1; [ $? = 2 ] || die "non-regular Markdown source must exit 2 without blocking"
+# A blocked open never returns; the bound only has to catch that hang.
+timeout 60s $R share "$WORK/input.md" >/dev/null 2>&1; rc=$?
+[ $rc != 124 ] || die "non-regular Markdown source blocked for 60s"
+[ $rc = 2 ] || die "non-regular Markdown source must exit 2, got $rc"
 ln -s "$WORK/notes.md" "$WORK/md-bundle/outside.md"
 $R share "$WORK/md-bundle" >/dev/null 2> "$WORK/symlink-error"; [ $? = 2 ] || die "exit code 2 for outside-root symlink"
 grep -q 'outside.md.*symlinks must be relative and stay inside the directory' "$WORK/symlink-error" || die "symlink error must name path and rule"

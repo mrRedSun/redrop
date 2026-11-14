@@ -19,7 +19,10 @@ func TestNonRegularPublishingSourcesDoNotBlock(t *testing.T) {
 	}
 	for _, mode := range []string{"markdown", "bundle", "entry", "fifo-window"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			// A blocked open never returns, so this bound only has to catch a
+			// real hang. Starting a race-enabled test binary on a loaded
+			// machine can take seconds; a tight bound would flake.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNonRegularSourceHelper$")
 			cmd.Env = append(os.Environ(), "REDROP_SOURCE_HELPER="+mode, "REDROP_SOURCE_PATH="+fifo)

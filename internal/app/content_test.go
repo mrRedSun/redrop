@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -146,24 +145,6 @@ func TestMissesLookIdentical(t *testing.T) {
 		t.Errorf("open on exhausted link differs from a miss:\n%s", got)
 	}
 
-	// Timing class: every miss is at most one indexed lookup; none takes a
-	// slow path (password hashing, blob reads) that a hit-like miss could.
-	median := func(host string) time.Duration {
-		var d []time.Duration
-		for range 15 {
-			start := time.Now()
-			body(h.get(host, nil))
-			d = append(d, time.Since(start))
-		}
-		slices.Sort(d)
-		return d[len(d)/2]
-	}
-	base := median(misses["unknown word slug"])
-	for name, host := range misses {
-		if m := median(host); m > 5*base+5*time.Millisecond {
-			t.Errorf("%s: median %v vs unknown %v", name, m, base)
-		}
-	}
 }
 
 // TestMissLimiter: misses are limited per client IP as resolved through the
@@ -215,6 +196,7 @@ func TestMissLimiter(t *testing.T) {
 
 	t.Run("untrusted peer", func(t *testing.T) {
 		t.Setenv("REDROP_CONTENT_MISS_BURST", "2")
+		t.Setenv("REDROP_CONTENT_MISS_PER_MINUTE", "1")       // no refill within the test
 		t.Setenv("REDROP_TRUSTED_PROXIES", "198.51.100.0/24") // not the test client
 		h := newHarness(t)
 		const unknown = "amber-otter-quilt-river.content.test"

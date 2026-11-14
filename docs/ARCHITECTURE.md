@@ -253,7 +253,7 @@ The implementation did not reveal a repeated boundary failure requiring another 
 npm --prefix web ci
 go vet ./...
 go test ./...
-go test -race ./...
+go test -race -shuffle=on -count=3 ./...   # what CI runs
 
 cd web
 npm run typecheck
@@ -264,6 +264,8 @@ npm run gen:api
 # Explicitly targets disposable development state, not production:
 BASE=http://127.0.0.1:8080 npm run check:contract
 ```
+
+Tests must be deterministic: no wall-clock assertions, no unseeded randomness, no fixed ports, and every wait is on an event or a generously bounded poll that fails only on a real hang. CI runs the Go suite three times in shuffled order with the race detector, so order dependence fails a pull request instead of showing up later as a flake. A failing shuffled run prints its `-shuffle` seed; rerun with `-shuffle=<seed>` to reproduce the order.
 
 `go generate ./internal/brand` regenerates `internal/brand/icons/` from `internal/brand/iconsrc`. A test fails when the committed files differ from the generator output. The Vite dev server reads the same directory as its public directory. The build does not copy it, because the Go server serves the icons at the root.
 
