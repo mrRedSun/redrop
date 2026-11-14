@@ -12,6 +12,17 @@ import (
 	"github.com/mrRedSun/redrop/pkg/client"
 )
 
+// watchEvent is one --json output line per publish or retry.
+type watchEvent struct {
+	Event   string `json:"event"` // "publish" | "retry"
+	ID      string `json:"id"`
+	Version int    `json:"version,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
+	Error   string `json:"error,omitempty"`
+	At      string `json:"at"`
+}
+
 func watchCmd() *cobra.Command {
 	var cf contentFlags
 	var debounce time.Duration
@@ -22,11 +33,13 @@ func watchCmd() *cobra.Command {
 new version of the artifact whenever its content changes. The link, expiry,
 password, and view limit stay the same.
 
-Edits are debounced (--debounce, default 500ms), editor temp/swap files and
-.git are ignored, and identical content never publishes a version. Each
-publish prints the version number and time (with --json, one JSON line per
-publish). Ctrl-C or SIGTERM stops watching and exits 0. Transient network or
-server errors are retried with backoff while watching continues.`,
+Edits are debounced (--debounce, default 500ms); editor temp/swap/backup
+files, .git, and node_modules are ignored; identical content never
+publishes a version. Each publish prints the version number and time (with
+--json, one JSON line per publish or retry). Ctrl-C or SIGTERM stops
+watching and exits 0. Network errors, rate limiting, and server errors are
+retried with exponential backoff while watching continues; auth or
+not-found errors stop with the CLI's usual exit codes.`,
 		Example: `  redrop watch k2j4m9qx7d4a report.html
   redrop watch https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
   redrop watch k2j4m9qx7d4a ./site --debounce 1s --json`,
@@ -46,51 +59,53 @@ server errors are retried with backoff while watching continues.`,
 			if err != nil {
 				return err
 			}
-			// cmd.Context() cancels on Ctrl-C and SIGTERM (see main).
+			// Same content flags and source rules as update; --name is
+			// meaningless here (no stdin), so it is rejected.
+			if cmd.Flags().Changed("name") {
+				return withCode(exitUsage, "--name cannot be combined with watch; watch uploads the file at PATH")
+			}
+			src := &client.Source{Path: args[1], Kind: cf.as, Entry: cf.entry, SPA: cf.spa, Note: cf.note}
 
 			opts := client.WatchOptions{
 				Debounce: debounce,
-				Kind:     cf.as,
-				Entry:    cf.entry,
-				SPA:      cf.spa,
-				Note:     cf.note,
 				Progress: progressFn(),
-				Log: func(format string, a ...any) {
-					fmt.Fprintf(os.Stderr, "redrop: "+format+"\n", a...)
-				},
 			}
 			opts.OnPublish = func(r client.WatchResult) {
 				if g.json {
-					printJSONLine(map[string]any{
-						"event": "publish", "id": id, "version": r.Version,
-						"url": r.Artifact.URL, "at": r.At.Format(time.RFC3339),
+					printJSONLine(watchEvent{
+						Event: "publish", ID: id, Version: r.Version,
+						URL: r.Artifact.URL, At: r.At.Format(time.RFC3339),
 					})
 					return
 				}
 				fmt.Printf("version %d published at %s\n", r.Version, r.At.Format("2006-01-02 15:04:05 MST"))
 				fmt.Println(r.Artifact.URL)
 			}
+			opts.Log = func(format string, a ...any) {
+				if g.json {
+					printJSONLine(watchEvent{Event: "retry", ID: id, At: time.Now().Format(time.RFC3339), Error: fmt.Sprintf(format, a...)})
+					return
+				}
+				fmt.Fprintf(os.Stderr, "redrop: "+format+"\n", a...)
+			}
 			// Announce only once changes are guaranteed to be seen: the
-			// watches are registered and the initial hash is seeded.
+			// watches are registered and the initial digest is seeded.
 			opts.OnReady = func() {
 				if !g.json {
 					fmt.Fprintf(os.Stderr, "watching %s -> %s (Ctrl-C to stop)\n", args[1], id)
 				}
 			}
-			err = client.Watch(cmd.Context(), c, id, args[1], opts)
-			if err == nil || errors.Is(err, context.Canceled) {
-				if !g.json {
-					fmt.Fprintln(os.Stderr, "stopped")
-				}
-				return nil
+			err = client.Watch(cmd.Context(), c, id, src, opts)
+			if err != nil && !errors.Is(err, context.Canceled) && err.Error() != "" {
+				return mapErr(err)
 			}
-			return mapErr(err)
+			if !g.json {
+				fmt.Fprintln(os.Stderr, "stopped")
+			}
+			return nil
 		},
 	}
-	cmd.Flags().StringVar(&cf.as, "as", "", "force the kind: html (render the page), file (viewer + download), bundle (folder/static site)")
-	cmd.Flags().StringVar(&cf.entry, "entry", "", "start page inside a bundle (default index.html; without one a file listing is shown)")
-	cmd.Flags().BoolVar(&cf.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
-	cmd.Flags().StringVar(&cf.note, "note", "", "short note stored with each version")
+	cf.register(cmd)
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
 	return cmd
 }

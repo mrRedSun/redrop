@@ -168,7 +168,9 @@ func printJSON(v any) error {
 func printJSONLine(v any) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		fmt.Fprintf(os.Stderr, "redrop: writing JSON output failed: %v\n", err)
+	}
 }
 
 func main() {

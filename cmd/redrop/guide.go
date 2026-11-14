@@ -109,17 +109,21 @@ e.g. amber-otter-quilt-river) works too.
 Watches PATH (a file or folder, same rules as update) and publishes a new
 version of the same link whenever the content changes: ideal while iterating
 on a page with an agent. Edits settle first (--debounce, default 500ms);
-editor temp/swap files and .git are ignored; identical content publishes
-nothing. Each publish prints the version number and its time, or one JSON
-line per publish with --json:
+editor temp/swap/backup files, .git, and node_modules are excluded from the
+upload itself; identical content publishes nothing. Each publish prints the
+version number and its time, or one JSON line per publish or retry with
+--json:
 
     {"event":"publish","id":"…","version":3,"url":"https://…","at":"…"}
+    {"event":"retry","id":"…","error":"cannot reach server: …","at":"…"}
 
 Never two uploads at once; changes that land during an upload are published
-once more afterwards. Ctrl-C or SIGTERM stops watching and exits 0. Network
-and server errors are retried with backoff; auth or not-found errors stop
-with exit codes 3/4. New subdirectories are picked up automatically. A
-watch session creates many versions; rely on the server's version retention
+once more afterwards. Atomic editor saves (write temp file, rename) and
+delete+recreate are handled. Ctrl-C or SIGTERM stops watching and exits 0.
+Network errors, rate limiting, and server errors are retried with
+exponential backoff (1s to 60s); auth or not-found errors stop with exit
+codes 3/4. New subdirectories are picked up automatically. A watch session
+creates many versions; rely on the server's version retention
 (REDROP_KEEP_VERSIONS) or roll back with "redrop rollback" — there is
 deliberately no way to rewrite a published version.
 

@@ -212,7 +212,7 @@ type contentFlags struct {
 
 func (f *contentFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.as, "as", "", "force the kind: html (render the page), file (viewer + download), bundle (folder/static site)")
-	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin)")
+	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin; not valid with watch)")
 	cmd.Flags().StringVar(&f.entry, "entry", "", "start page inside a bundle (default index.html; without one a file listing is shown)")
 	cmd.Flags().BoolVar(&f.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
 	cmd.Flags().StringVar(&f.note, "note", "", "short note stored with this version")

@@ -5,6 +5,8 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -149,26 +151,43 @@ func Prepare(src *Source) (*Prepared, error) {
 }
 
 func skipEntry(rel string, d fs.DirEntry) bool {
-	base := d.Name()
-	if d.IsDir() {
-		return base == ".git" || base == "node_modules" || base == ".svn" || base == ".hg" || base == "__pycache__" || base == ".DS_Store"
-	}
-	return base == ".DS_Store" || base == "Thumbs.db"
+	return skipEntryName(d.Name(), d.IsDir())
 }
 
-// skipEntryName is skipEntry from a base name plus a directory flag, for
-// callers (watch) that only have those.
+// skipEntryName is the single skip rule for publishable content: the
+// packer, the watch content digest, and the watch event filter all consult
+// it, so they can never disagree about what counts. Directories: VCS and
+// dependency caches. Files: OS junk and editor temp/swap/backup files
+// (vim .swp/.swx and its 4913 probe, *~ backups, emacs .# lock files and
+// #*# autosave), which never belong in a published artifact.
 func skipEntryName(base string, isDir bool) bool {
 	if isDir {
-		return base == ".git" || base == "node_modules" || base == ".svn" || base == ".hg" || base == "__pycache__" || base == ".DS_Store"
+		switch base {
+		case ".git", ".svn", ".hg", "node_modules", "__pycache__", ".DS_Store":
+			return true
+		}
+		return false
 	}
-	return base == ".DS_Store" || base == "Thumbs.db"
+	switch {
+	case base == ".DS_Store" || base == "Thumbs.db" || base == "4913":
+		return true
+	case strings.HasPrefix(base, ".#"), // emacs lock files
+		strings.HasPrefix(base, "#") && strings.HasSuffix(base, "#"),       // emacs autosave
+		strings.HasSuffix(base, "~"),                                       // editor backups
+		strings.HasSuffix(base, ".swp") || strings.HasSuffix(base, ".swx"): // vim swap
+		return true
+	}
+	return false
 }
 
-func packDir(dir string, w io.Writer) error {
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+// walkPackable walks the regular files under dir that the packer packs —
+// applying the shared skip rules and following symlinks to their content,
+// exactly like packDir — and calls fn for each with the slash-separated
+// path relative to dir, the walked path, and the followed file info; a
+// non-nil return from fn aborts the walk. It is the one walk behind both
+// packing and the watch content digest.
+func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) error {
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -190,7 +209,15 @@ func packDir(dir string, w io.Writer) error {
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		return addFile(tw, p, rel, info.Size())
+		return fn(rel, p, info)
+	})
+}
+
+func packDir(dir string, w io.Writer) error {
+	gz := gzip.NewWriter(w)
+	tw := tar.NewWriter(gz)
+	err := walkPackable(dir, func(rel, abs string, info fs.FileInfo) error {
+		return addFile(tw, abs, rel, info.Size())
 	})
 	if err != nil {
 		return err
@@ -304,14 +331,40 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 
 // Update uploads src as a new version of an existing artifact (same link).
 func (c *Client) Update(ctx context.Context, artifactID string, src *Source, progress Progress) (*api.Artifact, error) {
+	_, a, err := c.UpdateDigest(ctx, artifactID, src, progress)
+	return a, err
+}
+
+// UpdateDigest is Update and also returns the SHA-256 of the exact bytes
+// it uploaded. Watch uses it so "what was hashed" and "what was packed"
+// can never diverge: the digest covers the packed content itself.
+func (c *Client) UpdateDigest(ctx context.Context, artifactID string, src *Source, progress Progress) (string, *api.Artifact, error) {
 	p, err := Prepare(src)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	defer p.Close()
-	id, sum, err := c.UploadFile(ctx, p.File, progress)
+	sum, err := fileSHA256(p.File)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	return c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
+	id, _, err := c.UploadFile(ctx, p.File, progress)
+	if err != nil {
+		return "", nil, err
+	}
+	a, err := c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
+	return sum, a, err
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
