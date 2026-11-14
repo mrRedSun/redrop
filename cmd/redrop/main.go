@@ -137,6 +137,10 @@ func mapErr(err error) error {
 	if errors.As(err, &ee) {
 		return err
 	}
+	var usage *client.UsageError
+	if errors.As(err, &usage) {
+		return &exitError{exitUsage, err}
+	}
 	var ne *client.NetworkError
 	if errors.As(err, &ne) {
 		return &exitError{exitNetwork, err}

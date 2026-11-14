@@ -3,12 +3,9 @@ package client
 import (
 	"archive/tar"
 	"archive/zip"
-	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,7 +24,14 @@ type Source struct {
 	Name string
 	// Kind forces html, file, or bundle; empty auto-detects.
 	Kind string
+	// Render is auto (the default), markdown, or none. Auto renders .md files
+	// unless Kind is explicitly set. Directories require markdown and Entry.
+	Render RenderMode
+	// Warn receives non-fatal publishing warnings, such as missing local assets.
+	// Nil leaves warnings available only on Prepared.Warnings.
+	Warn func(string)
 	// Entry is the start page inside a bundle (default index.html).
+	// With Render markdown on a directory, it selects the Markdown source.
 	Entry string
 	SPA   bool
 	Note  string
@@ -38,12 +42,26 @@ type Prepared struct {
 	File     string // path to upload
 	Kind     string
 	Filename string
+	Entry    string // effective entry, including generated index.html
+	Warnings []string
 	cleanup  func()
 }
 
 func (p *Prepared) Close() {
 	if p.cleanup != nil {
 		p.cleanup()
+	}
+}
+
+func (p *Prepared) warn(message string) {
+	p.Warnings = append(p.Warnings, message)
+}
+
+func (p *Prepared) reportWarnings(report func(string)) {
+	if report != nil {
+		for _, warning := range p.Warnings {
+			report(warning)
+		}
 	}
 }
 
@@ -62,7 +80,14 @@ func DetectKind(name string, isDir bool) string {
 
 // Prepare packs a Source into an upload-ready temporary file when needed.
 func Prepare(src *Source) (*Prepared, error) {
-	p := &Prepared{}
+	mode, err := ParseRenderMode(string(src.Render))
+	if err != nil {
+		return nil, err
+	}
+	if mode == RenderMarkdown && src.Kind != "" && src.Kind != api.KindBundle {
+		return nil, usageErrorf("--render markdown conflicts with --as %s; omit --as or use --as bundle", src.Kind)
+	}
+	p := &Prepared{Entry: src.Entry}
 	var tmpFiles []string
 	p.cleanup = func() {
 		for _, f := range tmpFiles {
@@ -76,7 +101,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	isDir := false
 	if src.Reader != nil {
 		if name == "" {
-			return nil, errors.New("a file name is required when reading from stdin (use --name)")
+			return nil, usageErrorf("a file name is required when reading from stdin (use --name)")
 		}
 		tmp, err := os.CreateTemp("", "redrop-stdin-*")
 		if err != nil {
@@ -92,13 +117,24 @@ func Prepare(src *Source) (*Prepared, error) {
 	} else {
 		st, err := os.Stat(srcPath)
 		if err != nil {
-			return nil, err
+			return nil, filePathError(srcPath, err, os.Lstat)
 		}
 		isDir = st.IsDir()
 		if name == "" {
 			abs, _ := filepath.Abs(srcPath)
 			name = filepath.Base(abs)
 		}
+	}
+	shouldRender := mode == RenderMarkdown || (mode == RenderAuto && src.Kind == "" && !isDir && strings.EqualFold(path.Ext(name), ".md"))
+	if shouldRender {
+		rendered, err := prepareMarkdown(src, srcPath, name, isDir)
+		if err != nil {
+			return fail(err)
+		}
+		rendered.reportWarnings(src.Warn)
+		cleanup := rendered.cleanup
+		rendered.cleanup = func() { cleanup(); p.Close() }
+		return rendered, nil
 	}
 	kind := src.Kind
 	if kind == "" {
@@ -109,7 +145,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	switch kind {
 	case api.KindHTML, api.KindFile:
 		if isDir {
-			return fail(fmt.Errorf("%s is a directory; share it as a bundle", srcPath))
+			return fail(usageErrorf("%s is a directory; share it as a bundle", srcPath))
 		}
 		p.File = srcPath
 	case api.KindBundle:
@@ -121,7 +157,7 @@ func Prepare(src *Source) (*Prepared, error) {
 		lower := strings.ToLower(name)
 		switch {
 		case isDir:
-			err = packDir(srcPath, tmp)
+			err = packDir(srcPath, tmp, p.warn)
 		case strings.HasSuffix(lower, ".zip"):
 			err = zipToTarGz(srcPath, tmp)
 		case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):
@@ -143,82 +179,10 @@ func Prepare(src *Source) (*Prepared, error) {
 		}
 		p.File = tmp.Name()
 	default:
-		return fail(fmt.Errorf("unknown kind %q (use html, file, or bundle)", kind))
+		return fail(usageErrorf("unknown kind %q (use html, file, or bundle)", kind))
 	}
+	p.reportWarnings(src.Warn)
 	return p, nil
-}
-
-func skipEntry(rel string, d fs.DirEntry) bool {
-	base := d.Name()
-	if d.IsDir() {
-		return base == ".git" || base == "node_modules" || base == ".svn" || base == ".hg" || base == "__pycache__" || base == ".DS_Store"
-	}
-	return base == ".DS_Store" || base == "Thumbs.db"
-}
-
-func packDir(dir string, w io.Writer) error {
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil || rel == "." {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if skipEntry(rel, d) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := os.Stat(p) // follow symlinks to their content
-		if err != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		return addFile(tw, p, rel, info.Size())
-	})
-	if err != nil {
-		return err
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
-}
-
-func addFile(tw *tar.Writer, src, name string, size int64) error {
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: size, Typeflag: tar.TypeReg}); err != nil {
-		return err
-	}
-	_, err = io.CopyN(tw, f, size)
-	return err
-}
-
-func packSingle(src, name string, w io.Writer) error {
-	st, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	if err := addFile(tw, src, name, st.Size()); err != nil {
-		return err
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
 }
 
 func zipToTarGz(src string, w io.Writer) error {
@@ -239,33 +203,29 @@ func zipToTarGz(src string, w io.Writer) error {
 			break
 		}
 	}
-	gz := gzip.NewWriter(w)
-	tw := tar.NewWriter(gz)
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() || !f.Mode().IsRegular() {
-			continue
+	return writeTarGzip(w, func(tw *tar.Writer) error {
+		for _, f := range zr.File {
+			if f.FileInfo().IsDir() || !f.Mode().IsRegular() {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimPrefix(f.Name, "/"), prefix)
+			if name == "" || strings.HasPrefix(path.Base(name), "._") || strings.HasPrefix(name, "__MACOSX/") {
+				continue
+			}
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			err = addBundleFile(tw, name, rc, int64(f.UncompressedSize64))
+			if closeErr := rc.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				return err
+			}
 		}
-		name := strings.TrimPrefix(strings.TrimPrefix(f.Name, "/"), prefix)
-		if name == "" || strings.HasPrefix(path.Base(name), "._") || strings.HasPrefix(name, "__MACOSX/") {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		err = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(f.UncompressedSize64), Typeflag: tar.TypeReg})
-		if err == nil {
-			_, err = io.CopyN(tw, rc, int64(f.UncompressedSize64))
-		}
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	return gz.Close()
+		return nil
+	})
 }
 
 // PublishOptions are artifact settings for a new share.
@@ -293,7 +253,7 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 		return nil, err
 	}
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
-		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note},
+		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: p.Entry, SPA: src.SPA, Note: src.Note},
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
 		InfoButton: opts.InfoButton, OldVersions: opts.OldVersions,
 	})
@@ -339,7 +299,7 @@ func (c *Client) UpdateWithOptions(ctx context.Context, artifactID string, src *
 	id, sum, err := c.UploadFile(ctx, p.File, progress)
 	if err == nil {
 		var a *api.Artifact
-		if a, err = c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note}); err == nil {
+		if a, err = c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: p.Entry, SPA: src.SPA, Note: src.Note}); err == nil {
 			return a, nil
 		}
 	}

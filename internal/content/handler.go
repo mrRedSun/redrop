@@ -29,6 +29,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 const maxInlineText = 1 << 20
@@ -529,7 +530,7 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 // reservedPrefix is redrop's own path space on every content host: gates,
 // previews, viewer assets, icons, and older versions' files. Artifacts can't
 // upload under it.
-const reservedPrefix = "/" + sharing.ReservedPrefix + "/"
+const reservedPrefix = "/" + api.ReservedPrefix + "/"
 
 // fallbackIcons are the paths browsers request without being told to. On an
 // artifact origin they fall back to the redrop icon when the artifact has none.
@@ -586,7 +587,7 @@ func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
 
 // safeNext only allows same-host relative paths outside the reserved space.
 func safeNext(p string) string {
-	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") || strings.HasPrefix(p, "/"+sharing.ReservedPrefix) {
+	if p == "" || !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") || strings.HasPrefix(p, "/"+api.ReservedPrefix) {
 		return "/"
 	}
 	return p

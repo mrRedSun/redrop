@@ -62,6 +62,49 @@ that, run the installer without `REDROP_TOKEN`, then
 `redrop login --url https://redrop.example.com` and paste the token at the
 prompt. `redrop guide` explains everything else.
 
+### Share Markdown
+
+```sh
+redrop share notes.md                              # styled document + original download
+redrop share notes.txt --render markdown            # force rendering for another extension
+redrop share notes.md --render none                 # raw file, as before
+redrop share ./report --render markdown --entry docs/notes.md
+cat notes.md | redrop share - --name notes.md
+```
+
+The CLI renders `.md` files locally by default. The version is a bundle with a
+self-contained `index.html` and the byte-for-byte original. `update` accepts the
+same options. `--render auto` respects explicit `--as` choices, so `--as file`
+also keeps Markdown raw. No API or content-server rendering is involved.
+
+Pages have heading links, a table of contents at four headings, offline syntax
+highlighting and copy buttons, tables, task lists, blockquotes, and responsive
+light/dark styles. Share a directory with `--render markdown --entry PATH` to
+include images and links relative to the selected Markdown file. A single file
+never uploads its siblings. Directory rendering refuses an existing root
+`index.html` and does not support `--spa`. Ordinary and Markdown bundles use the
+same packer and follow relative symlinks only within the selected directory.
+Outside-root, absolute, and cyclic symlinks fail with usage errors. Broken asset
+symlinks and other non-regular bundle entries are skipped with stderr warnings.
+Explicitly named single files follow normal filesystem symlinks, including links
+into other directories; only directory walks and `--entry` are root-confined.
+Selected sources must resolve to regular files. Unix source and entry opens use
+nonblocking mode and re-check the descriptor to reject a swapped-in FIFO.
+Unpack archives before rendering.
+Missing local references in a single-file upload produce a stderr warning and a
+directory-publishing suggestion. Rejected image sources produce warnings for
+both single files and directories, naming the source and the local-image rule.
+
+HTML comments are omitted. Other raw HTML is displayed as escaped inline text
+or normal paragraphs, not Copy-enabled code blocks. Prose such as `List<String>`
+survives without becoming markup. Unsafe attributes and active URL schemes are removed.
+HTTP/HTTPS and mailto links open with no opener or referrer; images stay local-only.
+A restrictive CSP prevents automatic external resource requests. Generated HTML
+has no branding, favicon, hosting-policy meta tags, or special download queries.
+The original download and other bundle files remain unmodified and untrusted. Markdown sources are limited
+to 8 MiB. Code blocks larger than 64 KiB and unknown languages stay plain text.
+Use `--render none` for larger sources.
+
 ## Develop
 
 Requires Go 1.26 and Node 24.
