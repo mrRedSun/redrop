@@ -130,11 +130,11 @@ chunked and resume automatically after network errors.
   versions" marks public notes with *). It never shows who shared the page.
   HTML artifacts open in redrop's viewer: the artifact itself loads, byte for
   byte as uploaded, in a full-page frame on the same link. The address bar
-  follows the frame, including #fragments and Back/Forward inside it, but not
-  single-page-app route changes made with pushState. Files keep redrop's own
-  file page. Your artifact needs nothing redrop-specific. Because the frame
-  is on the same origin, the info panel is a convenience, not a security
-  boundary: a page could draw a fake one.
+  follows the frame, including #fragments, Back/Forward and single-page-app
+  route changes (pushState, replaceState) inside it, but not pages on other
+  sites. Files keep redrop's own file page. Your artifact needs nothing
+  redrop-specific. Because the frame is on the same origin, the info panel
+  is a convenience, not a security boundary: a page could draw a fake one.
   --no-info on share, update, or set serves pages directly instead (no button,
   no frame); --info turns it back on (the server default is usually on).
   Append ?redrop-info=0 to a link for a direct, frameless view, e.g. for

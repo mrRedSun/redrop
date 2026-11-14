@@ -341,9 +341,22 @@ anyway. Look-alikes were already possible.
 The address bar follows the frame without anything from the artifact. The
 frame is on the same origin, so `viewer.js` reads its location directly:
 
-* on every frame `load`, and on `hashchange` and `popstate` in the frame's
-  window (listeners are attached again after each load, because each
-  document has a new window);
+* on every frame `load`;
+* on every same-document URL change in the frame's current document: a
+  `#fragment`, Back/Forward, and `history.pushState` or `replaceState`
+  (single-page-app routes, UI state kept in the fragment). The last two fire
+  no window event, and the viewer never patches the artifact's `history`, so:
+  * where the frame's window has the Navigation API, the viewer listens for
+    `currententrychange` on its `navigation` object;
+  * otherwise it listens for `hashchange` and `popstate`, and polls the
+    frame's `location.href` every 250 ms, updating only when it changed;
+  * this runs only while the viewer page is visible
+    (`document.visibilityState`): hiding the page removes the listener and
+    the timer, and showing it reads the frame once and resumes;
+  * each document has a new window, so this is set up again after every
+    load; the previous timer and `navigation` listener are removed first
+    (the old window's own listeners go away with its document);
+* it mirrors the frame's path, query and fragment;
 * it maps `/__redrop/v/<N>/<path>` back to `<path>?redrop-version=N` and
   ignores other `/__redrop/` pages;
 * it applies the result with `history.replaceState` (never `pushState`: the
@@ -354,10 +367,11 @@ frame is on the same origin, so `viewer.js` reads its location directly:
 * the server never sees a URL fragment, so `viewer.js` hands the visitor's
   `#fragment` to the frame when the page loads.
 
-Nothing is added to the artifact and nothing in its window is patched; the
-viewer only reads and listens. Not reflected: single-page-app `pushState`
-route changes, which fire no event the viewer can listen to without patching
-the artifact's `history`.
+Nothing is added to the artifact and nothing in its window is written or
+patched (`history` is never wrapped); the viewer only reads and listens. Not
+reflected: navigations to another origin, whose location the viewer can't
+read. Without the Navigation API, a `pushState` or `replaceState` shows up
+within 250 ms rather than at once.
 
 ### Gates and view counting
 
