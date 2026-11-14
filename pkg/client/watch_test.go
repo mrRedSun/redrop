@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,10 @@ import (
 // The fake uses the real preparation path. In particular its return value
 // is Prepared.Digest, not an independently hashed live tree or a blob hash.
 type fakeUploader struct {
+	// duringPack runs inside Prepare's walk, between each file's stat and
+	// read (see walkTestHook); hashTree's walks are not affected.
+	duringPack            func(rel string)
+	beforePrepare         func() // runs once, before the next Prepare
 	mu                    sync.Mutex
 	updates               int
 	packs                 [][]string
@@ -26,7 +31,16 @@ type fakeUploader struct {
 }
 
 func (f *fakeUploader) UpdateDigest(ctx context.Context, id string, src *Source, _ Progress) (string, *api.Artifact, error) {
+	f.mu.Lock()
+	walkTestHook = f.duringPack
+	before := f.beforePrepare
+	f.beforePrepare = nil
+	f.mu.Unlock()
+	if before != nil {
+		before()
+	}
 	p, err := Prepare(src)
+	walkTestHook = nil
 	if err != nil {
 		return "", nil, err
 	}
@@ -62,7 +76,13 @@ func (f *fakeUploader) UpdateDigest(ctx context.Context, id string, src *Source,
 	if failure != nil {
 		return "", nil, failure
 	}
-	return p.Digest, &api.Artifact{ID: id, Version: number}, nil
+	digest := p.Digest
+	if digest == "" { // File is the source itself; the client uses the upload checksum
+		if digest, err = hashFile(p.File); err != nil {
+			return "", nil, err
+		}
+	}
+	return digest, &api.Artifact{ID: id, Version: number}, nil
 }
 func (f *fakeUploader) calls() int { f.mu.Lock(); defer f.mu.Unlock(); return f.updates }
 func (f *fakeUploader) lastPack() []string {
@@ -279,7 +299,7 @@ func TestWatchIgnoresEditorAndDependencyChurn(t *testing.T) {
 	write(t, dir, "index.html", "v0")
 	up := &fakeUploader{}
 	h := newHarness(t, up, dir)
-	for _, name := range []string{".index.html.swo", ".index.html.saa", ".index.html.swx", "index.html~", ".#index.html", "#index.html#", "index.html___jb_tmp___", "index.html___jb_old___", ".goutputstream-temp", ".git/index", "node_modules/pkg/index.js"} {
+	for _, name := range []string{".index.html.swo", ".index.html.swa", ".index.html.swx", "index.html~", ".#index.html", "#index.html#", "index.html___jb_tmp___", "index.html___jb_old___", ".goutputstream-temp", ".git/index", "node_modules/pkg/index.js"} {
 		write(t, dir, name, "private")
 		h.event(filepath.Join(dir, name), fsnotify.Create)
 	}
@@ -364,34 +384,45 @@ func waitFor(t *testing.T, condition func() bool) {
 }
 
 func TestWatchRetryNoticesAndRetryAfter(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "index.html", "v0")
-	up := &fakeUploader{failures: []error{&Error{Status: 429, RetryAfter: 10 * time.Second}}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	clk := newFakeClock()
-	notices := make(chan Notice, 1)
-	w := &watcher{ctx: ctx, quit: ctx.Done(), up: up, artifactID: "art", src: &Source{Path: dir},
-		opts: WatchOptions{Clock: clk, Retrier: staticRetrier{time.Second}, OnNotice: func(n Notice) { notices <- n }}}
-	done := make(chan error, 1)
-	go func() { _, _, err := w.publishWithRetry(); done <- err }()
-	notice := receive(t, notices)
-	if notice.Kind != NoticeRetry || notice.Attempt != 2 {
-		t.Fatalf("notice=%+v", notice)
-	}
-	if delay := receive(t, clk.armed); delay != 10*time.Second {
-		t.Fatalf("Retry-After ignored: %v", delay)
-	}
-	clk.advance(9 * time.Second)
-	if up.calls() != 1 {
-		t.Fatal("retried before Retry-After")
-	}
-	clk.advance(time.Second)
-	if err := receive(t, done); err != nil {
-		t.Fatal(err)
-	}
-	if up.calls() != 2 {
-		t.Fatal("retry never published")
+	for _, tc := range []struct {
+		name             string
+		retryAfter, want time.Duration
+	}{
+		{"honored", 10 * time.Second, 10 * time.Second},
+		{"clamped", 365 * 24 * time.Hour, MaxRetryAfter},
+		{"backoff wins", time.Millisecond, time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "index.html", "v0")
+			up := &fakeUploader{failures: []error{&Error{Status: http.StatusTooManyRequests, RetryAfter: tc.retryAfter}}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clk := newFakeClock()
+			notices := make(chan Notice, 1)
+			w := &watcher{ctx: ctx, quit: ctx.Done(), up: up, artifactID: "art", src: &Source{Path: dir},
+				opts: WatchOptions{Clock: clk, Retrier: staticRetrier{time.Second}, OnNotice: func(n Notice) { notices <- n }}}
+			done := make(chan error, 1)
+			go func() { done <- w.publishWithRetry() }()
+			notice := receive(t, notices)
+			if notice.Kind != NoticeRetry || notice.Attempt != 2 || notice.Delay != tc.want {
+				t.Fatalf("notice=%+v; want delay %v", notice, tc.want)
+			}
+			if delay := receive(t, clk.armed); delay != tc.want {
+				t.Fatalf("waited %v; want %v", delay, tc.want)
+			}
+			clk.advance(tc.want - time.Millisecond)
+			if up.calls() != 1 {
+				t.Fatal("retried before the delay elapsed")
+			}
+			clk.advance(time.Millisecond)
+			if err := receive(t, done); err != nil {
+				t.Fatal(err)
+			}
+			if up.calls() != 2 {
+				t.Fatal("retry never published")
+			}
+		})
 	}
 }
 
@@ -661,4 +692,136 @@ func TestWatchFatalError(t *testing.T) {
 	if err := receive(t, done); StatusOf(err) != 401 {
 		t.Fatalf("expected 401, got %v", err)
 	}
+}
+
+// A build tool rewriting the folder while a version is packed must not
+// stop the watcher: the publish waits for the tree to settle again.
+func TestWatchTreeChangedDuringPack(t *testing.T) {
+	for _, change := range []string{"deleted", "truncated"} {
+		t.Run(change, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "a.html", "a0")
+			write(t, dir, "b.html", "b0")
+			up := &fakeUploader{}
+			h := newHarness(t, up, dir)
+			once := false
+			up.mu.Lock()
+			up.duringPack = func(rel string) {
+				if rel != "b.html" || once {
+					return
+				}
+				once = true
+				var err error
+				if change == "deleted" {
+					err = os.Remove(filepath.Join(dir, rel))
+				} else {
+					err = os.Truncate(filepath.Join(dir, rel), 1)
+				}
+				if err != nil {
+					t.Error(err)
+				}
+			}
+			up.mu.Unlock()
+			write(t, dir, "a.html", "a1")
+			h.event(filepath.Join(dir, "a.html"), fsnotify.Write)
+			h.advance(time.Second)
+			if n := receive(t, h.notices); n.Kind != NoticeTreeChanged || !errors.Is(n.Err, ErrSourceChanged) {
+				t.Fatalf("notice=%+v", n)
+			}
+			if up.calls() != 0 {
+				t.Fatal("published a pack of a changing tree")
+			}
+			// No new event: the failed pack itself marked the tree dirty.
+			h.advance(time.Second)
+			if up.calls() != 1 {
+				t.Fatalf("uploads=%d after the tree settled; want 1", up.calls())
+			}
+			want := []string{"a.html", "b.html"}
+			if change == "deleted" {
+				want = want[:1]
+			}
+			if got := up.lastPack(); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("pack=%v; want %v", got, want)
+			}
+		})
+	}
+}
+
+// An emptied folder (a clean step before a rebuild) skips the publish and
+// keeps watching; the rebuilt content then publishes normally.
+func TestWatchEmptyFolder(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	up := &fakeUploader{}
+	h := newHarness(t, up, dir)
+	if err := os.Remove(filepath.Join(dir, "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Remove)
+	h.advance(time.Second)
+	if n := receive(t, h.notices); n.Kind != NoticeEmptyTree || !errors.Is(n.Err, ErrEmptyDirectory) {
+		t.Fatalf("notice=%+v", n)
+	}
+	if up.calls() != 0 {
+		t.Fatal("published an empty folder")
+	}
+	write(t, dir, "index.html", "v1")
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Create)
+	h.advance(time.Second)
+	if up.calls() != 1 {
+		t.Fatalf("uploads=%d after rebuild; want 1", up.calls())
+	}
+}
+
+// The only file vanishes after the scan but before the pack: the packer
+// finds the folder empty, which is skipped like an empty scan.
+func TestWatchFolderEmptiedBeforePack(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	up := &fakeUploader{}
+	h := newHarness(t, up, dir)
+	up.mu.Lock()
+	up.beforePrepare = func() {
+		if err := os.Remove(filepath.Join(dir, "index.html")); err != nil {
+			t.Error(err)
+		}
+	}
+	up.mu.Unlock()
+	write(t, dir, "index.html", "v1")
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if n := receive(t, h.notices); n.Kind != NoticeEmptyTree || !errors.Is(n.Err, ErrEmptyDirectory) {
+		t.Fatalf("notice=%+v", n)
+	}
+	if up.calls() != 0 {
+		t.Fatal("published an empty folder")
+	}
+}
+
+// A single file edited while the real client uploads it marks the tree
+// dirty; the settled content publishes as one version.
+func TestRealClientWatchMidUploadEdit(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "page.html", "v0")
+	c, state := newUploadClient(t)
+	h := newHarness(t, c, filepath.Join(dir, "page.html"))
+	state.mu.Lock()
+	state.onStart = func() { // runs with state.mu held
+		state.onStart = nil
+		if err := os.WriteFile(filepath.Join(dir, "page.html"), []byte("v2"), 0600); err != nil {
+			t.Error(err)
+		}
+	}
+	state.mu.Unlock()
+	write(t, dir, "page.html", "v1")
+	h.event(filepath.Join(dir, "page.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if n := receive(t, h.notices); n.Kind != NoticeTreeChanged || !errors.Is(n.Err, ErrSourceChanged) {
+		t.Fatalf("notice=%+v", n)
+	}
+	h.advance(time.Second)
+	if got, versions := state.lastFiles()["page.html"], state.versionCount(); got != "v2" || versions != 1 {
+		t.Fatalf("published %q in %d versions; want v2 once", got, state.versions)
+	}
+	receive(t, h.published)
 }

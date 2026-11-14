@@ -34,23 +34,25 @@ type Source struct {
 	Entry string
 	SPA   bool
 	Note  string
-	// OnSkipped reports excluded file entries when preparing a directory.
-	// Excluded directory subtrees are not traversed or counted as files.
-	OnSkipped func(int)
+	// OnSkipped is called once, after a directory upload that excluded n > 0
+	// file entries. Excluded directory subtrees are not traversed or
+	// counted as files.
+	OnSkipped func(n int)
 }
 
-// Prepared is a source packed into a single upload-ready file.
+// Prepared is a source ready to upload: the original file itself, or a
+// temporary spool or pack that Close removes.
 type Prepared struct {
 	File     string // path to upload
 	Kind     string
 	Filename string
 	// Digest is in the same domain as hashTree: sorted path/file hashes
-	// for a directory, or the source bytes' hash for an explicit file.
-	// It is computed as those bytes are read into the snapshot/pack.
-	Digest string
-	// Skipped is the number of file entries the folder walk excluded
-	// (editor/OS temp files); 0 for single-file sources.
-	Skipped int
+	// for a directory, or the source bytes' hash for an explicit file,
+	// computed as those bytes were read into the pack. It is empty when
+	// File is uploaded as is; the upload checksum, which UploadFile checks
+	// against the bytes sent, is then the digest.
+	Digest  string
+	skipped int // file entries the folder walk excluded
 	cleanup func()
 }
 
@@ -58,6 +60,19 @@ func (p *Prepared) Close() {
 	if p.cleanup != nil {
 		p.cleanup()
 	}
+}
+
+// ErrEmptyDirectory reports a folder with no publishable files.
+var ErrEmptyDirectory = errors.New("folder has no files to publish")
+
+// sourceChanged marks errors that mean the tree changed under a read that
+// had already listed it: an entry that vanished, or a file that ended
+// before its listed size. Other errors pass through unchanged.
+func sourceChanged(err error) error {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("%w: %w", ErrSourceChanged, err)
+	}
+	return err
 }
 
 // DetectKind chooses html for .html/.htm files, bundle for directories and
@@ -73,9 +88,11 @@ func DetectKind(name string, isDir bool) string {
 	return api.KindFile
 }
 
-// Prepare snapshots a Source into upload-ready temporary files. File
-// content is immutable throughout hashing and upload, including when the
-// original path is overwritten by an editor during an upload.
+// Prepare makes a Source upload-ready. A single file that is uploaded as
+// is (html, file, or a .tar.gz bundle) is not copied: UploadFile detects a
+// mid-upload edit. Directories and other bundles are packed into a
+// temporary tar.gz, and stdin is spooled to a temporary file. Errors from
+// a tree that changes while it is read wrap ErrSourceChanged.
 func Prepare(src *Source) (*Prepared, error) {
 	p := &Prepared{}
 	var tmpFiles []string
@@ -95,8 +112,7 @@ func Prepare(src *Source) (*Prepared, error) {
 
 	srcPath, name := src.Path, src.Name
 	isDir := false
-	var input io.Reader = src.Reader
-	if input != nil {
+	if src.Reader != nil {
 		if name == "" {
 			return nil, errors.New("a file name is required when reading from stdin (use --name)")
 		}
@@ -129,33 +145,25 @@ func Prepare(src *Source) (*Prepared, error) {
 	}
 	p.Kind, p.Filename = kind, name
 
-	if !isDir {
-		if input == nil {
-			f, err := os.Open(srcPath)
-			if err != nil {
-				return nil, err
-			}
-			defer f.Close()
-			input = f
-		}
-		snapshot, err := newTemp()
+	if src.Reader != nil {
+		// A stream cannot be re-read for a resumed chunk: spool it.
+		spool, err := newTemp()
 		if err != nil {
 			return nil, err
 		}
-		h := sha256.New()
-		_, err = io.Copy(snapshot, io.TeeReader(input, h))
-		if cerr := snapshot.Close(); err == nil {
+		_, err = io.Copy(spool, src.Reader)
+		if cerr := spool.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
 			return fail(err)
 		}
-		srcPath = snapshot.Name()
-		p.File, p.Digest = srcPath, hex.EncodeToString(h.Sum(nil))
-		lower := strings.ToLower(name)
-		if kind != api.KindBundle || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") {
-			return p, nil
-		}
+		srcPath = spool.Name()
+	}
+	lower := strings.ToLower(name)
+	if !isDir && (kind != api.KindBundle || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz")) {
+		p.File = srcPath
+		return p, nil
 	}
 
 	packed, err := newTemp()
@@ -164,15 +172,15 @@ func Prepare(src *Source) (*Prepared, error) {
 	}
 	switch {
 	case isDir:
-		p.Digest, p.Skipped, err = packDir(srcPath, packed)
-	case strings.HasSuffix(strings.ToLower(name), ".zip"):
-		err = zipToTarGz(srcPath, packed)
+		p.Digest, p.skipped, err = packDir(srcPath, packed)
+	case strings.HasSuffix(lower, ".zip"):
+		p.Digest, err = zipToTarGz(srcPath, packed)
 	default:
 		entry := name
 		if strings.EqualFold(path.Ext(name), ".html") || strings.EqualFold(path.Ext(name), ".htm") {
 			entry = "index.html"
 		}
-		err = packSingle(srcPath, entry, packed)
+		p.Digest, err = packSingle(srcPath, entry, packed)
 	}
 	if cerr := packed.Close(); err == nil {
 		err = cerr
@@ -192,11 +200,11 @@ func skipEntry(rel string, d fs.DirEntry) bool {
 // packer, the watch content digest, and the watch event filter all consult
 // it, so they can never disagree about what counts. Directories: VCS and
 // dependency caches. Files: OS junk and editor temp/swap/backup files
-// (vim's swap range .swp through .saa plus .swx on dot-prefixed names,
+// (vim swaps .swp down to .swa plus .swx on dot-prefixed names,
 // JetBrains ___jb_tmp___/___jb_old___, gedit .goutputstream-*, *~
 // backups, emacs .# lock files and #…# autosave), which never belong in a
 // published artifact. Applied only to entries inside a directory: an
-// explicitly named single file is always published (m5).
+// explicitly named single file is always published.
 func skipEntryName(base string, isDir bool) bool {
 	if isDir {
 		switch base {
@@ -226,25 +234,21 @@ func skipEntryName(base string, isDir bool) bool {
 	return false
 }
 
-// vimSwapName matches vim's hidden swap-file names for dotfiles:
-// .file.swp, .file.swo, … down to .file.saa (vim counts the last letter
-// backwards), plus the rarer .swx. Only dot-prefixed names are matched so
-// a legitimate "site.map" style name is never dropped.
+// vimSwapName matches vim's swap-file names for dotfiles: .file.swp,
+// .file.swo, … down to .file.swa (vim counts the last letter backwards),
+// plus .swx. Only dot-prefixed names are matched, and only the .sw range,
+// so "site.swp" or hidden ".logo.svg" and ".schema.sql" are never dropped.
 func vimSwapName(lower string) bool {
-	if !strings.HasPrefix(lower, ".") {
+	if !strings.HasPrefix(lower, ".") || len(lower) < len(".x.swp") {
 		return false
 	}
-	dot := strings.LastIndex(lower, ".")
-	if dot <= 0 || dot == len(lower)-1 {
-		return false
-	}
-	ext := lower[dot+1:]
-	// ext must be exactly s[a-w][a-z] (swp…saa) or swx.
-	if len(ext) != 3 || ext[0] != 's' {
-		return false
-	}
-	return (ext[1] >= 'a' && ext[1] <= 'w') && (ext[2] >= 'a' && ext[2] <= 'z') || ext == "swx"
+	ext := lower[len(lower)-4:]
+	return strings.HasPrefix(ext, ".sw") && (ext[3] >= 'a' && ext[3] <= 'p' || ext[3] == 'x')
 }
+
+// walkTestHook, when set by a test, runs between a file's stat and its
+// read, to reproduce a tree that changes mid-walk. Always nil otherwise.
+var walkTestHook func(rel string)
 
 // walkPackable walks the regular files under dir that the packer packs —
 // applying the shared skip rules and following symlinks to their content,
@@ -275,6 +279,9 @@ func walkPackable(dir string, fn func(rel, abs string, info fs.FileInfo) error) 
 		info, err := os.Stat(p) // follow symlinks to their content
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
+		}
+		if walkTestHook != nil {
+			walkTestHook(rel)
 		}
 		return fn(rel, p, info)
 	})
@@ -316,7 +323,10 @@ func packDir(dir string, w io.Writer) (string, int, error) {
 		return nil
 	})
 	if err != nil {
-		return "", 0, err
+		return "", 0, sourceChanged(err)
+	}
+	if len(db.entries) == 0 {
+		return "", 0, fmt.Errorf("%s: %w", dir, ErrEmptyDirectory)
 	}
 	if err := tw.Close(); err != nil {
 		return "", 0, err
@@ -345,23 +355,47 @@ func addFile(tw *tar.Writer, src, name string, size int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func packSingle(src, name string, w io.Writer) error {
+// packSingle packs one file as a bundle and returns the SHA-256 of the
+// source bytes packed.
+func packSingle(src, name string, w io.Writer) (string, error) {
 	st, err := os.Stat(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
-	if _, err := addFile(tw, src, name, st.Size()); err != nil {
-		return err
+	sum, err := addFile(tw, src, name, st.Size())
+	if err != nil {
+		return "", sourceChanged(err)
 	}
 	if err := tw.Close(); err != nil {
-		return err
+		return "", err
 	}
-	return gz.Close()
+	return sum, gz.Close()
 }
 
-func zipToTarGz(src string, w io.Writer) error {
+// zipToTarGz converts a zip to a tar.gz bundle and returns the zip's
+// SHA-256. Zip reads are random access, so the file is hashed before and
+// after the conversion; a difference means it changed in between.
+func zipToTarGz(src string, w io.Writer) (string, error) {
+	before, err := hashFile(src)
+	if err != nil {
+		return "", err
+	}
+	if err := convertZip(src, w); err != nil {
+		return "", err
+	}
+	after, err := hashFile(src)
+	if err != nil {
+		return "", sourceChanged(err)
+	}
+	if after != before {
+		return "", fmt.Errorf("%w: %s was modified while converting it", ErrSourceChanged, src)
+	}
+	return before, nil
+}
+
+func convertZip(src string, w io.Writer) error {
 	zr, err := zip.OpenReader(src)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
@@ -416,50 +450,88 @@ type PublishOptions struct {
 	MaxViews int
 }
 
-// Share prepares, uploads, and publishes a new artifact.
+// Share prepares, uploads, and publishes a new artifact. If the source
+// changes while it is read, it is prepared and uploaded once more.
 func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, progress Progress) (*api.Artifact, error) {
-	p, err := Prepare(src)
-	if err != nil {
-		return nil, err
-	}
-	defer p.Close()
-	if p.Skipped > 0 && src.OnSkipped != nil {
-		src.OnSkipped(p.Skipped)
-	}
-	id, sum, err := c.UploadFile(ctx, p.File, progress)
+	u, err := retrySourceChange(func() (*upload, error) { return c.prepareAndUpload(ctx, src, progress) })
 	if err != nil {
 		return nil, err
 	}
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
-		PublishRequest: api.PublishRequest{UploadID: id, SHA256: sum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note},
+		PublishRequest: u.request(src),
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
 	})
 }
 
 // Update uploads src as a new version of an existing artifact (same link).
+// If the source changes while it is read, it is prepared and uploaded once
+// more.
 func (c *Client) Update(ctx context.Context, artifactID string, src *Source, progress Progress) (*api.Artifact, error) {
-	_, a, err := c.UpdateDigest(ctx, artifactID, src, progress)
-	return a, err
+	u, err := retrySourceChange(func() (*upload, error) { return c.prepareAndUpload(ctx, src, progress) })
+	if err != nil {
+		return nil, err
+	}
+	req := u.request(src)
+	return c.CreateVersion(ctx, artifactID, &req)
 }
 
-// UpdateDigest is Update and also returns a content digest in the same
-// domain as hashTree: for folder bundles, the `path sha` digest of what
-// was actually packed; for an explicit file, the SHA-256 of its source
-// snapshot (including --as bundle and archives). The API separately gets
-// UploadFile's checksum of the transport blob.
+// UpdateDigest is a single Update attempt that also returns a content
+// digest in the same domain as hashTree: for folder bundles, the
+// `path sha` digest of what was actually packed; for an explicit file,
+// the SHA-256 of its bytes as read (including --as bundle and archives).
+// It does not retry: an error wrapping ErrSourceChanged means the source
+// changed while it was read, and the caller decides when to try again.
 func (c *Client) UpdateDigest(ctx context.Context, artifactID string, src *Source, progress Progress) (string, *api.Artifact, error) {
+	u, err := c.prepareAndUpload(ctx, src, progress)
+	if err != nil {
+		return "", nil, err
+	}
+	req := u.request(src)
+	a, err := c.CreateVersion(ctx, artifactID, &req)
+	return u.digest, a, err
+}
+
+// upload is a prepared source after a successful UploadFile.
+type upload struct {
+	id, blobSum, digest, kind, filename string
+}
+
+func (u *upload) request(src *Source) api.PublishRequest {
+	return api.PublishRequest{UploadID: u.id, SHA256: u.blobSum, Kind: u.kind, Filename: u.filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note}
+}
+
+// prepareAndUpload is the shared Prepare + UploadFile step. It reports
+// excluded folder entries through src.OnSkipped, once per successful
+// upload.
+func (c *Client) prepareAndUpload(ctx context.Context, src *Source, progress Progress) (*upload, error) {
 	p, err := Prepare(src)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	defer p.Close()
-	if p.Skipped > 0 && src.OnSkipped != nil {
-		src.OnSkipped(p.Skipped)
-	}
 	id, blobSum, err := c.UploadFile(ctx, p.File, progress)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	a, err := c.CreateVersion(ctx, artifactID, &api.PublishRequest{UploadID: id, SHA256: blobSum, Kind: p.Kind, Filename: p.Filename, Entry: src.Entry, SPA: src.SPA, Note: src.Note})
-	return p.Digest, a, err
+	if p.skipped > 0 && src.OnSkipped != nil {
+		src.OnSkipped(p.skipped)
+	}
+	digest := p.Digest
+	if digest == "" {
+		digest = blobSum // File was the source itself, checked as sent
+	}
+	return &upload{id: id, blobSum: blobSum, digest: digest, kind: p.Kind, filename: p.Filename}, nil
+}
+
+// retrySourceChange runs step again once if the source changed while it
+// was read, then gives up with an error that still wraps ErrSourceChanged.
+func retrySourceChange(step func() (*upload, error)) (*upload, error) {
+	u, err := step()
+	if errors.Is(err, ErrSourceChanged) {
+		u, err = step()
+		if errors.Is(err, ErrSourceChanged) {
+			err = fmt.Errorf("%w (tried twice; publish again once it stops changing)", err)
+		}
+	}
+	return u, err
 }

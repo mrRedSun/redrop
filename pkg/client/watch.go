@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,15 @@ import (
 // DefaultDebounce is how long the tree must stay quiet after a change
 // before Watch publishes (overridable with the --debounce flag).
 const DefaultDebounce = 500 * time.Millisecond
+
+// Retry policy for transient publish failures. A Retry-After header longer
+// than the backoff is honored up to MaxRetryAfter (10x RetryMax), so a
+// misconfigured proxy cannot park the watcher for hours.
+const (
+	RetryBase     = time.Second
+	RetryMax      = 60 * time.Second
+	MaxRetryAfter = 10 * RetryMax
+)
 
 // WatchOptions configures Watch. The content to publish is described by
 // the Source passed to Watch itself, so there is exactly one description
@@ -38,8 +49,8 @@ type WatchOptions struct {
 	// are guaranteed to be picked up.
 	OnReady func()
 	// OnNotice receives non-fatal watcher and retry notices (watch
-	// errors, retrying publishes, a vanished root). Kind distinguishes
-	// them; Attempt is set on KindRetry.
+	// errors, retrying publishes, a vanished root, a tree that changed
+	// mid-publish, an empty folder). Kind distinguishes them.
 	OnNotice func(Notice)
 	// Clock overrides timekeeping (tests). It drives both the debounce
 	// window and the retry delays.
@@ -61,14 +72,22 @@ const (
 	// NoticeRewatchFailed: re-registering watches (e.g. after overflow)
 	// failed; watching continues with the old set.
 	NoticeRewatchFailed NoticeKind = "rewatch_failed"
+	// NoticeTreeChanged: files changed while they were being read for a
+	// publish; it is retried once the tree settles again.
+	NoticeTreeChanged NoticeKind = "tree_changed"
+	// NoticeEmptyTree: the watched folder has no publishable files; the
+	// publish is skipped until files appear.
+	NoticeEmptyTree NoticeKind = "empty_folder"
 )
 
 // Notice is one non-fatal event during watching.
 type Notice struct {
 	Kind NoticeKind
-	// Attempt is the upcoming attempt number, set on KindRetry.
+	// Attempt is the upcoming attempt number, set on NoticeRetry.
 	Attempt int
-	Err     error
+	// Delay is the wait before that attempt, set on NoticeRetry.
+	Delay time.Duration
+	Err   error
 }
 
 // Clock is the subset of time Watch needs; injectable for deterministic
@@ -150,7 +169,7 @@ func transient(err error) bool {
 		return true
 	}
 	switch s := StatusOf(err); {
-	case s >= 500 || s == 429:
+	case s >= 500 || s == http.StatusTooManyRequests:
 		return true
 	default:
 		return false
@@ -174,7 +193,7 @@ func Watch(ctx context.Context, up Uploader, artifactID string, src *Source, opt
 		opts.Clock = realClock{}
 	}
 	if opts.Retrier == nil {
-		opts.Retrier = ExponentialRetrier{Base: time.Second, Max: 60 * time.Second}
+		opts.Retrier = ExponentialRetrier{Base: RetryBase, Max: RetryMax}
 	}
 	// A clean root makes parent/child comparisons and event filtering
 	// correct for "./site", "site/", and tab-completed variants.
@@ -411,9 +430,9 @@ func (w *watcher) notify(n Notice) {
 // last upload. UpdateDigest records the tree digest of the bytes actually
 // packed, using the same digest domain as hashTree.
 func (w *watcher) publishIfChanged() error {
-	sum, err := hashTree(w.root)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	sum, files, err := scanTree(w.root)
+	if errors.Is(err, fs.ErrNotExist) {
+		if _, serr := os.Stat(w.root); errors.Is(serr, fs.ErrNotExist) {
 			// The root itself vanished. There is nothing to publish: the
 			// upload path needs the path on disk. The parent watch sees
 			// the root's recreation, registerAll rebuilds the watches,
@@ -423,18 +442,45 @@ func (w *watcher) publishIfChanged() error {
 			w.notify(Notice{Kind: NoticeRootVanished, Err: err})
 			return nil
 		}
-		return err
+		err = sourceChanged(err) // a member vanished between walk and read
+	}
+	if err != nil {
+		return w.sourceError(err)
+	}
+	if files == 0 {
+		// A build tool cleaned the folder. Keep the last version; the
+		// rebuilt content publishes as a normal change.
+		w.notify(Notice{Kind: NoticeEmptyTree, Err: fmt.Errorf("%s: %w", w.root, ErrEmptyDirectory)})
+		return nil
 	}
 	if sum == w.published {
 		return nil
 	}
-	_, _, err = w.publishWithRetry()
+	return w.publishWithRetry()
+}
+
+// sourceError keeps watching through local races with a tree that is
+// being rewritten: a tree that changed mid-read (or a file that vanished
+// before upload) is marked dirty and tried again once it settles, and a folder found empty while packing is
+// skipped. Other errors are returned (fatal).
+func (w *watcher) sourceError(err error) error {
+	switch {
+	case errors.Is(err, ErrSourceChanged), errors.Is(err, fs.ErrNotExist):
+		// Not-exist here is local (no API error wraps it): the root or a
+		// file was replaced between the scan and the upload.
+		w.notify(Notice{Kind: NoticeTreeChanged, Err: err})
+		w.markDirty(w.root)
+		return nil
+	case errors.Is(err, ErrEmptyDirectory):
+		w.notify(Notice{Kind: NoticeEmptyTree, Err: err})
+		return nil
+	}
 	return err
 }
 
-// publishWithRetry calls Update until it succeeds, the error is fatal, or
-// ctx is done. It returns the digest of the uploaded pack and the artifact.
-func (w *watcher) publishWithRetry() (string, *api.Artifact, error) {
+// publishWithRetry calls UpdateDigest until it succeeds, the error is
+// fatal, the source changes under it, or ctx is done.
+func (w *watcher) publishWithRetry() error {
 	for attempt := 1; ; attempt++ {
 		sum, a, err := w.up.UpdateDigest(w.ctx, w.artifactID, w.src, w.opts.Progress)
 		if err == nil {
@@ -442,22 +488,22 @@ func (w *watcher) publishWithRetry() (string, *api.Artifact, error) {
 			if w.opts.OnPublish != nil {
 				w.opts.OnPublish(WatchResult{Artifact: a, Version: a.Version, At: w.opts.Clock.Now()})
 			}
-			return sum, a, nil
+			return nil
 		}
 		if w.ctx.Err() != nil {
-			return "", nil, context.Canceled // clean shutdown, not the upload error
+			return context.Canceled // clean shutdown, not the upload error
 		}
 		if !transient(err) {
-			return "", nil, err
+			return w.sourceError(err)
 		}
 		delay := w.opts.Retrier.Next(attempt)
 		var apiErr *Error
-		if errors.As(err, &apiErr) && apiErr.Status == 429 {
-			delay = max(delay, apiErr.RetryAfter)
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests {
+			delay = max(delay, min(apiErr.RetryAfter, MaxRetryAfter))
 		}
-		w.notify(Notice{Kind: NoticeRetry, Attempt: attempt + 1, Err: err})
+		w.notify(Notice{Kind: NoticeRetry, Attempt: attempt + 1, Delay: delay, Err: err})
 		if !w.awaitRetry(delay) {
-			return "", nil, context.Canceled
+			return context.Canceled
 		}
 	}
 }
@@ -520,12 +566,19 @@ func watchTree(w *fsnotify.Watcher, dir string) error {
 // the tree; an explicitly named single-file root is always hashed (the
 // same rule `update` applies when publishing it).
 func hashTree(root string) (string, error) {
+	sum, _, err := scanTree(root)
+	return sum, err
+}
+
+// scanTree is hashTree plus the number of files hashed (1 for a file root).
+func scanTree(root string) (string, int, error) {
 	st, err := os.Stat(root)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if !st.IsDir() {
-		return hashFile(root)
+		sum, err := hashFile(root)
+		return sum, 1, err
 	}
 	db := &treeDigestBuilder{}
 	_, err = walkPackable(root, func(rel, abs string, info fs.FileInfo) error {
@@ -537,9 +590,9 @@ func hashTree(root string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return db.digest(), nil
+	return db.digest(), len(db.entries), nil
 }
 
 func hashFile(p string) (string, error) {

@@ -17,8 +17,20 @@ type watchEvent struct {
 	Version int    `json:"version,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Attempt int    `json:"attempt,omitempty"`
+	DelayMS int64  `json:"delay_ms,omitempty"`
 	Error   string `json:"error,omitempty"`
 	At      string `json:"at"`
+}
+
+// noticeEvents is the --json wire name of each notice kind. It is the CLI
+// contract, kept here so renaming a library constant cannot change it.
+var noticeEvents = map[client.NoticeKind]string{
+	client.NoticeRetry:         "retry",
+	client.NoticeWatchError:    "watch_error",
+	client.NoticeRootVanished:  "root_vanished",
+	client.NoticeRewatchFailed: "rewatch_failed",
+	client.NoticeTreeChanged:   "tree_changed",
+	client.NoticeEmptyTree:     "empty_folder",
 }
 
 func watchCmd() *cobra.Command {
@@ -35,13 +47,17 @@ Edits are debounced (--debounce, default 500ms). Directory uploads use the
 skip rule listed under Share in "redrop guide"; explicitly named files are
 always uploaded. Identical content never publishes a version. Each publish
 prints the version number and time. With --json, each publish or typed
-notice (retry, watch_error, root_vanished, rewatch_failed) is one JSON line;
-retries include the upcoming attempt number.
+notice (retry, watch_error, root_vanished, rewatch_failed, tree_changed,
+empty_folder) is one JSON line; retries include the upcoming attempt number
+and the delay before it.
 
-Ctrl-C or SIGTERM stops watching and exits 0. Network errors, rate limiting,
-and server errors are retried with nominal exponential backoff from 1s to
-60s, with jitter below the cap. Rate-limit responses honor Retry-After.
-Auth or not-found errors stop with the CLI's usual exit codes.`,
+If files change while a version is being packed or uploaded, or the folder
+is empty (a build tool cleaned it), watch waits for the next change instead
+of exiting. Ctrl-C or SIGTERM stops watching and exits 0. Network errors,
+rate limiting, and server errors are retried with nominal exponential
+backoff from 1s to 60s, with jitter below the cap. Rate-limit responses
+honor Retry-After up to 10 minutes. Auth or not-found errors stop with the
+CLI's usual exit codes.`,
 		Example: `  redrop watch k2j4m9qx7d4a report.html
   redrop watch https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
   redrop watch k2j4m9qx7d4a ./site --debounce 1s --json`,
@@ -103,8 +119,11 @@ func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
 		OnNotice: func(n client.Notice) {
 			if g.json {
 				event := watchEvent{
-					Event: string(n.Kind), ID: id, Attempt: n.Attempt,
-					At: time.Now().Format(time.RFC3339),
+					Event: noticeEvents[n.Kind], ID: id, Attempt: n.Attempt,
+					DelayMS: n.Delay.Milliseconds(), At: time.Now().Format(time.RFC3339),
+				}
+				if event.Event == "" {
+					event.Event = "notice"
 				}
 				if n.Err != nil {
 					event.Error = n.Err.Error()
@@ -114,13 +133,19 @@ func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
 			}
 			switch n.Kind {
 			case client.NoticeRetry:
-				fmt.Fprintf(os.Stderr, "redrop: retry attempt %d: %v\n", n.Attempt, n.Err)
+				fmt.Fprintf(os.Stderr, "redrop: retrying in %s (attempt %d): %v\n", n.Delay.Round(100*time.Millisecond), n.Attempt, n.Err)
 			case client.NoticeWatchError:
 				fmt.Fprintf(os.Stderr, "redrop: watch error: %v\n", n.Err)
 			case client.NoticeRootVanished:
-				fmt.Fprintf(os.Stderr, "redrop: %s disappeared; waiting for it to come back: %v\n", path, n.Err)
+				fmt.Fprintf(os.Stderr, "redrop: %s disappeared; waiting for it to come back\n", path)
 			case client.NoticeRewatchFailed:
 				fmt.Fprintf(os.Stderr, "redrop: re-watching %s failed: %v\n", path, n.Err)
+			case client.NoticeTreeChanged:
+				fmt.Fprintf(os.Stderr, "redrop: %s changed while publishing; trying again once it settles\n", path)
+			case client.NoticeEmptyTree:
+				fmt.Fprintf(os.Stderr, "redrop: %s has no files to publish; waiting for files\n", path)
+			default:
+				fmt.Fprintf(os.Stderr, "redrop: watch notice %s: %v\n", n.Kind, n.Err)
 			}
 		},
 		// Announce only once the watches are registered and the initial

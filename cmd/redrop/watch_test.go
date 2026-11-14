@@ -100,11 +100,16 @@ func TestWatchCanceledContextSucceeds(t *testing.T) {
 func TestWatchJSONLines(t *testing.T) {
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	notices := []client.Notice{
-		{Kind: client.NoticeRetry, Attempt: 2, Err: errors.New("temporary failure")},
+		{Kind: client.NoticeRetry, Attempt: 2, Delay: 1500 * time.Millisecond, Err: errors.New("temporary failure")},
 		{Kind: client.NoticeWatchError, Err: errors.New("watch overflow")},
 		{Kind: client.NoticeRootVanished, Err: os.ErrNotExist},
 		{Kind: client.NoticeRewatchFailed, Err: errors.New("permission denied")},
+		{Kind: client.NoticeTreeChanged, Err: client.ErrSourceChanged},
+		{Kind: client.NoticeEmptyTree, Err: client.ErrEmptyDirectory},
+		{Kind: client.NoticeKind("future"), Err: errors.New("new kind")},
 	}
+	// The wire names are the CLI contract, written out literally here.
+	wireNames := []string{"retry", "watch_error", "root_vanished", "rewatch_failed", "tree_changed", "empty_folder", "notice"}
 	out, errOut := captureCLIOutput(t, func() {
 		g.json = true
 		opts := watchOptions("artifact-id", "site", time.Second)
@@ -142,13 +147,34 @@ func TestWatchJSONLines(t *testing.T) {
 			want["at"] = at.Format(time.RFC3339)
 		} else {
 			n := notices[i-1]
-			want["event"], want["error"] = string(n.Kind), n.Err.Error()
+			want["event"], want["error"] = wireNames[i-1], n.Err.Error()
 			if n.Kind == client.NoticeRetry {
-				want["attempt"] = float64(n.Attempt)
+				want["attempt"], want["delay_ms"] = float64(n.Attempt), float64(1500)
 			}
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("line %d = %#v; want %#v", i, got, want)
+		}
+	}
+}
+
+func TestWatchTextNotices(t *testing.T) {
+	for _, tc := range []struct {
+		notice client.Notice
+		want   string
+	}{
+		{client.Notice{Kind: client.NoticeRetry, Attempt: 2, Delay: 1530 * time.Millisecond, Err: errors.New("offline")}, "redrop: retrying in 1.5s (attempt 2): offline\n"},
+		{client.Notice{Kind: client.NoticeRootVanished, Err: errors.New("stat site: no such file or directory")}, "redrop: site disappeared; waiting for it to come back\n"},
+		{client.Notice{Kind: client.NoticeTreeChanged, Err: client.ErrSourceChanged}, "redrop: site changed while publishing; trying again once it settles\n"},
+		{client.Notice{Kind: client.NoticeEmptyTree, Err: client.ErrEmptyDirectory}, "redrop: site has no files to publish; waiting for files\n"},
+		{client.Notice{Kind: client.NoticeKind("future"), Err: errors.New("new kind")}, "redrop: watch notice future: new kind\n"},
+	} {
+		out, errOut := captureCLIOutput(t, func() {
+			g.json = false
+			watchOptions("artifact-id", "site", time.Second).OnNotice(tc.notice)
+		})
+		if out != "" || errOut != tc.want {
+			t.Errorf("%s: stdout=%q stderr=%q; want %q", tc.notice.Kind, out, errOut, tc.want)
 		}
 	}
 }
@@ -224,5 +250,14 @@ func TestWatchUnauthorizedExitCode(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("made %d requests; auth failure must stop without retry", got)
+	}
+}
+
+// An empty folder fails locally with the exit code the server's 400 gave.
+func TestEmptyFolderExitCode(t *testing.T) {
+	_, err := client.Prepare(&client.Source{Path: t.TempDir()})
+	var ee *exitError
+	if !errors.As(mapErr(err), &ee) || ee.code != exitUsage || !errors.Is(err, client.ErrEmptyDirectory) {
+		t.Fatalf("empty folder: %v", err)
 	}
 }

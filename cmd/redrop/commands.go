@@ -235,9 +235,7 @@ func (f *contentFlags) source(arg string) (*client.Source, error) {
 }
 
 func reportSkippedFiles(n int) {
-	if n > 0 {
-		fmt.Fprintf(os.Stderr, "redrop: skipped %d file%s from folder upload\n", n, plural(n))
-	}
+	fmt.Fprintf(os.Stderr, "redrop: skipped %d file%s from folder upload\n", n, plural(n))
 }
 
 func shareCmd() *cobra.Command {

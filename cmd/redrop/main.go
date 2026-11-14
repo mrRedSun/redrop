@@ -138,6 +138,9 @@ func mapErr(err error) error {
 	if errors.As(err, &ee) {
 		return err
 	}
+	if errors.Is(err, client.ErrEmptyDirectory) {
+		return &exitError{exitUsage, err} // as when the server rejected it
+	}
 	var ne *client.NetworkError
 	if errors.As(err, &ne) {
 		return &exitError{exitNetwork, err}

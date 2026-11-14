@@ -54,6 +54,7 @@ PATH decides the kind (override with --as html|file|bundle):
 - any other file -> "file": a page with inline preview (image, video, audio,
   PDF, text/code) and a Download button.
 - "-"            -> read stdin; --name is required (e.g. --name report.html).
+  Other non-regular paths, such as a pipe from <(cmd), are rejected.
 - site.zip / site.tar.gz with --as bundle -> unpacked as a static site.
 
 Directory uploads (share, update, and watch) skip these entries:
@@ -62,16 +63,20 @@ Directory uploads (share, update, and watch) skip these entries:
 - Files .DS_Store and Thumbs.db.
 - Editor backups ending in ~, Emacs locks starting with .#, and Emacs
   autosaves #...# only when the name is longer than two characters.
-- Hidden Vim swaps matching ^\..*\.s[a-w][a-z]$, including .page.swp,
-  .page.swo down to .page.saa, plus hidden .swx variants.
+- Hidden Vim swaps: dot-prefixed names ending in .swa to .swp, or .swx,
+  such as .page.swp and .page.swo.
 - JetBrains files ending in ___jb_tmp___ or ___jb_old___, and gedit files
   starting with .goutputstream-.
 File-name filters are case-insensitive; directory names match exactly.
-Legitimate names 4913, #, ##, and non-hidden x.swp are kept. These rules apply
+Legitimate names 4913, #, ##, non-hidden x.swp, and hidden files such as
+.logo.svg, .schema.sql, .subs.srt, and .key.sig are kept. These rules apply
 only inside directories: an explicitly named single file is always uploaded.
 Share and update print one stderr line with the number of excluded file
 entries encountered, when nonzero. Files inside excluded directory trees
 are not counted. No skipped-file line is printed when the count is zero.
+A folder with no files to upload fails with exit code 2. A PATH that is a
+symlink to a folder is not followed and counts as empty; pass the folder
+itself (for example "$(realpath dist)").
 
 Supplied .zip/.tar.gz bundle entries are not editor-filtered. A .zip is
 converted to tar.gz using the existing archive conventions: strip a common
@@ -85,7 +90,9 @@ the artifact object: {"id","url","title","kind","status","expires_at",...}
 plus "password" when one was generated.
 
 Limits are set by the server (typically 500 MB per version). Large uploads are
-chunked and resume automatically after network errors.
+chunked and resume automatically after network errors. A single file is
+uploaded from its own path, without a temporary copy; if it changes during
+the upload, share and update start over once, then fail with exit code 1.
 
 ## Access control
 
@@ -138,18 +145,25 @@ version number and time. With --json, each publish or non-fatal notice is
 one JSON line:
 
     {"event":"publish","id":"…","version":3,"url":"https://…","at":"…"}
-    {"event":"retry","id":"…","attempt":2,"error":"cannot reach server: …","at":"…"}
+    {"event":"retry","id":"…","attempt":2,"delay_ms":1000,"error":"cannot reach server: …","at":"…"}
 
-Other notice events are watch_error, root_vanished, and rewatch_failed.
-Each includes id and at, plus error when available; only retry has attempt,
-the upcoming upload attempt number (2 for the first retry).
+Other notice events are watch_error, root_vanished, rewatch_failed,
+tree_changed, and empty_folder. Each includes id and at, plus error when
+available; only retry has attempt, the upcoming upload attempt number (2 for
+the first retry), and delay_ms, the wait before it.
+
+Build tools that clean and rebuild the folder are handled: if files change
+or vanish while a version is packed or uploaded, watch prints tree_changed
+and tries again once the folder settles; an empty folder prints
+empty_folder and publishes nothing until files appear.
 
 Never two uploads at once; changes that land during an upload are published
 once more afterwards. Atomic editor saves (write temp file, rename) and
 delete+recreate are handled. Ctrl-C or SIGTERM stops watching and exits 0.
 Network errors, rate limiting, and server errors are retried with nominal
 exponential backoff from 1s to 60s, with jitter below the cap. Rate-limit
-responses honor Retry-After when supplied. Auth or not-found errors stop
+responses honor Retry-After when supplied, up to 10 minutes (10x the backoff
+cap). Auth or not-found errors stop
 with exit codes 3/4. New subdirectories are picked up automatically. A watch
 session creates many versions; rely on the server's version retention
 (REDROP_KEEP_VERSIONS) or roll back with "redrop rollback". There is

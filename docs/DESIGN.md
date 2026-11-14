@@ -221,19 +221,35 @@ When `share`, `update`, or `watch` packs a directory, it skips:
 - Files named `.DS_Store` or `Thumbs.db`.
 - Editor backups `*~`, Emacs locks `.#*`, and Emacs autosaves `#...#` only
   when the name is longer than two characters.
-- Hidden Vim swaps matching `^\..*\.s[a-w][a-z]$`, such as `.page.swp`,
-  `.page.swo` down to `.page.saa`, plus hidden `.swx` variants.
+- Hidden Vim swaps: dot-prefixed names ending in `.swa` to `.swp`, or `.swx`,
+  such as `.page.swp` and `.page.swo`.
 - JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
   `.goutputstream-*` files.
 
 File-name filters are case-insensitive; directory names match exactly.
-Names `4913`, `#`, `##`, and non-hidden `x.swp` remain valid. Filtering applies
+Names `4913`, `#`, `##`, non-hidden `x.swp`, and hidden files such as
+`.logo.svg`, `.schema.sql`, `.subs.srt`, and `.key.sig` remain valid. Filtering applies
 only to entries inside directories. An explicitly named single file is always
 uploaded, even when its name matches a filter. `share` and `update` print one
 stderr line with the number of excluded file entries encountered, when
 nonzero. They do not count files inside excluded directory trees, and print
 no skipped-file line when the count is zero. This notice never changes their
-stdout JSON.
+stdout JSON. A folder with no files to upload fails locally (exit code 2)
+instead of uploading an empty bundle. A root that is a symlink to a folder is
+not followed (the walk does not descend into it), so it counts as empty; pass
+the resolved folder.
+
+`PATH` must be a regular file or a folder; pipes and devices (such as
+`<(cmd)`) are rejected rather than uploaded as zero bytes. Use `-` with
+`--name` for streamed input.
+
+A single file that is uploaded as is (`html`, `file`, or a `.tar.gz` bundle) is
+read from its own path, without a temporary copy. Its SHA-256 is taken before
+the upload and checked against the bytes sent. A mismatch means the file changed
+during the upload: `share` and `update` start over once and then fail, and
+`watch` waits for the next settled change. Directories, single files forced to
+a bundle, and `.zip` input are packed into a temporary tar.gz first; stdin is
+spooled to a temporary file.
 
 Archive entries supplied with `--as bundle` are not editor-filtered. ZIP input
 is converted to tar.gz using the existing archive conventions: strip a common
@@ -249,12 +265,22 @@ applies. An explicitly named single file is not filtered. Uploads run one at
 a time, with one trailing publish for edits received during an upload.
 
 With `--json`, each publish or non-fatal notice is one compact JSON line.
-Events are `publish`, `retry`, `watch_error`, `root_vanished`, and
-`rewatch_failed`. Every event has `id` and `at`. Publishes also have `version`
-and `url`; notices include `error` when available, and retries include
-`attempt`, the upcoming upload attempt number, starting at 2 for the first
-retry. Transient failures use nominal exponential backoff from 1s to 60s,
-with jitter below the cap, and rate-limit responses honor `Retry-After`.
+Events are `publish`, `retry`, `watch_error`, `root_vanished`,
+`rewatch_failed`, `tree_changed`, and `empty_folder`. The CLI maps library
+notice kinds to these names, so they are a stable contract. Every event has
+`id` and `at`. Publishes also have `version` and `url`; notices include
+`error` when available, and retries include `attempt`, the upcoming upload
+attempt number, starting at 2 for the first retry, and `delay_ms`, the wait
+before it. Transient failures use nominal exponential backoff from 1s to 60s,
+with jitter below the cap. Rate-limit responses honor `Retry-After` up to a
+ceiling of 10 minutes (10x the backoff cap), so a proxy that sends a huge
+value cannot park the watcher.
+
+Local races are not fatal. A file that vanishes or shrinks while a version is
+packed or uploaded (`ErrSourceChanged`) marks the tree dirty, emits
+`tree_changed`, and the publish runs again after the next debounce. A folder
+with no packable files emits `empty_folder` and publishes nothing; the last
+version stays live until the rebuilt content publishes as a normal change.
 Authentication and not-found errors use the normal CLI exit codes. Cancellation
 returns success. The command creates immutable versions; it does not squash
 history or inject live-reload code into uploaded artifacts.

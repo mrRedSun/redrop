@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,7 +140,8 @@ func newUploadClient(t *testing.T) (*Client, *uploadServer) {
 	t.Cleanup(server.Close)
 	return New(server.URL, "test-token"), state
 }
-func (s *uploadServer) count() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.uploads) }
+func (s *uploadServer) count() int        { s.mu.Lock(); defer s.mu.Unlock(); return len(s.uploads) }
+func (s *uploadServer) versionCount() int { s.mu.Lock(); defer s.mu.Unlock(); return s.versions }
 func (s *uploadServer) lastFiles() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -268,8 +270,8 @@ func makeArchive(t *testing.T, file string, zipFormat bool, contents string) {
 }
 
 func TestSkipEntryNames(t *testing.T) {
-	skip := []string{".index.html.swp", ".index.html.swo", ".index.html.swn", ".index.html.saa", ".index.html.swx", ".#page", "#page#", "page~", "page___jb_tmp___", "page___jb_old___", ".goutputstream-abcdef", ".DS_Store", "Thumbs.db"}
-	keep := []string{"4913", "#", "##", "x.swp", "x.swo", "notes.saa", ".sample.sxa", ".sample.swa.txt", "file___jb_tmp___notes", "plain.html", "api/items/4913"}
+	skip := []string{".index.html.swp", ".index.html.swo", ".index.html.swn", ".index.html.swa", ".index.html.swx", ".INDEX.HTML.SWP", ".#page", "#page#", "page~", "page___jb_tmp___", "page___jb_old___", ".goutputstream-abcdef", ".DS_Store", "Thumbs.db"}
+	keep := []string{"4913", "#", "##", "x.swp", "x.swo", "notes.saa", ".sample.sxa", ".sample.swa.txt", ".logo.svg", ".schema.sql", ".subs.srt", ".key.sig", ".index.html.saa", ".page.swq", ".swp", "file___jb_tmp___notes", "plain.html", "api/items/4913"}
 	for _, name := range skip {
 		if !skipEntryName(name, false) {
 			t.Errorf("failed to skip %s", name)
@@ -280,13 +282,12 @@ func TestSkipEntryNames(t *testing.T) {
 			t.Errorf("dropped legitimate %s", name)
 		}
 	}
-	// Cover the whole specified Vim range, not just a few examples.
-	for a := 'a'; a <= 'w'; a++ {
-		for b := 'a'; b <= 'z'; b++ {
-			name := fmt.Sprintf(".page.s%c%c", a, b)
-			if !skipEntryName(name, false) {
-				t.Errorf("swap leaked %s", name)
-			}
+	// Cover the whole Vim range, .swa to .swp plus .swx, and nothing else
+	// in .sw*.
+	for c := 'a'; c <= 'z'; c++ {
+		name := fmt.Sprintf(".page.sw%c", c)
+		if want := c <= 'p' || c == 'x'; skipEntryName(name, false) != want {
+			t.Errorf("%s skipped=%v; want %v", name, !want, want)
 		}
 	}
 }
@@ -294,11 +295,11 @@ func TestShareAndUpdateExcludeSwapFiles(t *testing.T) {
 	for _, update := range []bool{false, true} {
 		t.Run(fmt.Sprint(update), func(t *testing.T) {
 			dir := t.TempDir()
-			keep := []string{"index.html", "4913", "#", "##", "x.swp", "file___jb_tmp___notes"}
+			keep := []string{"index.html", "4913", "#", "##", "x.swp", "file___jb_tmp___notes", ".logo.svg", ".schema.sql", ".subs.srt", ".key.sig"}
 			for _, name := range keep {
 				write(t, dir, name, "legitimate")
 			}
-			skip := []string{".index.html.swp", ".index.html.swo", ".index.html.saa", ".index.html.swx", "index.html~", ".#index.html", "#index.html#", "page___jb_tmp___", "page___jb_old___", ".goutputstream-abcd"}
+			skip := []string{".index.html.swp", ".index.html.swo", ".index.html.swa", ".index.html.swx", "index.html~", ".#index.html", "#index.html#", "page___jb_tmp___", "page___jb_old___", ".goutputstream-abcd"}
 			for _, name := range skip {
 				write(t, dir, name, "private-buffer")
 			}
@@ -419,37 +420,91 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, fmt.Errorf("source read failed") }
 
-func TestSingleFileSnapshotSurvivesMidUploadEdit(t *testing.T) {
-	for _, bundle := range []bool{false, true} {
-		t.Run(fmt.Sprint(bundle), func(t *testing.T) {
-			dir := t.TempDir()
-			write(t, dir, "page.html", "before")
-			src := &Source{Path: filepath.Join(dir, "page.html")}
-			if bundle {
-				src.Kind = api.KindBundle
-			}
-			c, state := newUploadClient(t)
-			state.onStart = func() {
-				if err := os.WriteFile(src.Path, []byte("after"), 0600); err != nil {
-					t.Error(err)
+// A single file is uploaded from its own path, not a copy. An edit during
+// the upload must never publish a version whose bytes or recorded digest
+// mix the old and new content: UpdateDigest fails with ErrSourceChanged,
+// Update retries once, and a bundle is unaffected because it was packed.
+func TestSingleFileMidUploadEdit(t *testing.T) {
+	for _, edit := range []string{"after", "after!", "after, and longer"} { // shorter, same size, longer
+		t.Run(edit, func(t *testing.T) {
+			setup := func(t *testing.T, kind string, edits int) (*Client, *uploadServer, *Source) {
+				dir := t.TempDir()
+				write(t, dir, "page.html", "before")
+				src := &Source{Path: filepath.Join(dir, "page.html"), Kind: kind}
+				c, state := newUploadClient(t)
+				state.onStart = func() {
+					if edits == 0 {
+						return
+					}
+					edits--
+					content := edit
+					if edits > 0 {
+						content = strings.ToUpper(edit) // differs from the next edit
+					}
+					if err := os.WriteFile(src.Path, []byte(content), 0600); err != nil {
+						t.Error(err)
+					}
 				}
+				return c, state, src
 			}
-			digest, _, err := c.UpdateDigest(context.Background(), "art", src, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if digest != sumBytes([]byte("before")) {
-				t.Fatalf("digest absorbed mid-upload edit: %s", digest)
-			}
-			if got := state.lastFiles()["page.html"]; !bundle && got != "before" {
-				t.Fatalf("mutable file uploaded: %q", got)
-			}
-			if bundle && state.lastFiles()["index.html"] != "before" {
-				t.Fatalf("mutable bundle uploaded: %v", state.lastFiles())
-			}
+			t.Run("UpdateDigest fails without a version", func(t *testing.T) {
+				c, state, src := setup(t, "", 1)
+				_, _, err := c.UpdateDigest(context.Background(), "art", src, nil)
+				if !errors.Is(err, ErrSourceChanged) {
+					t.Fatalf("err=%v; want ErrSourceChanged", err)
+				}
+				if state.versionCount() != 0 {
+					t.Fatal("published a version of a file edited mid-upload")
+				}
+			})
+			t.Run("Update retries once", func(t *testing.T) {
+				c, state, src := setup(t, "", 1)
+				if _, err := c.Update(context.Background(), "art", src, nil); err != nil {
+					t.Fatal(err)
+				}
+				if got := state.lastFiles()["page.html"]; got != edit || state.versionCount() != 1 {
+					t.Fatalf("published %q in %d versions; want %q once", got, state.versionCount(), edit)
+				}
+			})
+			t.Run("Share gives up after the retry", func(t *testing.T) {
+				c, state, src := setup(t, "", 2)
+				_, err := c.Share(context.Background(), src, PublishOptions{}, nil)
+				if !errors.Is(err, ErrSourceChanged) || !strings.Contains(err.Error(), "tried twice") {
+					t.Fatalf("err=%v; want a clear ErrSourceChanged", err)
+				}
+				if state.versionCount() != 0 {
+					t.Fatal("published a version of a file edited mid-upload")
+				}
+			})
+			t.Run("bundle is packed before upload", func(t *testing.T) {
+				c, state, src := setup(t, api.KindBundle, 1)
+				digest, _, err := c.UpdateDigest(context.Background(), "art", src, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if digest != sumBytes([]byte("before")) || state.lastFiles()["index.html"] != "before" {
+					t.Fatalf("digest=%s files=%v", digest, state.lastFiles())
+				}
+			})
 		})
 	}
 }
+
+func TestSingleFileIsNotCopied(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	file := filepath.Join(t.TempDir(), "video.bin")
+	write(t, filepath.Dir(file), "video.bin", "large")
+	p, err := Prepare(&Source{Path: file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if entries, _ := os.ReadDir(tmp); p.File != file || len(entries) != 0 {
+		t.Fatalf("single file copied: File=%s temp=%v", p.File, entries)
+	}
+}
+
 func TestExplicitSkippedNameIsUploaded(t *testing.T) {
 	for _, name := range []string{"notes~", ".file.swo", "#draft#"} {
 		t.Run(name, func(t *testing.T) {
@@ -513,11 +568,13 @@ func TestArchiveEntriesNotEditorFiltered(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if files[".index.html.swo"] == "" || p.Skipped != 0 {
+			if files[".index.html.swo"] == "" || p.skipped != 0 {
 				t.Fatal("archive entries were editor-filtered")
 			}
-			if p.Digest != sumBytes(raw.Bytes()) {
-				t.Fatal("explicit archive digest must cover source bytes")
+			// A zip is converted, so its source hash is recorded. A tar.gz
+			// is uploaded as is, so the upload checksum is its digest.
+			if zipFormat && p.Digest != sumBytes(raw.Bytes()) || !zipFormat && (p.Digest != "" || p.File != file) {
+				t.Fatalf("archive digest=%q file=%s", p.Digest, p.File)
 			}
 		})
 	}

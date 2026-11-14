@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -237,8 +238,17 @@ func (c *Client) ListViews(ctx context.Context, id string) ([]api.View, error) {
 // Progress receives upload progress.
 type Progress func(sent, total int64)
 
+// ErrSourceChanged reports that a source file changed while it was being
+// read for packing or upload, so the bytes read are not one consistent
+// version of it. Share and Update retry once; Watch waits for the tree to
+// settle and tries again.
+var ErrSourceChanged = errors.New("source changed while it was being read")
+
 // UploadFile performs a resumable chunked upload of path and returns the
-// upload ID and SHA-256 to pass to CreateArtifact/CreateVersion.
+// upload ID and SHA-256 to pass to CreateArtifact/CreateVersion. The
+// checksum is taken before the upload and checked against the bytes
+// actually sent; a mismatch (the file changed mid-upload) returns an error
+// wrapping ErrSourceChanged.
 func (c *Client) UploadFile(ctx context.Context, path string, progress Progress) (string, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -251,10 +261,13 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 	}
 	size := st.Size()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if n, err := io.Copy(h, io.NewSectionReader(f, 0, size)); err != nil {
 		return "", "", err
+	} else if n != size {
+		return "", "", fmt.Errorf("%w: %s shrank before upload", ErrSourceChanged, path)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
+	sent := &sentHash{h: sha256.New()}
 
 	var up api.Upload
 	if err := c.do(ctx, http.MethodPost, "/api/v1/uploads", &api.CreateUploadRequest{Size: size}, &up); err != nil {
@@ -271,7 +284,8 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 		if size-offset < n {
 			n = size - offset
 		}
-		req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/uploads/"+esc(up.ID)+"?offset="+strconv.FormatInt(offset, 10), io.NewSectionReader(f, offset, n))
+		body := &sentReader{r: io.NewSectionReader(f, offset, n), pos: offset, left: n, sent: sent}
+		req, err := c.newRequest(ctx, http.MethodPut, "/api/v1/uploads/"+esc(up.ID)+"?offset="+strconv.FormatInt(offset, 10), body)
 		if err != nil {
 			return "", "", err
 		}
@@ -286,6 +300,9 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 				progress(offset, size)
 			}
 			continue
+		}
+		if errors.Is(err, ErrSourceChanged) {
+			return "", "", fmt.Errorf("%s: %w", path, ErrSourceChanged)
 		}
 		if s := StatusOf(err); s != 0 && s != http.StatusConflict && s < 500 {
 			return "", "", err
@@ -305,5 +322,39 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 			offset = cur.Received
 		}
 	}
+	if hex.EncodeToString(sent.h.Sum(nil)) != sum {
+		return "", "", fmt.Errorf("%w: %s was modified during upload", ErrSourceChanged, path)
+	}
 	return up.ID, sum, nil
+}
+
+// sentHash hashes the uploaded bytes in file order. A resumed chunk
+// restarts at the server's received offset, at or before next; bytes
+// before next are already hashed and are not hashed again.
+type sentHash struct {
+	h    hash.Hash
+	next int64
+}
+
+// sentReader is one chunk's request body. It feeds sentHash and turns a
+// file that ends before the chunk does into ErrSourceChanged, instead of
+// a transport error that would be retried as a network failure.
+type sentReader struct {
+	r         io.Reader
+	pos, left int64
+	sent      *sentHash
+}
+
+func (s *sentReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if end := s.pos + int64(n); end > s.sent.next {
+		s.sent.h.Write(p[max(0, s.sent.next-s.pos):n])
+		s.sent.next = end
+	}
+	s.pos += int64(n)
+	s.left -= int64(n)
+	if err == io.EOF && s.left > 0 {
+		err = fmt.Errorf("%w: file shrank during upload", ErrSourceChanged)
+	}
+	return n, err
 }
