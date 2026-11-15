@@ -32,6 +32,8 @@ export const Artifact = Schema.Struct({
   info_button: Schema.Boolean,
   /** Viewers can open older versions from the info panel. */
   viewer_old_versions: Schema.Boolean,
+  /** Viewers can leave comments from the info panel (only while the info button is shown). */
+  feedback: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
 export const ArtifactList = ListOf(Artifact)
@@ -46,6 +48,7 @@ export const UpdateArtifactRequest = Schema.Struct({
   spa: Schema.optionalKey(Schema.Boolean),
   info_button: Schema.optionalKey(Schema.Boolean),
   viewer_old_versions: Schema.optionalKey(Schema.Boolean),
+  feedback: Schema.optionalKey(Schema.Boolean),
   revoked: Schema.optionalKey(Schema.Boolean),
 })
 export type UpdateArtifactRequest = typeof UpdateArtifactRequest.Type
@@ -79,6 +82,44 @@ export const View = Schema.Struct({
 })
 export type View = typeof View.Type
 export const ViewList = ListOf(View)
+
+// ---- viewer feedback (every text field is untrusted viewer input: render as text only) ----
+
+/** The text a comment is anchored to: a W3C text quote. */
+export const TextQuote = Schema.Struct({ exact: Schema.String, prefix: Schema.String, suffix: Schema.String })
+export type TextQuote = typeof TextQuote.Type
+
+export const Comment = Schema.Struct({
+  id: Schema.String,
+  /** The version on screen when it was posted. */
+  version: Schema.Number,
+  /** pathname + search + hash inside the artifact. */
+  page: Schema.String,
+  body: Schema.String,
+  /** Optional, unverified name the viewer typed. */
+  name: Schema.String,
+  quote: Schema.NullOr(TextQuote),
+  created_at: Timestamp,
+  resolved_at: Schema.NullOr(Timestamp),
+})
+export type Comment = typeof Comment.Type
+export const CommentList = ListOf(Comment)
+export const ResolveCommentRequest = Schema.Struct({ resolved: Schema.Boolean })
+
+export type FeedbackStatus = 'open' | 'all'
+
+/** Comments grouped by version, newest version first; oldest comment first inside a group. Pure. */
+export const groupByVersion = (comments: ReadonlyArray<Comment>): Array<{ version: number; comments: Comment[] }> => {
+  const groups = new Map<number, Comment[]>()
+  for (const c of comments) {
+    const list = groups.get(c.version) ?? []
+    list.push(c)
+    groups.set(c.version, list)
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([version, list]) => ({ version, comments: list.sort((x, y) => x.created_at.getTime() - y.created_at.getTime()) }))
+}
 
 export const PreviewLink = Schema.Struct({ url: Schema.String, expires_at: Timestamp })
 export type PreviewLink = typeof PreviewLink.Type
@@ -116,6 +157,7 @@ export const ArtifactSettingsForm = Schema.Struct({
   spa: Schema.Boolean,
   infoButton: Schema.Boolean,
   oldVersions: Schema.Boolean,
+  feedback: Schema.Boolean,
 }).check(
   Schema.makeFilter((v) =>
     v.passwordAction !== 'set' || v.password.length > 0 ? undefined : { path: ['password'], issue: 'Enter the new password' },
@@ -138,6 +180,7 @@ export const settingsDefaults = (a: Artifact, spa: boolean): ArtifactSettingsInp
   spa,
   infoButton: a.info_button,
   oldVersions: a.viewer_old_versions,
+  feedback: a.feedback,
 })
 
 /**
@@ -156,4 +199,5 @@ export const toUpdateRequest = (v: ArtifactSettings, kind: Artifact['kind']): Up
   ...(kind === 'bundle' && { spa: v.spa }),
   info_button: v.infoButton,
   viewer_old_versions: v.oldVersions,
+  feedback: v.feedback,
 })

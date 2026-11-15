@@ -3,12 +3,16 @@ import { RedropApi, json } from '@/api/redrop-api'
 import {
   Artifact,
   ArtifactList,
+  CommentList,
+  Comment,
   FileList,
   PreviewLink,
   UpdateArtifactRequest,
   VersionList,
   ViewList,
+  ResolveCommentRequest,
   type ArtifactFilter,
+  type FeedbackStatus,
 } from './schemas'
 
 // Typed endpoint functions over RedropApi; the only artifacts module that knows paths.
@@ -60,3 +64,22 @@ export const views = (id: string) =>
   RedropApi.use((api) => api.call({ method: 'GET', path: ['artifacts', id, 'views'], response: ViewList })).pipe(
     Effect.map((r) => r.items ?? []),
   )
+
+/** Viewer comments, oldest first. Untrusted text. */
+export const feedback = (id: string, status: FeedbackStatus) =>
+  RedropApi.use((api) =>
+    api.call({ method: 'GET', path: ['artifacts', id, 'feedback'], query: { status }, response: CommentList }),
+  ).pipe(Effect.map((r) => r.items ?? []))
+
+export const resolveComment = (id: string, commentId: string, resolved: boolean) =>
+  RedropApi.use((api) =>
+    api.call({
+      method: 'PATCH',
+      path: ['artifacts', id, 'feedback', commentId],
+      body: json(ResolveCommentRequest, { resolved }),
+      response: Comment,
+    }),
+  )
+
+export const deleteComment = (id: string, commentId: string) =>
+  RedropApi.use((api) => api.call({ method: 'DELETE', path: ['artifacts', id, 'feedback', commentId] }))
