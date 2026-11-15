@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { formatBytes, formatDate, relativeTime } from '@/lib/format'
 import * as artifacts from '../atoms'
 import { AccessLogPanel } from '../components/access-log-panel'
+import { FeedbackPanel } from '../components/feedback-panel'
 import { FilesPanel } from '../components/files-panel'
 import { LinkActions } from '../components/link-actions'
 import { PreviewPanel } from '../components/preview-panel'
@@ -60,6 +61,7 @@ export function Component() {
           <TabsTrigger value="versions">Versions ({artifact.versions})</TabsTrigger>
           <TabsTrigger value="files">Files ({artifact.files})</TabsTrigger>
           <TabsTrigger value="log">Access log</TabsTrigger>
+          <TabsTrigger value="feedback">Feedback</TabsTrigger>
           <TabsTrigger value="preview">Preview</TabsTrigger>
         </TabsList>
         <TabsContent value="settings" className="pt-4">
@@ -71,6 +73,7 @@ export function Component() {
         <TabsContent value="versions" className="pt-4"><VersionsPanel id={id} /></TabsContent>
         <TabsContent value="files" className="pt-4"><AsyncResultView result={versions}>{(items) => <FilesPanel id={id} versions={items} />}</AsyncResultView></TabsContent>
         <TabsContent value="log" className="pt-4"><AccessLogPanel id={id} /></TabsContent>
+        <TabsContent value="feedback" className="pt-4"><FeedbackPanel artifact={artifact} /></TabsContent>
         <TabsContent value="preview" className="pt-4"><PreviewPanel id={id} /></TabsContent>
       </Tabs>
     </>

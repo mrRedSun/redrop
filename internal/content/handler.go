@@ -47,12 +47,14 @@ type Handler struct {
 	pages   *pages
 	install http.Handler // installers and CLI downloads, also served on the apex
 	misses  *security.TokenBucket
+	posts   *security.TokenBucket // viewer feedback posts per client
 }
 
 func New(sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger, installers http.Handler) *Handler {
 	return &Handler{
 		sharing: sh, cfg: cfg, clients: clients, log: log, pages: newPages(cfg), install: installers,
 		misses: security.NewTokenBucket(cfg.ContentMissBurst, cfg.ContentMissPerMinute, maxMissClients),
+		posts:  security.NewTokenBucket(cfg.FeedbackBurst, cfg.FeedbackPerMinute, maxMissClients),
 	}
 }
 
@@ -147,9 +149,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.tooManyMisses(w)
 		return
 	}
+	if r.Method == http.MethodPost && r.URL.Path == feedbackPath {
+		h.feedback(w, r, slug)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == reservedPrefix+"open") {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w)
 		return
 	}
 	a, err := h.sharing.Lookup(r.Context(), slug)
@@ -171,6 +176,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serve(w, r, a)
+}
+
+// methodNotAllowed is the answer to a method an artifact host doesn't take
+// on a path, including every POST to a reserved path that isn't open.
+func methodNotAllowed(w http.ResponseWriter) {
+	w.Header().Set("Allow", "GET, HEAD")
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 // singleSlash reports whether p starts with exactly one slash, not followed
@@ -436,7 +448,7 @@ func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.
 			v := h.sharing.ViewerInfo(r.Context(), a, snap)
 			info = &v
 		}
-		h.pages.fileViewer(w, h.sharing, t.File, h.selfOrigin(a), base, info)
+		h.pages.fileViewer(w, h.sharing, t.File, h.selfOrigin(a), base, info, info != nil && h.sharing.FeedbackOpen(a))
 	case sharing.TargetListing:
 		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), snap, t.Dir))
 	case sharing.TargetRedirect:

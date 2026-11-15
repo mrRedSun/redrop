@@ -17,7 +17,7 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
 		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
-		OldVersions: m.OldVersions, RevokedByAdmin: m.RevokedByAdmin,
+		OldVersions: m.OldVersions, Feedback: m.Feedback, RevokedByAdmin: m.RevokedByAdmin,
 	}
 }
 
@@ -55,6 +55,14 @@ func fileListDTO(f sharing.FileList) api.FileList {
 
 func viewDTO(v sharing.View) api.View {
 	return api.View{At: v.At, Outcome: v.Outcome, Country: v.Country, Client: v.Client}
+}
+
+func commentDTO(c sharing.Comment) api.Comment {
+	out := api.Comment{ID: c.ID, Version: c.Version, Page: c.Page, Body: c.Body, Name: c.Name, CreatedAt: c.CreatedAt, ResolvedAt: c.ResolvedAt}
+	if q := c.Quote; q != nil {
+		out.Quote = &api.TextQuote{Exact: q.Exact, Prefix: q.Prefix, Suffix: q.Suffix}
+	}
+	return out
 }
 
 func uploadDTO(u *sharing.Upload) api.Upload {
@@ -101,11 +109,11 @@ func contentFromRequest(p api.PublishRequest) sharing.Content {
 }
 
 func settingsFromRequest(r api.CreateArtifactRequest) sharing.Settings {
-	return sharing.Settings{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, InfoButton: r.InfoButton, OldVersions: r.OldVersions}
+	return sharing.Settings{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, InfoButton: r.InfoButton, OldVersions: r.OldVersions, Feedback: r.Feedback}
 }
 
 func patchFromRequest(r api.UpdateArtifactRequest) sharing.Patch {
-	return sharing.Patch{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, ResetViews: r.ResetViews, Revoked: r.Revoked, SPA: r.SPA, InfoButton: r.InfoButton, OldVersions: r.OldVersions}
+	return sharing.Patch{Title: r.Title, TTL: r.TTL, Password: r.Password, MaxViews: r.MaxViews, ResetViews: r.ResetViews, Revoked: r.Revoked, SPA: r.SPA, InfoButton: r.InfoButton, OldVersions: r.OldVersions, Feedback: r.Feedback}
 }
 
 func userPatchFromRequest(r api.AdminUpdateUserRequest) accounts.UserPatch {

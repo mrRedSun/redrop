@@ -33,7 +33,7 @@ func TestUploadBudgetMigration6FromMain5(t *testing.T) {
 	if err := db.DB.QueryRow(`SELECT admin_revoked,totp_last_step,materialized,uploads.expires_at-uploads.created_at FROM artifacts,users,uploads`).Scan(&revoked, &step, &materialized, &lifetime); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || revoked != 1 || step != 77 || materialized != 0 || lifetime < 3600 || lifetime > 3630 {
+	if version != len(migrations) || revoked != 1 || step != 77 || materialized != 0 || lifetime < 3600 || lifetime > 3630 {
 		t.Fatalf("migration 6: version=%d admin_revoked=%d totp_step=%d materialized=%d lifetime=%d", version, revoked, step, materialized, lifetime)
 	}
 }

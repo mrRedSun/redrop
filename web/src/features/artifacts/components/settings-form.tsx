@@ -123,6 +123,19 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             <FormControl><Switch checked={field.value} disabled={!infoButton} onCheckedChange={field.onChange} /></FormControl>
           </FormItem>
         )} />
+        <FormField control={form.control} name="feedback" render={({ field }) => (
+          <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <FormLabel>Viewer feedback</FormLabel>
+              <FormDescription>
+                {infoButton
+                  ? 'The info panel gets a comment form; viewers can quote selected text. Only you read comments (Feedback tab, or redrop feedback). Off keeps existing comments.'
+                  : 'Needs the info button.'}
+              </FormDescription>
+            </div>
+            <FormControl><Switch checked={field.value} disabled={!infoButton} onCheckedChange={field.onChange} /></FormControl>
+          </FormItem>
+        )} />
         <FormRootError control={form.control} />
         <div className="flex gap-2">
           <Button type="submit" disabled={form.formState.isSubmitting || !form.formState.isDirty}>Save changes</Button>

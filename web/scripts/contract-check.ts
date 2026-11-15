@@ -71,11 +71,14 @@ const program = Effect.gen(function* () {
     const values = Schema.decodeUnknownSync(ArtifactSettingsForm)(settingsDefaults(a, versions.find((v) => v.current)!.spa))
     const saved = yield* artifacts.update(a.id, toUpdateRequest(values, a.kind))
     check('unchanged settings round-trip', saved.title === a.title && saved.max_views === a.max_views && saved.url === a.url &&
-      saved.info_button === a.info_button && saved.viewer_old_versions === a.viewer_old_versions)
-    // Both viewer switches round-trip and can be put back.
-    const flipped = yield* artifacts.update(a.id, toUpdateRequest({ ...values, infoButton: !a.info_button, oldVersions: !a.viewer_old_versions }, a.kind))
-    check('viewer settings round-trip', flipped.info_button === !a.info_button && flipped.viewer_old_versions === !a.viewer_old_versions)
-    yield* artifacts.update(a.id, { info_button: a.info_button, viewer_old_versions: a.viewer_old_versions })
+      saved.info_button === a.info_button && saved.viewer_old_versions === a.viewer_old_versions && saved.feedback === a.feedback)
+    // The viewer switches round-trip and can be put back.
+    const flipped = yield* artifacts.update(a.id, toUpdateRequest({ ...values, infoButton: !a.info_button, oldVersions: !a.viewer_old_versions, feedback: !a.feedback }, a.kind))
+    check('viewer settings round-trip', flipped.info_button === !a.info_button && flipped.viewer_old_versions === !a.viewer_old_versions && flipped.feedback === !a.feedback)
+    yield* artifacts.update(a.id, { info_button: a.info_button, viewer_old_versions: a.viewer_old_versions, feedback: a.feedback })
+    const comments = yield* artifacts.feedback(a.id, 'all')
+    check('feedback list decodes', comments.every((c) => typeof c.body === 'string'))
+    yield* artifacts.feedback(a.id, 'open')
   }
 
   const created = yield* tokens.create({ name: 'contract-check', ttl: '1d' })

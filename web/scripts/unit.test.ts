@@ -8,7 +8,8 @@ import { fromProblem } from '@/api/errors'
 import { safeNext } from '@/app/paths'
 import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
-import { Artifact, ArtifactSettingsForm, filterFromSearch, settingsDefaults, statusLabel, toUpdateRequest } from '@/features/artifacts/schemas'
+import * as artifactEndpoints from '@/features/artifacts/endpoints'
+import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, statusLabel, toUpdateRequest } from '@/features/artifacts/schemas'
 import { Stats, AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import { NewAccountForm, NewPasswordForm } from '@/features/onboarding/schemas'
 import { CreatedToken, TokenList } from '@/features/tokens/schemas'
@@ -86,9 +87,9 @@ await test('proxy and network errors are typed, malformed success is a defect', 
 })
 
 await test('forms validate numbers and cross-field confirmation, and keep password/TTL omitted', () => {
-  const input = { title: '  Report  ', ttl: 'keep', passwordAction: 'keep', password: '', maxViews: '12', resetViews: false, spa: true, infoButton: true, oldVersions: false }
+  const input = { title: '  Report  ', ttl: 'keep', passwordAction: 'keep', password: '', maxViews: '12', resetViews: false, spa: true, infoButton: true, oldVersions: false, feedback: false }
   const values = Schema.decodeUnknownSync(ArtifactSettingsForm)(input)
-  assert.deepEqual(toUpdateRequest(values, 'bundle'), { title: 'Report', max_views: 12, spa: true, info_button: true, viewer_old_versions: false })
+  assert.deepEqual(toUpdateRequest(values, 'bundle'), { title: 'Report', max_views: 12, spa: true, info_button: true, viewer_old_versions: false, feedback: false })
   assert(!('spa' in toUpdateRequest(values, 'file')))
   for (const maxViews of ['-1', '1.5', '1000001', 'not a number']) assert(Option.isNone(Schema.decodeUnknownOption(ArtifactSettingsForm)({ ...input, maxViews })))
   assert(Option.isNone(Schema.decodeUnknownOption(NewPasswordForm)({ password: 'example-test-only', confirm: 'different' })))
@@ -103,7 +104,7 @@ await test('viewer settings: defaults from the artifact and both are always sent
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: new Date(), updated_at: new Date(), expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, revoked_by_admin: false,
+    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false,
   } as const
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.infoButton, true)
@@ -117,6 +118,62 @@ await test('viewer settings: defaults from the artifact and both are always sent
   const decoded = Schema.decodeUnknownSync(Artifact)({ ...artifact, created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z' })
   assert(decoded.info_button && !decoded.viewer_old_versions)
   assert(Option.isNone(Schema.decodeUnknownOption(Artifact)({ ...artifact, viewer_old_versions: undefined, created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z' })), 'the field is required on the wire')
+})
+
+await test('feedback setting: defaults from the artifact, always sent explicitly, required on the wire', () => {
+  const artifact = Schema.decodeUnknownSync(Artifact)({
+    id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
+    max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
+    created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z', expires_at: null, last_viewed_at: null, purge_at: null,
+    info_button: true, viewer_old_versions: false, feedback: true, revoked_by_admin: false,
+  })
+  const defaults = settingsDefaults(artifact, false)
+  assert.equal(defaults.feedback, true)
+  assert.equal(toUpdateRequest(Schema.decodeUnknownSync(ArtifactSettingsForm)(defaults), 'html').feedback, true, 'the shown value is saved explicitly')
+  assert.equal(toUpdateRequest(Schema.decodeUnknownSync(ArtifactSettingsForm)({ ...defaults, feedback: false }), 'file').feedback, false)
+  const wire: Record<string, unknown> = { ...Schema.encodeSync(Artifact)(artifact) }
+  delete wire.feedback
+  assert(Option.isNone(Schema.decodeUnknownOption(Artifact)(wire)), 'the field is required on the wire')
+})
+
+const commentWire = (over: Record<string, unknown> = {}) => ({
+  id: 'c1', version: 1, page: '/report.html#totals', body: '<img src=x onerror=alert(1)>\nline two', name: '',
+  quote: null, created_at: '2026-11-13T12:00:00Z', resolved_at: null, ...over,
+})
+
+await test('comments decode with or without a quote and resolution, keeping text as is', () => {
+  const open = Schema.decodeUnknownSync(Comment)(commentWire())
+  assert.equal(open.quote, null)
+  assert.equal(open.resolved_at, null)
+  assert.equal(open.body, '<img src=x onerror=alert(1)>\nline two', 'text is data, not markup')
+  const done = Schema.decodeUnknownSync(Comment)(commentWire({ quote: { exact: 'totals', prefix: 'The ', suffix: ' are' }, resolved_at: '2026-11-14T08:00:00Z' }))
+  assert.deepEqual(done.quote, { exact: 'totals', prefix: 'The ', suffix: ' are' })
+  assert(done.resolved_at instanceof Date)
+  assert(Option.isNone(Schema.decodeUnknownOption(Comment)(commentWire({ quote: { exact: 'x' } }))), 'a quote has all three fields')
+  assert.equal(Schema.decodeUnknownSync(CommentList)({ items: null }).items, null)
+})
+
+await test('comments group by version, newest version first, oldest comment first', () => {
+  const c = (id: string, version: number, at: string) => Schema.decodeUnknownSync(Comment)(commentWire({ id, version, created_at: at }))
+  const groups = groupByVersion([c('a', 1, '2026-11-13T12:00:00Z'), c('b', 3, '2026-11-13T14:00:00Z'), c('c', 1, '2026-11-13T10:00:00Z'), c('d', 3, '2026-11-13T13:00:00Z')])
+  assert.deepEqual(groups.map((g) => [g.version, g.comments.map((x) => x.id)]), [[3, ['d', 'b']], [1, ['c', 'a']]])
+  assert.deepEqual(groupByVersion([]), [])
+})
+
+await test('feedback endpoints: list by status, resolve with a body, delete', async () => {
+  const h = harness((path) => path.endsWith('/feedback') ? response({ items: [commentWire()] }) : path.endsWith('/c%2F1') && h.requests.at(-1)?.method === 'PATCH' ? response(commentWire({ resolved_at: '2026-11-14T08:00:00Z' })) : response({ ok: true }))
+  const list = await h.run(artifactEndpoints.feedback('a 1', 'open'))
+  assert.equal(list.length, 1)
+  const resolved = await h.run(artifactEndpoints.resolveComment('a1', 'c/1', true))
+  assert(resolved.resolved_at instanceof Date)
+  await h.run(artifactEndpoints.deleteComment('a1', 'c/1'))
+  assert.deepEqual(h.requests.map(({ method, path, body }) => ({ method, path, body })), [
+    { method: 'GET', path: '/api/v1/artifacts/a%201/feedback?status=open', body: undefined },
+    { method: 'PATCH', path: '/api/v1/artifacts/a1/feedback/c%2F1', body: '{"resolved":true}' },
+    { method: 'DELETE', path: '/api/v1/artifacts/a1/feedback/c%2F1', body: undefined },
+  ])
+  const empty = harness(() => response({ items: null }))
+  assert.deepEqual(await empty.run(artifactEndpoints.feedback('a1', 'all')), [])
 })
 
 await test('an administrator\'s revocation is named and required on the wire', () => {

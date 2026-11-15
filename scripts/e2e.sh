@@ -366,6 +366,34 @@ grep -q 'id="rd-info"' <<<"$fp" && grep -q 'Download' <<<"$fp" || die "file page
 grep -q 'rd-frame' <<<"$fp" && die "file page framed"
 pass "--no-info and ?redrop-info=0 (kept for the visit) are direct; file page has the panel natively"
 
+# viewer feedback: closed by default (the endpoint is an unknown path), then
+# opened: a browser's post from the artifact's page, read back with
+# redrop feedback --json, then resolved.
+FBURL=$($R share "$WORK/page-v1.html" -q)
+FBORIGIN=${FBURL%/}
+FB=(-H "Origin: $FBORIGIN" -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' -H 'Content-Type: application/json')
+FBBODY='{"body":"The heading is wrong","name":"e2e","version":1,"page":"/?q=1#top","quote":{"exact":"hello","prefix":"","suffix":""}}'
+[ "$(code_of "${FB[@]}" -d "$FBBODY" "${FBURL}__redrop/feedback")" = 405 ] || die "feedback endpoint answered while closed"
+curl -fsS "${DOC[@]}" "$FBURL" | grep -q 'id="rd-fb"' && die "feedback form while closed"
+grep -q 'feedback: *on' <<<"$($R set "$FBURL" --feedback)" || die "set --feedback"
+curl -fsS "${DOC[@]}" "$FBURL" | grep -q '<form id="rd-fb"' || die "feedback form in the info panel"
+curl -fsSI "${DOC[@]}" "$FBURL" | grep -qi "content-security-policy:.*connect-src $FBORIGIN/__redrop/feedback" || die "feedback connect-src"
+curl -fsS "${FRAME[@]}" "$FBURL" | cmp -s - "$WORK/page-v1.html" || die "feedback changed the artifact's bytes"
+[ "$(code_of -H 'Origin: https://evil.example' -H 'Sec-Fetch-Site: cross-site' -H 'Content-Type: application/json' -d "$FBBODY" "${FBURL}__redrop/feedback")" = 403 ] || die "cross-site feedback accepted"
+FBV=$(views_of "$FBURL")
+[ "$(code_of "${FB[@]}" -d "$FBBODY" "${FBURL}__redrop/feedback")" = 201 ] || die "feedback post from the page"
+[ "$(views_of "$FBURL")" = "$FBV" ] || die "a feedback post counted a view"
+CID=$($R feedback "$FBURL" --json | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert len(d)==1 and d[0]["body"]=="The heading is wrong" and d[0]["name"]=="e2e" and d[0]["version"]==1, d
+assert d[0]["page"]=="/?q=1#top" and d[0]["quote"]["exact"]=="hello" and d[0]["resolved_at"] is None, d
+print(d[0]["id"])') || die "feedback --json"
+$R feedback "$FBURL" | grep -q '^  | The heading is wrong$' || die "feedback plain output frames the comment"
+$R feedback resolve "$FBURL" "$CID" >/dev/null
+[ "$($R feedback "$FBURL" --json | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = 0 ] || die "resolved comment still listed as open"
+[ "$($R feedback "$FBURL" --all --json | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["resolved_at"] is not None)')" = True ] || die "resolved comment in --all"
+pass "feedback: closed by default, opened with set --feedback, posted as a browser would, read with --json, resolved"
+
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)
 SID=$($R info "$SURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')

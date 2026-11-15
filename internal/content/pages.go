@@ -138,7 +138,7 @@ type fileData struct {
 // panel rendered natively when info is set. base is where the shown
 // version's files are served ("" for the current version); self is this
 // origin, for the policy that allows the viewer's script and stylesheet.
-func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo) {
+func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo, feedback bool) {
 	ct := f.ContentType
 	raw := selfRef(base + "/" + url.PathEscape(f.Path))
 	d := fileData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: raw, Download: raw + "?download", Size: f.Size, Latest: "/"}
@@ -160,11 +160,16 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 	if info != nil {
 		// The file page lives at "/" only; its version links point there.
 		panel := panelFor(*info, &url.URL{Path: "/"})
+		panel.Feedback = feedback
 		d.Info = &panel
 		if info.Version != info.Current {
 			d.OldVersion = info.Version
 		}
-		csp = pagePolicy(self, "'unsafe-inline'", p.pageDirectives...)
+		directives := p.pageDirectives
+		if feedback {
+			directives = append(directives[:len(directives):len(directives)], feedbackConnect(self))
+		}
+		csp = pagePolicy(self, "'unsafe-inline'", directives...)
 	}
 	p.renderWithCSP(w, http.StatusOK, "file.html", f.Path, artifactIcons, d, csp)
 }

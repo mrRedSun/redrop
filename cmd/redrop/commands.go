@@ -204,6 +204,14 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		old = "viewers can open them"
 	}
 	fmt.Fprintf(w, "older versions:\t%s\n", old)
+	fb := "off"
+	switch {
+	case a.Feedback && a.InfoButton:
+		fb = "on (viewers can comment; read with redrop feedback " + a.ID + ")"
+	case a.Feedback:
+		fb = "on, but closed while the info button is hidden"
+	}
+	fmt.Fprintf(w, "feedback:\t%s\n", fb)
 	if a.PurgeAt != nil {
 		fmt.Fprintf(w, "deleted at:\t%s\n", fmtTime(a.PurgeAt))
 	}
@@ -236,8 +244,9 @@ func (f *contentFlags) register(cmd *cobra.Command) {
 }
 
 // viewerFlags are the viewer settings: --info / --no-info (the info button,
-// and the viewer frame for HTML) and --old-versions / --no-old-versions.
-type viewerFlags struct{ info, noInfo, old, noOld bool }
+// and the viewer frame for HTML), --old-versions / --no-old-versions, and
+// --feedback / --no-feedback.
+type viewerFlags struct{ info, noInfo, old, noOld, fb, noFb bool }
 
 func (f *viewerFlags) register(cmd *cobra.Command) {
 	fl := cmd.Flags()
@@ -245,16 +254,21 @@ func (f *viewerFlags) register(cmd *cobra.Command) {
 	fl.BoolVar(&f.noInfo, "no-info", false, "hide the info button; HTML is served directly, without the viewer frame")
 	fl.BoolVar(&f.old, "old-versions", false, "let viewers open older versions from the info panel")
 	fl.BoolVar(&f.noOld, "no-old-versions", false, "viewers see the version list only (the default)")
+	fl.BoolVar(&f.fb, "feedback", false, "let viewers leave comments from the info panel (read them with redrop feedback)")
+	fl.BoolVar(&f.noFb, "no-feedback", false, "close comments (the default); existing comments are kept")
 }
 
 // values are nil for a pair when neither flag was given (keep the current
 // setting, or for new shares use the default).
-func (f *viewerFlags) values() (info, old *bool, err error) {
+func (f *viewerFlags) values() (info, old, feedback *bool, err error) {
 	if info, err = pair(f.info, f.noInfo, "--info", "--no-info"); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	old, err = pair(f.old, f.noOld, "--old-versions", "--no-old-versions")
-	return info, old, err
+	if old, err = pair(f.old, f.noOld, "--old-versions", "--no-old-versions"); err != nil {
+		return nil, nil, nil, err
+	}
+	feedback, err = pair(f.fb, f.noFb, "--feedback", "--no-feedback")
+	return info, old, feedback, err
 }
 
 func pair(on, off bool, onName, offName string) (*bool, error) {
@@ -337,6 +351,8 @@ artifact untouched in a frame. --no-info serves pages directly instead;
 --old-versions lets viewers open earlier versions. curl, scripts and very
 old browsers (no Fetch Metadata) always get the artifact directly. Inside an
 older version, a root-absolute link (/x.html) leads to the current version.
+--feedback lets viewers leave comments from the info panel, optionally
+quoting selected text; only you read them, with "redrop feedback ID".
 
 The link is printed on the first line; it is the only way in, so share it
 deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
@@ -360,7 +376,7 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 			if err != nil {
 				return err
 			}
-			info, old, err := vf.values()
+			info, old, fb, err := vf.values()
 			if err != nil {
 				return err
 			}
@@ -395,10 +411,11 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 				password = generatePassword()
 				extra["password"] = password
 			}
-			a, err := c.Share(cmd.Context(), src, client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old}, progressFn())
+			a, err := c.Share(cmd.Context(), src, client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old, Feedback: fb != nil && *fb}, progressFn())
 			if err != nil {
 				return mapErr(err)
 			}
+			warnFeedbackClosed(a, info, fb)
 			if quiet && !g.json {
 				fmt.Println(a.URL)
 				if p, ok := extra["password"]; ok {
@@ -431,9 +448,9 @@ func updateCmd() *cobra.Command {
 		Short: "Publish a new version of an artifact at the same link",
 		Long: `Upload PATH as a new version of an existing artifact. The link, expiry,
 password, and view limit stay the same; previous versions are kept and can be
-restored with "redrop rollback". --info / --no-info and --old-versions /
---no-old-versions also change those viewer settings; they are saved before
-the upload.`,
+restored with "redrop rollback". --info / --no-info, --old-versions /
+--no-old-versions and --feedback / --no-feedback also change those viewer
+settings; they are saved before the upload.`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
   redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa`,
 		Args: cobra.ExactArgs(2),
@@ -450,15 +467,16 @@ the upload.`,
 			if err != nil {
 				return err
 			}
-			info, old, err := vf.values()
+			info, old, fb, err := vf.values()
 			if err != nil {
 				return err
 			}
 			// The settings are saved before the upload (see UpdateWithOptions).
-			a, err := c.UpdateWithOptions(cmd.Context(), id, src, client.VersionOptions{InfoButton: info, OldVersions: old}, progressFn())
+			a, err := c.UpdateWithOptions(cmd.Context(), id, src, client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}, progressFn())
 			if err != nil {
 				return mapErr(err)
 			}
+			warnFeedbackClosed(a, info, fb)
 			return printArtifact(a, nil)
 		},
 	}
@@ -559,7 +577,8 @@ Changing the password signs out everyone who already unlocked the link.`,
   redrop set k2j4m9qx7d4a --password-generate
   redrop set k2j4m9qx7d4a --no-password --unlimited
   redrop set k2j4m9qx7d4a --max-views 5 --reset-views
-  redrop set k2j4m9qx7d4a --no-info`,
+  redrop set k2j4m9qx7d4a --no-info
+  redrop set k2j4m9qx7d4a --feedback`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
@@ -619,10 +638,10 @@ Changing the password signs out everyone who already unlocked the link.`,
 				v := spa
 				req.SPA = &v
 			}
-			if req.InfoButton, req.OldVersions, err = vf.values(); err != nil {
+			if req.InfoButton, req.OldVersions, req.Feedback, err = vf.values(); err != nil {
 				return err
 			}
-			if req.Title == nil && req.TTL == nil && req.Password == nil && req.MaxViews == nil && !req.ResetViews && req.SPA == nil && req.InfoButton == nil && req.OldVersions == nil {
+			if req.Title == nil && req.TTL == nil && req.Password == nil && req.MaxViews == nil && !req.ResetViews && req.SPA == nil && req.InfoButton == nil && req.OldVersions == nil && req.Feedback == nil {
 				return withCode(exitUsage, "nothing to change; see `redrop set --help`")
 			}
 			id, err := resolveID(cmd.Context(), c, args[0])
@@ -633,6 +652,7 @@ Changing the password signs out everyone who already unlocked the link.`,
 			if err != nil {
 				return mapErr(err)
 			}
+			warnFeedbackClosed(a, req.InfoButton, req.Feedback)
 			return printArtifact(a, extra)
 		},
 	}

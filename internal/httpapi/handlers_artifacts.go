@@ -188,3 +188,38 @@ func (a *API) listViews(c fuego.ContextNoBody) (api.ViewList, error) {
 	}
 	return api.ViewList{Items: mapItems(list, viewDTO)}, nil
 }
+
+// --- viewer feedback ---
+
+func (a *API) listFeedback(c fuego.ContextNoBody) (api.CommentList, error) {
+	f := sharing.FeedbackFilter{Status: c.QueryParam("status")}
+	if q := c.QueryParam("version"); q != "" {
+		n, err := strconv.Atoi(q)
+		if err != nil || n < 1 {
+			return api.CommentList{}, apperr.Invalid("invalid version")
+		}
+		f.Version = n
+	}
+	list, err := a.sharing.Feedback(c.Context(), actorFrom(c.Context()), c.PathParam("id"), f)
+	if err != nil {
+		return api.CommentList{}, err
+	}
+	return api.CommentList{Items: mapItems(list, commentDTO)}, nil
+}
+
+func (a *API) resolveComment(c fuego.ContextWithBody[api.ResolveCommentRequest]) (api.Comment, error) {
+	body, err := c.Body()
+	if err != nil {
+		return api.Comment{}, err
+	}
+	m, err := a.sharing.ResolveComment(c.Context(), actorFrom(c.Context()), c.PathParam("id"), c.PathParam("comment"), body.Resolved)
+	if err != nil {
+		return api.Comment{}, err
+	}
+	return commentDTO(m), nil
+}
+
+func (a *API) deleteComment(c fuego.ContextNoBody) (api.OK, error) {
+	err := a.sharing.DeleteComment(c.Context(), actorFrom(c.Context()), c.PathParam("id"), c.PathParam("comment"))
+	return api.OK{OK: err == nil}, err
+}

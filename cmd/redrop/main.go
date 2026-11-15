@@ -286,7 +286,7 @@ machine-readable output, and check exit codes (listed in the guide).`,
 		c.GroupID = "share"
 		root.AddCommand(c)
 	}
-	for _, c := range []*cobra.Command{listCmd(), infoCmd(), setCmd(), revokeCmd(true), revokeCmd(false), rotateCmd(), deleteCmd(), versionsCmd(), rollbackCmd(), filesCmd(), viewsCmd()} {
+	for _, c := range []*cobra.Command{listCmd(), infoCmd(), setCmd(), revokeCmd(true), revokeCmd(false), rotateCmd(), deleteCmd(), versionsCmd(), rollbackCmd(), filesCmd(), viewsCmd(), feedbackCmd()} {
 		c.GroupID = "manage"
 		root.AddCommand(c)
 	}

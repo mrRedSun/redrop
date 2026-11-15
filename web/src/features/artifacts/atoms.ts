@@ -1,7 +1,7 @@
 import { Atom } from 'effect/reactivity'
 import { mutation, query } from '@/runtime/runtime'
 import * as endpoints from './endpoints'
-import { toUpdateRequest, type Artifact, type ArtifactFilter, type ArtifactSettings } from './schemas'
+import { toUpdateRequest, type Artifact, type ArtifactFilter, type ArtifactSettings, type FeedbackStatus } from './schemas'
 
 declare module 'effect/reactivity/Reactivity' {
   interface Keys {
@@ -24,6 +24,13 @@ export const files = Atom.family((key: string) => {
   return query(['artifacts'], endpoints.files(id, Number(version)))
 })
 export const filesKey = (id: string, version: number) => `${id}@${version}`
+
+/** Key: `${id}@${status}`, status open or all. */
+export const feedback = Atom.family((key: string) => {
+  const [id, status] = key.split('@')
+  return query(['artifacts'], endpoints.feedback(id, status === 'open' ? 'open' : 'all'))
+})
+export const feedbackKey = (id: string, status: FeedbackStatus) => `${id}@${status}`
 
 /** A fresh preview link each time the preview is opened; never kept around (it is a bearer link). */
 export const preview = Atom.family((id: string) => query(['artifacts'], endpoints.preview(id)).pipe(Atom.setIdleTTL(0)))
@@ -65,4 +72,15 @@ export const deleteVersion = Atom.family((id: string) =>
     invalidates: ['artifacts'],
     success: (_: void, n: number) => `Version ${n} deleted`,
   }),
+)
+
+export const resolveComment = Atom.family((id: string) =>
+  mutation((input: { comment: string; resolved: boolean }) => endpoints.resolveComment(id, input.comment, input.resolved), {
+    invalidates: ['artifacts'],
+    success: (_: unknown, input: { comment: string; resolved: boolean }) => (input.resolved ? 'Comment resolved' : 'Comment reopened'),
+  }),
+)
+
+export const deleteComment = Atom.family((id: string) =>
+  mutation((comment: string) => endpoints.deleteComment(id, comment), { invalidates: ['artifacts'], success: 'Comment deleted' }),
 )

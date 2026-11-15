@@ -76,6 +76,7 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 		data.OldVersion, data.FrameSrc = snap.Version, selfRef(versionBase(snap.Version)+frameSrc)
 	}
 	data.Info = panelFor(h.sharing.ViewerInfo(r.Context(), a, snap), r.URL)
+	data.Info.Feedback = h.sharing.FeedbackOpen(a)
 	self := h.selfOrigin(a)
 	// frame-src also governs where the frame may navigate, so it allows the
 	// web at large; the viewer itself loads nothing but its own two files.
@@ -83,7 +84,11 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	if h.cfg.ContentURL.Scheme == "http" {
 		navigable = "http: https:"
 	}
-	csp := pagePolicy(self, "", "img-src 'self'", "frame-src 'self' "+navigable, "form-action 'none'", "base-uri 'none'", "frame-ancestors 'none'")
+	directives := []string{"img-src 'self'", "frame-src 'self' " + navigable, "form-action 'none'", "base-uri 'none'", "frame-ancestors 'none'"}
+	if data.Info.Feedback {
+		directives = append(directives, feedbackConnect(self))
+	}
+	csp := pagePolicy(self, "", directives...)
 	h.pages.renderWithCSP(w, http.StatusOK, "viewer.html", a.Title, serverIcons, data, csp)
 }
 
@@ -99,7 +104,12 @@ type viewerData struct {
 type panelData struct {
 	sharing.ViewerInfo
 	Revisions []revisionRow
+	Feedback  bool // the panel holds the feedback form
 }
+
+// feedbackConnect lets a page with the feedback form post to the
+// endpoint, and nowhere else.
+func feedbackConnect(self string) string { return "connect-src " + self + feedbackPath }
 
 type revisionRow struct {
 	sharing.Revision
