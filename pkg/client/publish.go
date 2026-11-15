@@ -53,6 +53,8 @@ type Source struct {
 	// uploaded as is (between Prepare and UploadFile), to reproduce a tree
 	// that changes mid-read.
 	beforeRead func(rel string)
+	// warned, set by Watch for its run, reports each secret warning once.
+	warned secretWarnings
 }
 
 // Prepared is a source ready to upload: the original file itself, or a
@@ -196,8 +198,12 @@ func Prepare(src *Source) (*Prepared, error) {
 		}
 	}
 	if !isDir {
-		if warning := explicitSecretWarning(src.Path, name); warning != "" {
+		if warning := explicitSecretWarning(src.Path, name); warning != "" && src.warned.first(warning) {
 			p.warn(warning)
+		}
+	} else if !src.IncludeSecrets {
+		if dir := secretDirectory(src.Path, srcPath); dir != "" {
+			return nil, usageErrorf("folder %s is or is inside the secret directory %s; pass --include-secrets to publish it", src.Path, dir)
 		}
 	}
 	shouldRender := mode == RenderMarkdown || (mode == RenderAuto && src.Kind == "" && !isDir && strings.EqualFold(path.Ext(name), ".md"))
@@ -236,7 +242,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	}
 	switch {
 	case isDir:
-		p.Digest, p.skipped, err = packDir(srcPath, out, walkHooks{includeSecrets: src.IncludeSecrets, warn: p.warn, beforeRead: src.beforeRead})
+		p.Digest, p.skipped, err = packDir(srcPath, out, walkHooks{includeSecrets: src.IncludeSecrets, warn: p.warn, warned: src.warned, beforeRead: src.beforeRead})
 	case strings.HasSuffix(lower, ".zip"):
 		p.Digest, err = zipToTarGz(srcPath, src.beforeRead, out)
 	case strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm"):
@@ -265,6 +271,24 @@ func explicitSecretWarning(selected, name string) string {
 		return ""
 	}
 	return fmt.Sprintf("explicit file %q matches a conventional secret path; publishing as requested", path.Base(filepath.ToSlash(name)))
+}
+
+// secretDirectory returns the first component of a selected folder, or of
+// its resolved real path, that names a secret directory, or "". The walk
+// filters names below the folder only, so selecting such a folder, or one
+// inside it, would otherwise publish it without a warning.
+func secretDirectory(paths ...string) string {
+	for _, p := range paths {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+			if part != "" && secretEntryName(part, true) {
+				return part
+			}
+		}
+	}
+	return ""
 }
 
 // explicitSecretPath checks parent components too, so explicitly selecting

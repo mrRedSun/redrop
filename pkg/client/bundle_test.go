@@ -241,7 +241,7 @@ func TestSecretFolderPacking(t *testing.T) {
 				var wantWarnings []string
 				if !include {
 					for _, name := range secretFixtureExcluded {
-						wantWarnings = append(wantWarnings, `bundle path "`+name+`" excluded: conventional secret path (use --include-secrets to include)`)
+						wantWarnings = append(wantWarnings, `bundle path "`+name+`": name excluded by the secret rule (use --include-secrets to include)`)
 					}
 				}
 				sort.Strings(warnings)
@@ -406,7 +406,7 @@ func TestSecretSymlinksSkippedBeforeFollowing(t *testing.T) {
 				t.Fatalf("secret symlink was followed: %v", err)
 			}
 			defer p.Close()
-			if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], `"`+name+`" excluded: conventional secret path`) {
+			if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], `"`+name+`": name excluded by the secret rule`) {
 				t.Fatalf("secret symlink not excluded before following: %v", p.Warnings)
 			}
 		})
@@ -421,7 +421,7 @@ func TestSecretOnlyFolderWarnsBeforeFailing(t *testing.T) {
 	if p != nil {
 		p.Close()
 	}
-	if !errors.Is(err, ErrEmptyDirectory) || len(warnings) != 1 || !strings.Contains(warnings[0], `".env" excluded`) {
+	if !errors.Is(err, ErrEmptyDirectory) || len(warnings) != 1 || !strings.Contains(warnings[0], `".env": name excluded`) {
 		t.Fatalf("secret-only folder err=%v warning count=%d; want empty folder and one warning", err, len(warnings))
 	}
 }

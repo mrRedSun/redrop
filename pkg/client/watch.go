@@ -206,8 +206,13 @@ func Watch(ctx context.Context, up Uploader, artifactID string, src *Source, opt
 	if err != nil {
 		return filePathError(src.Path, err, os.Lstat)
 	}
+	// A private copy carries this run's secret warnings: registration,
+	// events and every publish's Prepare report each one once.
+	own := *src
+	own.warned = secretWarnings{}
+	src = &own
 	if !st.IsDir() && src.Warn != nil {
-		if warning := explicitSecretWarning(src.Path, src.Name); warning != "" {
+		if warning := explicitSecretWarning(src.Path, src.Name); warning != "" && src.warned.first(warning) {
 			src.Warn(warning)
 		}
 	}
@@ -492,8 +497,8 @@ func (w *watcher) ignored(name string) bool {
 			}
 		}
 		if skip, _, secret := skipEntry(entry, mode, w.includeSecrets()); skip {
-			if secret {
-				w.warn(secretPathWarning(entry))
+			if warning := secretPathWarning(entry); secret && w.warnedSecrets().first(warning) {
+				w.warn(warning)
 			}
 			return true
 		}
@@ -503,6 +508,13 @@ func (w *watcher) ignored(name string) bool {
 
 func (w *watcher) includeSecrets() bool {
 	return w.src != nil && w.src.IncludeSecrets
+}
+
+func (w *watcher) warnedSecrets() secretWarnings {
+	if w.src == nil {
+		return nil
+	}
+	return w.src.warned
 }
 
 func (w *watcher) warn(message string) {
@@ -707,7 +719,7 @@ func (w *watcher) watchTree(start string) error {
 		return filePathError(w.root, err, os.Lstat)
 	}
 	defer root.Close()
-	walk := &bundleWalk{fsys: root.FS(), hooks: walkHooks{includeSecrets: w.includeSecrets(), warn: w.warn}, dir: func(name string) error {
+	walk := &bundleWalk{fsys: root.FS(), hooks: walkHooks{includeSecrets: w.includeSecrets(), warn: w.warn, warned: w.warnedSecrets()}, dir: func(name string) error {
 		p := filepath.Join(w.root, filepath.FromSlash(name))
 		if w.dirs == nil {
 			w.dirs = map[string]bool{}

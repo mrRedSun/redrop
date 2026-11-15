@@ -919,6 +919,9 @@ your shell history).`,
   $env:REDROP_TOKEN='rdp_…'; irm https://redrop.example.com/install.ps1 | iex`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := refuseConfigSymlink(); err != nil {
+				return err
+			}
 			cfg := loadConfig()
 			u := firstNonEmpty(g.url, os.Getenv("REDROP_URL"), cfg.URL)
 			if u == "" {

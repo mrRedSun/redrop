@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -127,22 +128,25 @@ func TestSaveConfigPrivateAtomicReplacement(t *testing.T) {
 	}
 }
 
-func TestSaveConfigDoesNotFollowDestinationSymlink(t *testing.T) {
-	for _, dangling := range []bool{false, true} {
-		name := "existing target"
-		if dangling {
-			name = "dangling target"
-		}
-		t.Run(name, func(t *testing.T) {
+// m-C: a symlinked config is refused rather than replaced. Replacing it
+// would leave the old token in the link's target while reporting success.
+func TestConfigSymlinkRefused(t *testing.T) {
+	const original = `{"url":"https://redrop.example.com","token":"synthetic-old-token"}`
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		dangling bool
+	}{
+		{"save", nil, false},
+		{"save dangling", nil, true},
+		{"logout", []string{"logout"}, false},
+		{"login", []string{"login", "--url", "http://127.0.0.1:1", "--token", "rdp_synthetic"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			p, target := filepath.Join(dir, "config.json"), filepath.Join(t.TempDir(), "target.json")
-			useConfigPath(t, p)
-			const original = "target must stay untouched\n"
-			if !dangling {
-				if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(target, 0o644); err != nil {
+			if !tc.dangling {
+				if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -152,30 +156,33 @@ func TestSaveConfigDoesNotFollowDestinationSymlink(t *testing.T) {
 				}
 				t.Fatal(err)
 			}
-			want := fileConfig{URL: "https://redrop.example.com", Token: "synthetic-token"}
-			if err := saveConfig(want); err != nil {
-				t.Fatal(err)
+			var err error
+			out, _ := captureCLIOutput(t, func() {
+				if tc.args == nil {
+					useConfigPath(t, p)
+					err = saveConfig(fileConfig{URL: "https://redrop.example.com", Token: "synthetic-token"})
+					return
+				}
+				cmd := newRootCmd()
+				cmd.SetArgs(append([]string{"--config", p}, tc.args...))
+				err = cmd.Execute()
+			})
+			requireExitCode(t, err, exitUsage)
+			if !strings.Contains(err.Error(), "is a symlink; pass --config with the real file") {
+				t.Fatalf("error = %q; want the symlink refusal", err)
 			}
-			requireSavedConfig(t, p, want)
-			if dangling {
-				if _, err := os.Lstat(target); !os.IsNotExist(err) {
-					t.Errorf("dangling symlink target was created: %v", err)
-				}
-			} else {
-				b, err := os.ReadFile(target)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if string(b) != original {
-					t.Error("destination symlink target was overwritten")
-				}
-				info, err := os.Stat(target)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
-					t.Errorf("target mode changed to %04o", info.Mode().Perm())
-				}
+			if out != "" {
+				t.Errorf("refused command reported success: %q", out)
+			}
+			if info, err := os.Lstat(p); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("config symlink was replaced: %v", err)
+			}
+			b, err := os.ReadFile(target)
+			switch {
+			case tc.dangling && !os.IsNotExist(err):
+				t.Errorf("dangling symlink target was created: %v", err)
+			case !tc.dangling && (err != nil || string(b) != original):
+				t.Errorf("symlink target changed: %q, %v", b, err)
 			}
 			requireDirectoryNames(t, dir, []string{"config.json"})
 		})

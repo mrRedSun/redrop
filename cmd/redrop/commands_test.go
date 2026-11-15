@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -241,13 +242,69 @@ func TestSecretCLIFlagAndWarnings(t *testing.T) {
 		})
 		wantErr := ""
 		if !include {
-			wantErr = "warning: bundle path \".env\" excluded: conventional secret path (use --include-secrets to include)\n"
+			wantErr = "warning: bundle path \".env\": name excluded by the secret rule (use --include-secrets to include)\n"
 		}
 		_, found := files[".env"]
 		if out != "" || errOut != wantErr || found != include {
 			t.Errorf("include=%v stdout=%q stderr=%q secret included=%v", include, out, errOut, found)
 		}
 	}
+}
+
+// m-B: the walk filters secret names below the selected folder only, so a
+// selected secret folder, or a folder inside one, is refused unless secrets
+// are included. Nothing is read or sent.
+func TestSecretFolderSelectionRefused(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	home := t.TempDir()
+	writeCLIFile(t, home, "index.html", "public")
+	for _, dir := range []string{".aws", ".aws/sub", ".ssh", ".gnupg"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(home, dir), "credentials", "synthetic-marker")
+	}
+	link := filepath.Join(home, "creds")
+	if err := os.Symlink(".aws", link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(home)
+	for _, tc := range []struct{ path, cwd string }{
+		{".aws", home}, {filepath.Join(home, ".ssh"), home}, {".gnupg/", home},
+		{".aws/sub", home}, {".", filepath.Join(home, ".aws")}, {"creds", home},
+	} {
+		for _, command := range [][]string{{"share"}, {"update", "artifact-id"}, {"watch", "artifact-id"}} {
+			t.Run(command[0]+" "+tc.path, func(t *testing.T) {
+				t.Chdir(tc.cwd)
+				_, errOut := captureCLIOutput(t, func() {
+					cmd := newRootCmd()
+					cmd.SetArgs(append(append([]string{"--url", srv.URL, "--token", "test-token"}, command...), tc.path))
+					err := cmd.Execute()
+					requireExitCode(t, err, exitUsage)
+					if !strings.Contains(err.Error(), "secret directory") || !strings.Contains(err.Error(), "--include-secrets") {
+						t.Fatalf("error = %q; want the secret-directory refusal", err)
+					}
+				})
+				if strings.Contains(errOut, "synthetic-marker") {
+					t.Fatalf("stderr leaked contents: %q", errOut)
+				}
+			})
+		}
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("refused secret folders made %d requests; want none", got)
+	}
+	src := &client.Source{Path: filepath.Join(home, ".aws"), IncludeSecrets: true}
+	p, err := client.Prepare(src)
+	if err != nil {
+		t.Fatalf("--include-secrets refused: %v", err)
+	}
+	p.Close()
 }
 
 func TestSecretWatchStartupWarnings(t *testing.T) {
@@ -269,7 +326,7 @@ func TestSecretWatchStartupWarnings(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if out != "" || !strings.Contains(errOut, `bundle path ".env" excluded: conventional secret path`) || strings.Contains(errOut, dir) || strings.Contains(errOut, "synthetic-marker") {
+	if out != "" || !strings.Contains(errOut, `bundle path ".env": name excluded by the secret rule`) || strings.Contains(errOut, dir) || strings.Contains(errOut, "synthetic-marker") {
 		t.Fatalf("watch startup missing safe stderr warning: %q", errOut)
 	}
 }

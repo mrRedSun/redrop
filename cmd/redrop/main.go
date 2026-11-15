@@ -79,7 +79,22 @@ func loadConfig() fileConfig {
 	return c
 }
 
+// refuseConfigSymlink stops login and logout before they change anything when
+// the config file is a symlink. saveConfig replaces the file atomically and
+// never writes through a link, so the link's target would keep the old token
+// while the command reported success.
+func refuseConfigSymlink() error {
+	p := configPath()
+	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return withCode(exitUsage, "the config file %s is a symlink; pass --config with the real file", p)
+	}
+	return nil
+}
+
 func saveConfig(c fileConfig) error {
+	if err := refuseConfigSymlink(); err != nil {
+		return err
+	}
 	p := configPath()
 	dir := filepath.Dir(p)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

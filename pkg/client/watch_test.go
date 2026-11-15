@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -196,6 +197,14 @@ type watchHarness struct {
 
 func newHarness(t *testing.T, up Uploader, root string) *watchHarness {
 	t.Helper()
+	return newSourceHarness(t, up, &Source{Path: root}, false)
+}
+
+// newSourceHarness watches src; register adds its directories first, as
+// Watch does.
+func newSourceHarness(t *testing.T, up Uploader, src *Source, register bool) *watchHarness {
+	t.Helper()
+	root := src.Path
 	ctx, cancel := context.WithCancel(context.Background())
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -203,13 +212,18 @@ func newHarness(t *testing.T, up Uploader, root string) *watchHarness {
 	}
 	h := &watchHarness{t: t, clk: newFakeClock(), events: make(chan fsnotify.Event), errs: make(chan error), ack: make(chan struct{}), barrier: errors.New("test barrier"), published: make(chan WatchResult, 16), notices: make(chan Notice, 16), cancel: cancel, done: make(chan error, 1)}
 	ready := make(chan struct{})
-	h.w = &watcher{up: up, artifactID: "art", root: filepath.Clean(root), src: &Source{Path: root}, ctx: ctx, quit: ctx.Done(), fw: fw, events: h.events, errors: h.errs, opts: WatchOptions{Debounce: time.Second, Clock: h.clk, Retrier: staticRetrier{time.Second}, OnReady: func() { close(ready) }, OnPublish: func(r WatchResult) { h.published <- r }, OnNotice: func(n Notice) {
+	h.w = &watcher{up: up, artifactID: "art", root: filepath.Clean(root), src: src, ctx: ctx, quit: ctx.Done(), fw: fw, events: h.events, errors: h.errs, opts: WatchOptions{Debounce: time.Second, Clock: h.clk, Retrier: staticRetrier{time.Second}, OnReady: func() { close(ready) }, OnPublish: func(r WatchResult) { h.published <- r }, OnNotice: func(n Notice) {
 		if n.Err == h.barrier {
 			h.ack <- struct{}{}
 		} else {
 			h.notices <- n
 		}
 	}}}
+	if register {
+		if err := h.w.registerAll(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	go func() { h.done <- h.w.run() }()
 	receive(t, ready)
 	t.Cleanup(func() {
@@ -765,6 +779,51 @@ func TestSecretWatchDecisions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// n-B: registration, events and every publish's pack share one set per run,
+// so each secret path is reported once, and a new one once more.
+func TestWatchSecretWarningsOncePerPath(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "index.html", "v0")
+	for _, name := range []string{".env", ".ssh/id_ed25519", "nested/.npmrc"} {
+		write(t, dir, name, "synthetic-marker")
+	}
+	var mu sync.Mutex
+	var warnings []string
+	count := func() int { mu.Lock(); defer mu.Unlock(); return len(warnings) }
+	src := &Source{Path: dir, warned: secretWarnings{}, Warn: func(w string) { mu.Lock(); warnings = append(warnings, w); mu.Unlock() }}
+	up := &fakeUploader{}
+	h := newSourceHarness(t, up, src, true)
+	if count() != 3 {
+		t.Fatalf("registration warnings = %d, want 3", count())
+	}
+	for i := range 3 {
+		write(t, dir, "index.html", fmt.Sprintf("v%d", i+1))
+		h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+		h.event(filepath.Join(dir, ".env"), fsnotify.Write)
+		h.advance(time.Second)
+	}
+	if up.calls() != 3 || count() != 3 {
+		t.Fatalf("after %d publishes: %d warnings, want 3: %q", up.calls(), count(), warnings)
+	}
+	write(t, dir, ".env.local", "synthetic-marker")
+	h.event(filepath.Join(dir, ".env.local"), fsnotify.Create)
+	write(t, dir, "index.html", "v4")
+	h.event(filepath.Join(dir, "index.html"), fsnotify.Write)
+	h.advance(time.Second)
+	if up.calls() != 4 || count() != 4 {
+		t.Fatalf("new secret path: %d publishes, %d warnings, want 4 and 4: %q", up.calls(), count(), warnings)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	seen := map[string]bool{}
+	for _, w := range warnings {
+		if seen[w] || strings.Contains(w, dir) || strings.Contains(w, "synthetic-marker") {
+			t.Errorf("repeated or unsafe warning %q", w)
+		}
+		seen[w] = true
 	}
 }
 

@@ -33,6 +33,8 @@ type walkHooks struct {
 	includeSecrets bool
 	// warn receives non-fatal warnings, such as a skipped broken symlink.
 	warn func(string)
+	// warned, if set, suppresses secret warnings already given in this run.
+	warned secretWarnings
 	// beforeRead, set only by tests, runs between a file's stat and its
 	// read, to reproduce a tree that changes mid-read.
 	beforeRead func(name string)
@@ -117,8 +119,26 @@ func secretEntryName(name string, isDir bool) bool {
 		path.Base(path.Dir(name)) == ".kube" && lower == "config"
 }
 
+// secretWarnings remembers the secret warnings already given. Watch keeps
+// one per run, so repeated publishes and events report each path once. It is
+// used by one goroutine at a time.
+type secretWarnings map[string]bool
+
+// first records message and reports whether it is new. A nil set reports
+// every message.
+func (s secretWarnings) first(message string) bool {
+	if s == nil {
+		return true
+	}
+	if s[message] {
+		return false
+	}
+	s[message] = true
+	return true
+}
+
 func secretPathWarning(name string) string {
-	return fmt.Sprintf("bundle path %q excluded: conventional secret path (use --include-secrets to include)", name)
+	return fmt.Sprintf("bundle path %q: name excluded by the secret rule (use --include-secrets to include)", name)
 }
 
 // skip applies skipEntry before following an entry, so skipped links and
@@ -142,8 +162,8 @@ func (b *bundleWalk) skip(name string, entry fs.DirEntry) bool {
 	if counted {
 		b.skipped++
 	}
-	if secret {
-		b.warn(secretPathWarning(name))
+	if warning := secretPathWarning(name); secret && b.hooks.warned.first(warning) {
+		b.warn(warning)
 	}
 	return skip
 }
