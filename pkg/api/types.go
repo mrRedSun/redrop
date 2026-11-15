@@ -318,7 +318,9 @@ type Stats struct {
 	Artifacts       int   `json:"artifacts"`
 	ActiveArtifacts int   `json:"active_artifacts"`
 	LogicalBytes    int64 `json:"logical_bytes"`
-	StoredBytes     int64 `json:"stored_bytes" description:"Deduplicated bytes on disk"`
+	StoredBytes     int64 `json:"stored_bytes" description:"Deduplicated blob bytes on disk, excluding uploads"`
+	StagedBytes     int64 `json:"staged_bytes" description:"Bytes received in pending uploads"`
+	ReservedBytes   int64 `json:"reserved_bytes" description:"Pending upload and materialization byte reservations"`
 	MaxTotalBytes   int64 `json:"max_total_bytes"`
 	MaxVersionBytes int64 `json:"max_version_bytes"`
 }

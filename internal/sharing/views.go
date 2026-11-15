@@ -102,6 +102,8 @@ type Stats struct {
 	Artifacts       int
 	Active          int
 	LogicalBytes    int64
+	StagedBytes     int64
+	ReservedBytes   int64
 	StoredBytes     int64
 	MaxTotalBytes   int64
 	MaxVersionBytes int64

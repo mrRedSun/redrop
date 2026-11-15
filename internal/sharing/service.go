@@ -37,6 +37,10 @@ type Service struct {
 	seenSigner    *security.Signer // de-duplicates ungated views
 	directSigner  *security.Signer // a visitor's choice of the direct, frameless view
 
+	// publication serializes materialization, commit/rollback, and GC. Waiting
+	// requests do no decompression and can leave through their context.
+	publication chan struct{}
+
 	unlockLimiter   *security.Limiter // per IP + artifact
 	unlockIPLimiter *security.Limiter // per IP across artifacts
 }
@@ -44,6 +48,7 @@ type Service struct {
 func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, log *slog.Logger) (*Service, error) {
 	s := &Service{
 		db: db, blobs: blobs, cfg: cfg, log: log,
+		publication:     make(chan struct{}, 1),
 		uploadDir:       filepath.Join(cfg.DataDir, "uploads"),
 		accessSigner:    security.NewSigner(secret, "access"),
 		previewSigner:   security.NewSigner(secret, "preview"),
@@ -72,6 +77,8 @@ func mapStore(err error) error {
 		return nil
 	case errors.Is(err, store.ErrNotFound):
 		return apperr.NotFound("not found")
+	case errors.Is(err, store.ErrUploadLimit):
+		return apperr.TooLarge("too many open upload sessions; finish an upload or wait for expiry")
 	case errors.Is(err, store.ErrQuota):
 		return apperr.TooLarge("storage quota exceeded (your quota or the server total); delete or let old artifacts expire")
 	}

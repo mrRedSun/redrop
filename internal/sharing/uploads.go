@@ -11,7 +11,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 )
 
-const uploadTTL = 24 * time.Hour
+const uploadTTL = time.Hour // renewed after each successful nonempty chunk
 
 func (s *Service) stagedPath(id string) string { return filepath.Join(s.uploadDir, id) }
 
@@ -28,20 +28,17 @@ func (s *Service) CreateUpload(ctx context.Context, actor Actor, size int64) (*U
 	if size > s.maxUploadBytes() {
 		return nil, apperr.TooLarge("upload exceeds the %s per-version limit", humanBytes(s.cfg.MaxVersionBytes))
 	}
-	used, err := s.db.UsedBytes(ctx, actor.UserID)
-	if err != nil {
-		return nil, apperr.Internal(err)
+	maxOpen := s.cfg.MaxOpenUploads
+	if maxOpen == 0 {
+		maxOpen = 8
 	}
-	// Early, approximate check; the authoritative check runs at publish time.
-	if actor.Quota > 0 && used+size > actor.Quota+s.cfg.MaxVersionBytes/10 {
-		return nil, apperr.TooLarge("storage quota exceeded: %s of %s used", humanBytes(used), humanBytes(actor.Quota))
-	}
-	u, err := s.db.CreateUpload(ctx, actor.UserID, size, uploadTTL)
+	u, err := s.db.CreateUpload(ctx, actor.UserID, size, uploadTTL, s.cfg.MaxTotalBytes, maxOpen)
 	if err != nil {
-		return nil, apperr.Internal(err)
+		return nil, mapStore(err)
 	}
 	f, err := os.OpenFile(s.stagedPath(u.ID), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
+		s.discardUpload(context.WithoutCancel(ctx), u.ID)
 		return nil, apperr.Internal(err)
 	}
 	f.Close()
@@ -91,25 +88,33 @@ func (s *Service) AppendChunk(ctx context.Context, actor Actor, id string, offse
 	if rem := u.Size - offset; rem < limit {
 		limit = rem
 	}
-	n, err := io.Copy(f, io.LimitReader(body, limit+1))
+	n, err := io.Copy(f, io.LimitReader(body, limit))
 	if err != nil {
 		return nil, apperr.Invalid("chunk transfer interrupted; resume from the reported offset")
 	}
-	if n > limit {
+	var extra [1]byte
+	if more, readErr := body.Read(extra[:]); more > 0 {
 		return nil, apperr.TooLarge("chunk too large: at most %d bytes at this offset", limit)
+	} else if readErr != nil && readErr != io.EOF {
+		return nil, apperr.Invalid("chunk transfer interrupted; resume from the reported offset")
 	}
 	if err := f.Sync(); err != nil {
 		return nil, apperr.Internal(err)
 	}
 	u.Received = offset + n
-	if err := s.db.SetUploadReceived(ctx, u.ID, u.Received); err != nil {
+	if err := s.db.SetUploadReceived(ctx, u.ID, u.Received, uploadTTL); err != nil {
 		return nil, apperr.Internal(err)
 	}
-	return u, nil
+	return s.GetUpload(ctx, actor, id)
 }
 
 // discardUpload removes a consumed or abandoned upload.
 func (s *Service) discardUpload(ctx context.Context, id string) {
-	os.Remove(s.stagedPath(id))
-	s.db.DeleteUpload(ctx, id)
+	if err := os.Remove(s.stagedPath(id)); err != nil && !os.IsNotExist(err) {
+		s.log.Error("remove upload", "id", id, "error", err)
+		return // retain the reservation until bytes are reclaimed
+	}
+	if err := s.db.DeleteUpload(ctx, id); err != nil {
+		s.log.Error("release upload reservation", "id", id, "error", err)
+	}
 }

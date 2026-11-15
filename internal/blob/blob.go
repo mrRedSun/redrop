@@ -44,6 +44,16 @@ var ErrTooLarge = errors.New("content exceeds size limit")
 // Put stores r and returns its hash and size. A non-negative limit caps the
 // size (0 allows only empty content); a negative limit means unlimited.
 func (s *Store) Put(r io.Reader, limit int64) (string, int64, error) {
+	return s.put(r, limit, nil)
+}
+
+// PutTracked records only blobs newly installed by this attempt. Callers must
+// serialize writes and GC until their database commit or rollback completes.
+func (s *Store) PutTracked(r io.Reader, limit int64, created map[string]struct{}) (string, int64, error) {
+	return s.put(r, limit, created)
+}
+
+func (s *Store) put(r io.Reader, limit int64, created map[string]struct{}) (string, int64, error) {
 	f, err := os.CreateTemp(s.tmp, "blob-*")
 	if err != nil {
 		return "", 0, err
@@ -81,7 +91,23 @@ func (s *Store) Put(r io.Reader, limit int64) (string, int64, error) {
 	if err := os.Rename(tmp, dst); err != nil {
 		return "", 0, err
 	}
+	if created != nil {
+		created[sum] = struct{}{}
+	}
 	return sum, n, nil
+}
+
+// Remove deletes a known blob. Publication rollback holds the same exclusion
+// as writes and GC and removes only newly created, unreferenced hashes.
+func (s *Store) Remove(h string) error {
+	if !validHash(h) {
+		return fs.ErrInvalid
+	}
+	err := os.Remove(s.path(h))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // Open returns the blob for reading.
@@ -110,10 +136,14 @@ func (s *Store) GC(referenced map[string]struct{}, minAge time.Duration) (remove
 		if ierr != nil || info.ModTime().After(cutoff) {
 			return nil
 		}
-		if os.Remove(p) == nil {
-			removed++
-			freed += info.Size()
+		if err := os.Remove(p); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
 		}
+		removed++
+		freed += info.Size()
 		return nil
 	})
 	return

@@ -9,7 +9,7 @@ import { safeNext } from '@/app/paths'
 import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
 import { Artifact, ArtifactSettingsForm, filterFromSearch, settingsDefaults, toUpdateRequest } from '@/features/artifacts/schemas'
-import { AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
+import { Stats, AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import { NewAccountForm, NewPasswordForm } from '@/features/onboarding/schemas'
 import { CreatedToken, TokenList } from '@/features/tokens/schemas'
 import { psQuote, setupCommand, setupOsFromPlatform, shQuote } from '@/features/tokens/setup-command'
@@ -34,6 +34,13 @@ function harness(respond: (path: string) => Response | 'offline') {
   return { run: <A, E>(effect: Effect.Effect<A, E, RedropApi>) => Effect.runPromise(effect.pipe(Effect.provide(layer))), requests, rechecks: () => rechecks }
 }
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
+
+await test('admin statistics retain received staging and reserved bytes separately', () => {
+  const value = { users: 1, artifacts: 2, active_artifacts: 1, logical_bytes: 100, stored_bytes: 80, staged_bytes: 20, reserved_bytes: 50, max_total_bytes: 1000, max_version_bytes: 500 }
+  assert.deepEqual(Schema.decodeUnknownSync(Stats)(value), value)
+  assert(Option.isNone(Schema.decodeUnknownOption(Stats)({ ...value, staged_bytes: '20' })))
+  assert(Option.isNone(Schema.decodeUnknownOption(Stats)({ ...value, reserved_bytes: undefined })))
+})
 
 await test('problem status maps to the expected tagged error', () => {
   const tags = { 400: 'Invalid', 401: 'Unauthorized', 403: 'Forbidden', 404: 'NotFound', 409: 'Conflict', 410: 'Gone', 413: 'TooLarge', 429: 'RateLimited', 500: 'ServerError' }

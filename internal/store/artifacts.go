@@ -66,6 +66,7 @@ type File struct {
 }
 
 type NewVersion struct {
+	UploadID  string // reservation converted to committed bytes in the same transaction
 	Kind      string
 	Entry     string
 	SPA       bool
@@ -196,13 +197,13 @@ func checkQuota(ctx context.Context, tx *sql.Tx, userID string, add, maxTotal in
 	if err := tx.QueryRowContext(ctx, `SELECT quota_bytes FROM users WHERE id = ?`, userID).Scan(&quota); err != nil {
 		return err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(sum(v.size),0) FROM versions v JOIN artifacts a ON a.id = v.artifact_id WHERE a.user_id = ?`, userID).Scan(&used); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT coalesce(sum(v.size),0) FROM versions v JOIN artifacts a ON a.id = v.artifact_id WHERE a.user_id = ?) + (SELECT coalesce(sum(size + materialized),0) FROM uploads WHERE user_id = ?)`, userID, userID).Scan(&used); err != nil {
 		return err
 	}
 	if quota > 0 && used+add > quota {
 		return ErrQuota
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce(sum(size),0) FROM versions`).Scan(&total); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT coalesce(sum(size),0) FROM versions) + (SELECT coalesce(sum(size + materialized),0) FROM uploads)`).Scan(&total); err != nil {
 		return err
 	}
 	if maxTotal > 0 && total+add > maxTotal {
@@ -214,6 +215,9 @@ func checkQuota(ctx context.Context, tx *sql.Tx, userID string, add, maxTotal in
 func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersion, maxTotal int64) (string, error) {
 	id := ids.ID()
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
+		if err := finishMaterialization(ctx, tx, na.UserID, v.UploadID); err != nil {
+			return err
+		}
 		if err := checkQuota(ctx, tx, na.UserID, v.size(), maxTotal); err != nil {
 			return err
 		}
@@ -238,6 +242,9 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 func (s *Store) AddVersion(ctx context.Context, artifactID, userID string, v *NewVersion, maxTotal int64, keep int) (int, error) {
 	var number int
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
+		if err := finishMaterialization(ctx, tx, userID, v.UploadID); err != nil {
+			return err
+		}
 		if err := checkQuota(ctx, tx, userID, v.size(), maxTotal); err != nil {
 			return err
 		}
@@ -555,10 +562,63 @@ type Upload struct {
 	ExpiresAt time.Time
 }
 
-func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl time.Duration) (*Upload, error) {
+var ErrUploadLimit = errors.New("too many open uploads")
+
+func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl time.Duration, maxTotal int64, maxOpen int) (*Upload, error) {
 	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: time.Now().Add(ttl).UTC().Truncate(time.Second)}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, now(), u.ExpiresAt.Unix())
+	err := s.Tx(ctx, func(tx *sql.Tx) error {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM uploads WHERE user_id = ?`, userID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= maxOpen {
+			return ErrUploadLimit
+		}
+		if err := checkQuota(ctx, tx, userID, size, maxTotal); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, now(), u.ExpiresAt.Unix())
+		return err
+	})
 	return u, err
+}
+
+// ReserveMaterialization reserves each file's declared unpacked size before any
+// blob bytes are written. Upload bytes remain reserved until safely removed.
+func (s *Store) ReserveMaterialization(ctx context.Context, userID, id string, size, maxTotal int64) error {
+	return s.Tx(ctx, func(tx *sql.Tx) error {
+		if err := checkQuota(ctx, tx, userID, size, maxTotal); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE uploads SET materialized = materialized + ? WHERE id = ? AND user_id = ? AND expires_at > ?`, size, id, userID, now())
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+func finishMaterialization(ctx context.Context, tx *sql.Tx, userID, id string) error {
+	if id == "" { // store callers without a filesystem upload
+		return nil
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE uploads SET materialized = 0 WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now())
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ResetMaterialization is called only after a failed attempt's blobs are removed.
+func (s *Store) ResetMaterialization(ctx context.Context, userID, id string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE uploads SET materialized = 0 WHERE id = ? AND user_id = ?`, id, userID)
+	return err
 }
 
 func (s *Store) UploadByID(ctx context.Context, userID, id string) (*Upload, error) {
@@ -573,8 +633,8 @@ func (s *Store) UploadByID(ctx context.Context, userID, id string) (*Upload, err
 	return &u, nil
 }
 
-func (s *Store) SetUploadReceived(ctx context.Context, id string, received int64) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE uploads SET received = ? WHERE id = ?`, received, id)
+func (s *Store) SetUploadReceived(ctx context.Context, id string, received int64, idle time.Duration) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE uploads SET received = ?, expires_at = CASE WHEN ? > received THEN ? ELSE expires_at END WHERE id = ?`, received, received, time.Now().Add(idle).Unix(), id)
 	return err
 }
 
@@ -649,8 +709,9 @@ func (s *Store) ReferencedBlobs(ctx context.Context) (map[string]struct{}, error
 }
 
 type Stats struct {
-	Users, Artifacts, Active int
-	LogicalBytes             int64
+	Users, Artifacts, Active   int
+	LogicalBytes               int64
+	StagedBytes, ReservedBytes int64
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
@@ -658,7 +719,9 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	n := now()
 	err := s.DB.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM artifacts),
 		(SELECT count(*) FROM artifacts WHERE revoked = 0 AND (expires_at IS NULL OR expires_at > ?) AND (max_views = 0 OR views < max_views)),
-		(SELECT coalesce(sum(size),0) FROM versions)`, n).Scan(&st.Users, &st.Artifacts, &st.Active, &st.LogicalBytes)
+		(SELECT coalesce(sum(size),0) FROM versions),
+		(SELECT coalesce(sum(received),0) FROM uploads),
+		(SELECT coalesce(sum(size + materialized),0) FROM uploads)`, n).Scan(&st.Users, &st.Artifacts, &st.Active, &st.LogicalBytes, &st.StagedBytes, &st.ReservedBytes)
 	return st, err
 }
 

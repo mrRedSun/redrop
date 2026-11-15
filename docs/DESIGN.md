@@ -60,6 +60,14 @@ worker script, not even redrop's own `/__redrop/` scripts (requests with `Sec-Fe
 link is revoked or expires, and could take over the viewer page's own
 navigations.
 
+On a content domain that is not on the Public Suffix List, an artifact can set
+ordinary parent-domain cookies sent to sibling artifact hosts. Host-only
+`__Host-` access cookies cannot be forged this way, but cookie flooding can
+make a visitor's requests to other artifacts too large. The owner accepts this
+per-browser availability limitation because publishing is invite-only. Keep
+invitations restricted to trusted accounts. Separate origins do not make an
+unlisted content domain a cookie suffix boundary.
+
 The slug is the access secret. "Rotate link" replaces the slug; the artifact ID
 used by the API/CLI is stable. Artifact slugs appear in TLS SNI and DNS
 lookups; that is accepted.
@@ -417,6 +425,45 @@ chunked and resumable:
 Bundles are uploaded as `tar.gz`. Extraction rejects absolute paths, `..`,
 links, devices, reserved paths, and enforces file-count and decompressed-size
 limits.
+
+### Disk budgets and upload expiry
+
+SQLite reserves each upload's declared bytes atomically with committed version
+usage against both the owner's quota and `REDROP_MAX_TOTAL_SIZE`. Open sessions
+also have a per-user cap, `REDROP_MAX_OPEN_UPLOADS`, default 8 and a positive
+integer. Zero-byte sessions count. Expired sessions retain their reservation
+until maintenance removes their disk bytes, then releases the row.
+
+Uploads expire after one idle hour. Each completed nonempty chunk renews the
+hour, so a slow upload can resume across many chunks without a 24-hour abandoned
+session. The minute maintenance sweep reclaims expired sessions. Reading status,
+empty chunks and failed publication attempts do not extend expiry. Admin stats
+show `staged_bytes`, the successfully received upload bytes, and
+`reserved_bytes`, pending declared bytes plus unpacked publication reservations,
+separately from committed logical bytes and deduplicated blob storage.
+
+Before writing any materialized file, publication reserves its declared
+unpacked size in the same quota transaction. The version limit applies to the
+sum of unpacked file sizes. Upload bytes stay reserved too, so publishing needs
+temporary headroom for both the staged upload and its unpacked content. The
+commit converts the unpacked reservation to committed logical usage atomically;
+staging is released only after its file has been removed.
+
+Publication and blob garbage collection share one cancellable service admission
+slot. Each attempt tracks only the hashes it newly installed. On extraction,
+entry-validation or database failure, it removes those hashes only if no file
+record references them, before releasing its unpacked reservation. Existing
+blobs are never deleted by rollback, including deduplicated content shared with
+other artifacts. The slot covers commit and rollback, so a concurrent publisher
+cannot be about to reference a hash removed by another attempt. Failed cleanup
+keeps its reservation and logs an operational error rather than releasing
+unreclaimed capacity. This design favors a small, bounded materialization path
+over parallel extraction. Uploaded chunks remain independently resumable.
+
+Migration 4 adds `uploads.materialized`, initialized to zero for existing
+sessions. Stop the old process before upgrading. Do not run multiple server
+processes against the same data directory. Restore a whole-data-directory backup
+for rollback; older binaries do not enforce pending-byte reservations.
 
 ## Markdown documents
 

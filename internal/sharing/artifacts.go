@@ -108,7 +108,7 @@ func hashArtifactPassword(pw string) (string, error) {
 
 // materialize verifies a completed upload and stores it as version files.
 // It returns the version and a suggested title.
-func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*store.NewVersion, string, error) {
+func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attempt *publication) (*store.NewVersion, string, error) {
 	up, err := s.db.UploadByID(ctx, actor.UserID, c.UploadID)
 	if err != nil {
 		return nil, "", apperr.NotFound("upload not found or expired")
@@ -132,12 +132,12 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 		return nil, "", apperr.Internal(err)
 	}
 
-	v := &store.NewVersion{Kind: c.Kind, SPA: c.SPA, Note: truncate(strings.TrimSpace(c.Note), maxNote), TokenName: actor.TokenName}
+	v := &store.NewVersion{UploadID: up.ID, Kind: c.Kind, SPA: c.SPA, Note: truncate(strings.TrimSpace(c.Note), maxNote), TokenName: actor.TokenName}
 	var title string
 	switch c.Kind {
 	case api.KindHTML:
 		head := &headCapture{max: 64 << 10}
-		sum, size, err := s.blobs.Put(io.TeeReader(f, head), s.cfg.MaxVersionBytes)
+		sum, size, err := attempt.put(io.TeeReader(f, head), up.Size)
 		if err != nil {
 			return nil, "", s.blobErr(err)
 		}
@@ -147,7 +147,7 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 	case api.KindFile:
 		name := sanitizeFilename(c.Filename)
 		head := &headCapture{max: 512}
-		sum, size, err := s.blobs.Put(io.TeeReader(f, head), s.cfg.MaxVersionBytes)
+		sum, size, err := attempt.put(io.TeeReader(f, head), up.Size)
 		if err != nil {
 			return nil, "", s.blobErr(err)
 		}
@@ -155,7 +155,7 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 		v.Files = []store.File{{Path: name, Blob: sum, Size: size, ContentType: contentTypeFor(name, head.buf.Bytes())}}
 		title = name
 	case api.KindBundle:
-		files, err := s.extractBundle(f)
+		files, err := s.extractBundle(f, attempt)
 		if err != nil {
 			return nil, "", err
 		}
@@ -176,8 +176,6 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 	default:
 		return nil, "", apperr.Invalid("kind must be html, file, or bundle")
 	}
-	f.Close()
-	s.discardUpload(ctx, up.ID)
 	return v, title, nil
 }
 
@@ -201,6 +199,10 @@ func bundleEntry(files []store.File, requested string) (string, error) {
 func (s *Service) blobErr(err error) error {
 	if errors.Is(err, blob.ErrTooLarge) {
 		return apperr.TooLarge("content exceeds the %s per-version limit", humanBytes(s.cfg.MaxVersionBytes))
+	}
+	var app *apperr.Error
+	if errors.As(err, &app) {
+		return err
 	}
 	return apperr.Internal(err)
 }
@@ -230,7 +232,12 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	if err != nil {
 		return Artifact{}, err
 	}
-	v, title, err := s.materialize(ctx, actor, c)
+	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer attempt.close()
+	v, title, err := s.materialize(ctx, actor, c, attempt)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -244,6 +251,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	if err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	attempt.committed = true
 	s.log.Info("artifact created", "id", id, "user", actor.Username, "kind", v.Kind, "token", actor.TokenName)
 	return s.reload(ctx, id)
 }
@@ -312,7 +320,12 @@ func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Cont
 	if err != nil {
 		return Artifact{}, err
 	}
-	v, _, err := s.materialize(ctx, actor, c)
+	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer attempt.close()
+	v, _, err := s.materialize(ctx, actor, c, attempt)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -320,6 +333,7 @@ func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Cont
 	if err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	attempt.committed = true
 	s.log.Info("artifact version published", "id", a.ID, "version", n, "user", actor.Username)
 	return s.reload(ctx, a.ID)
 }

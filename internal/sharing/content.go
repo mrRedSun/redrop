@@ -133,7 +133,7 @@ func (h *headCapture) Write(p []byte) (int, error) {
 
 // extractBundle unpacks a tar.gz into blobs, enforcing file-count and
 // decompressed-size limits and rejecting links and special files.
-func (s *Service) extractBundle(r io.Reader) ([]store.File, error) {
+func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, apperr.Invalid("bundle must be a .tar.gz archive")
@@ -169,13 +169,16 @@ func (s *Service) extractBundle(r io.Reader) ([]store.File, error) {
 		if len(files) >= s.cfg.MaxFiles {
 			return nil, apperr.Invalid("bundle has more than %d files", s.cfg.MaxFiles)
 		}
+		if hdr.Size < 0 || hdr.Size > s.cfg.MaxVersionBytes-total {
+			return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
+		}
 		head := &headCapture{max: 512}
-		sum, size, err := s.blobs.Put(io.TeeReader(tr, head), s.cfg.MaxVersionBytes-total)
+		sum, size, err := attempt.put(io.TeeReader(tr, head), hdr.Size)
 		if err != nil {
 			if errors.Is(err, blob.ErrTooLarge) {
 				return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
 			}
-			return nil, apperr.Internal(err)
+			return nil, s.blobErr(err)
 		}
 		total += size
 		files = append(files, store.File{Path: p, Blob: sum, Size: size, ContentType: contentTypeFor(p, head.buf.Bytes())})

@@ -30,7 +30,11 @@ ALTER TABLE versions ADD COLUMN note_public INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE artifacts ADD COLUMN last_version INTEGER NOT NULL DEFAULT 0;
 UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = artifacts.id), 0));`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3}
+// schemaV4 accounts for decompressed publication bytes while an upload is open.
+const schemaV4 = `ALTER TABLE uploads ADD COLUMN materialized INTEGER NOT NULL DEFAULT 0;
+UPDATE uploads SET expires_at = min(expires_at, unixepoch() + 3600);`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4}
 
 var ErrNotFound = errors.New("not found")
 
