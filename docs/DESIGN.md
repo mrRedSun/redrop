@@ -638,6 +638,34 @@ When `share`, `update`, or `watch` packs a directory, it skips:
   such as `.page.swp` and `.page.swo`.
 - JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
   `.goutputstream-*` files.
+- Conventional secret files `.env` and `.env.*`, except `.env.example`,
+  `.env.sample`, and `.env.template`; `.netrc`, `.npmrc`, `.pypirc`,
+  `.git-credentials`, and `.pgpass`; private-key names `id_rsa`, `id_dsa`,
+  `id_ecdsa`, and `id_ed25519`, plus `*.key`, `*.p12`, and `*.pfx`.
+  The corresponding `.pub` files remain included.
+- Secret directories `.ssh`, `.aws`, and `.gnupg`, including their contents;
+  `.docker/config.json` and `.kube/config` files, without excluding other
+  files under `.docker` or `.kube`. These rules apply at any depth.
+
+`--include-secrets` on `share`, `update`, and `watch` opts conventional secret
+paths back in; library callers set `Source.IncludeSecrets`. The editor, VCS,
+and dependency filters remain active. A Markdown `--entry` that matches a
+secret rule is a usage error unless secrets are included; opting in does not
+allow an editor-filtered entry. Packing, hashing, directory registration, and
+the event filter all use the same source option.
+
+Every excluded secret entry emits a stderr warning containing only its relative
+path, never its contents. An excluded secret directory is named once per walk,
+without reading or listing its contents. Watch warns during registration and on
+excluded events, including newly created secret paths; repeated hash scans stay
+quiet. An explicitly selected single file still publishes as requested, and
+warns if its selected path or name matches a secret rule, even with
+`--include-secrets` or a different `--name`. Its source bytes are unchanged.
+Warnings stay on stderr even with `--json`.
+
+Use a dedicated output directory containing only files intended for recipients.
+These are name-based exclusions, not secret-content detection. They do not
+remove secrets from already published versions.
 
 File-name filters are case-insensitive; directory names match exactly. The
 walk applies the rule before it follows an entry: a listed directory's own
@@ -646,9 +674,10 @@ followed when either rule matches its name. An Emacs lock (`.#x`, a dangling
 symlink) is therefore skipped and counted rather than warned about, a
 `node_modules` link out of the folder does not fail the upload, and a skipped
 temp file that vanishes mid-walk is not a source change. One function,
-`skipEntry`, makes this decision for the walk, the watch event filter (for
-the last path component) and the Markdown `--entry` check (for every
-component, typed through the folder's `os.Root`). For an event on a name
+`skipEntry`, makes this decision from a root-relative path and listed type for
+the walk, the watch event filter, and the Markdown `--entry` check. The event
+filter and entry check apply it to every component; the entry check obtains
+types through the folder's `os.Root`. For an event on a name
 that is already gone, the filter uses the file rule unless the name was a
 registered directory, so editor temp-file churn neither rehashes the folder
 nor resets the watch's retry budget.
@@ -677,12 +706,12 @@ rejects any blob that differs from the declared hash. Each failed chunk costs
 one local re-read of that prefix. A
 mismatch means the file changed during the upload: `share` and `update` start
 over once and then fail, and `watch` waits for the next settled change. A
-retried upload abandons the first upload session; the server removes it when
-it expires (24h). Directories, single files forced to
+retried upload abandons the first upload session; the server expires idle
+sessions after 1h and reclaims their staging bytes. Directories, single files forced to
 a bundle, and `.zip` input are packed into a temporary tar.gz first; stdin is
 spooled to a temporary file.
 
-Archive entries supplied with `--as bundle` are not editor-filtered. ZIP input
+Archive entries supplied with `--as bundle` are not editor- or secret-filtered. ZIP input
 is converted to tar.gz using the existing archive conventions: strip a common
 top-level folder and omit `._*` files, `__MACOSX/` entries, and non-regular
 entries. tar.gz input is passed through. The server still validates archive

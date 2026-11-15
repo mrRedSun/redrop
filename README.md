@@ -102,9 +102,29 @@ Use `--render none` for larger sources.
 ### Folder uploads
 
 `share`, `update` and `watch` pack plain and Markdown folders the same way.
-They skip VCS and dependency directories, OS metadata and editor temp files;
-the full skip rule is in `redrop guide` under Share and in
-[`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads). Relative symlinks are
+They skip VCS and dependency directories, OS metadata, editor temp files, and
+conventional secret paths at any depth:
+
+- `.env` and `.env.*`, except `.env.example`, `.env.sample`, and `.env.template`.
+- `.ssh/`, `.aws/`, `.gnupg/`, `.docker/config.json`, and `.kube/config`.
+- `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, and `.pgpass`.
+- `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.key`, `*.p12`, and `*.pfx`.
+  Public keys such as `id_ed25519.pub` remain included.
+
+Each excluded secret entry prints a stderr warning with its relative path,
+never its contents. Excluded directories are named without traversing them.
+`--include-secrets` on `share`, `update`, or `watch` opts these paths back in,
+including a secret Markdown `--entry`; editor and VCS filters still apply.
+File-name matching is case-insensitive; directory names match exactly. Other
+useful hidden files remain included. Explicitly named single files still publish
+as requested, with unchanged source bytes and a warning if their path or name
+matches a secret rule. Supplied ZIP/tar.gz archives are not secret-filtered.
+
+Use a dedicated output folder containing only files intended for recipients.
+Name-based exclusions cannot identify every secret, and they do not remove files
+from versions already published. The full skip rule is in `redrop guide` under
+Share and in [`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads).
+Relative symlinks are
 followed only within the selected folder. Outside-root, absolute, and cyclic
 symlinks fail with usage errors. Broken symlinks and other non-regular entries
 are skipped with stderr warnings. A `PATH` that is itself a symlink is resolved

@@ -673,6 +673,116 @@ func TestWatchRelativeRoot(t *testing.T) {
 	}
 }
 
+func TestSecretWatchDecisions(t *testing.T) {
+	for _, include := range []bool{false, true} {
+		label := "default"
+		if include {
+			label = "include"
+		}
+		t.Run(label, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "index.html", "public")
+			for _, name := range secretFixturePaths {
+				write(t, dir, name, "synthetic-marker")
+			}
+			write(t, dir, ".git/config", "metadata")
+			write(t, dir, "notes~", "backup")
+			var warnings []string
+			src := &Source{Path: dir, Warn: func(w string) { warnings = append(warnings, w) }}
+			if include {
+				src.IncludeSecrets = true
+			}
+			fw, err := fsnotify.NewWatcher()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer fw.Close()
+			w := &watcher{root: dir, src: src, fw: fw, opts: WatchOptions{Clock: newFakeClock(), Debounce: time.Second}}
+			if err := w.registerAll(); err != nil {
+				t.Fatal(err)
+			}
+			watched := map[string]bool{}
+			for _, name := range fw.WatchList() {
+				watched[name] = true
+			}
+			for _, name := range []string{".ssh", ".aws", ".gnupg", "nested/.ssh"} {
+				if got := watched[filepath.Join(dir, name)]; got != include {
+					t.Errorf("secret directory %s registration=%v; want %v", name, got, include)
+				}
+			}
+			if err := w.seed(); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if w.published != p.Digest {
+				t.Fatal("watch seed and pack disagree about secret paths")
+			}
+			before := w.published
+			for _, name := range secretFixturePaths {
+				full := filepath.Join(dir, filepath.FromSlash(name))
+				if got := w.ignored(full); got != !include {
+					t.Errorf("secret event %s ignored=%v; want %v", name, got, !include)
+				}
+				write(t, dir, name, "changed-synthetic-marker")
+				if err := os.Remove(full); err != nil {
+					t.Fatal(err)
+				}
+				if got := w.ignored(full); got != !include {
+					t.Errorf("removed secret event %s ignored=%v; want %v", name, got, !include)
+				}
+				write(t, dir, name, "changed-synthetic-marker")
+			}
+			if err := w.seed(); err != nil {
+				t.Fatal(err)
+			}
+			if (w.published != before) != include {
+				t.Error("watch content digest did not apply the secret option")
+			}
+			if !w.ignored(filepath.Join(dir, ".git/config")) || !w.ignored(filepath.Join(dir, "notes~")) {
+				t.Error("secret opt-in disabled existing editor/VCS filters")
+			}
+			if !include {
+				write(t, dir, ".env.new", "synthetic-marker")
+				warnings = nil
+				w.changeRetries = 2
+				w.handle(fsnotify.Event{Name: filepath.Join(dir, ".env.new"), Op: fsnotify.Create})
+				if w.dirty || w.changeRetries != 2 || len(warnings) != 1 {
+					t.Errorf("secret event dirty=%v retry count=%d warning count=%d; want false, 2, 1", w.dirty, w.changeRetries, len(warnings))
+				}
+				if err := os.Mkdir(filepath.Join(dir, "new"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(dir, "new", ".ssh"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				w.handle(fsnotify.Event{Name: filepath.Join(dir, "new", ".ssh"), Op: fsnotify.Create})
+				if w.dirty || w.dirs[filepath.Join(dir, "new", ".ssh")] {
+					t.Error("new secret directory was registered or marked dirty")
+				}
+			}
+		})
+	}
+}
+
+func TestSecretExplicitWatchFileIsNotFiltered(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".env", "synthetic-marker")
+	file := filepath.Join(dir, ".env")
+	up := &fakeUploader{}
+	h := newHarness(t, up, file)
+	write(t, dir, ".env", "changed-synthetic-marker")
+	h.event(file, fsnotify.Write)
+	h.advance(time.Second)
+	receive(t, h.published)
+	if up.calls() != 1 {
+		t.Fatal("explicit secret file watch did not publish its edit")
+	}
+}
+
 func TestWatchSkippedDirectoriesNotRegistered(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "index.html", "v0")

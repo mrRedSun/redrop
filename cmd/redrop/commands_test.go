@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -174,6 +175,143 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestSecretCLIFlagAndWarnings(t *testing.T) {
+	for _, cmd := range []*cobra.Command{shareCmd(), updateCmd(), watchCmd()} {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			flag := cmd.Flags().Lookup("include-secrets")
+			if flag == nil || flag.DefValue != "false" || flag.Value.Type() != "bool" {
+				t.Fatal("--include-secrets boolean flag is missing or unsafe by default")
+			}
+		})
+	}
+	for _, include := range []bool{false, true} {
+		var f contentFlags
+		cmd := &cobra.Command{}
+		f.register(cmd)
+		if include {
+			if err := cmd.ParseFlags([]string{"--include-secrets"}); err != nil {
+				t.Error(err)
+				continue
+			}
+		}
+		dir := t.TempDir()
+		writeCLIFile(t, dir, "index.html", "public")
+		writeCLIFile(t, dir, ".env", "synthetic-marker")
+		var files map[string]string
+		out, errOut := captureCLIOutput(t, func() {
+			g.json = true
+			src, err := f.source(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := client.Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			gz, err := os.Open(p.File)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gz.Close()
+			zr, err := gzip.NewReader(gz)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer zr.Close()
+			files = map[string]string{}
+			tr := tar.NewReader(zr)
+			for {
+				h, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(tr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[h.Name] = string(body)
+			}
+		})
+		wantErr := ""
+		if !include {
+			wantErr = "warning: bundle path \".env\" excluded: conventional secret path (use --include-secrets to include)\n"
+		}
+		_, found := files[".env"]
+		if out != "" || errOut != wantErr || found != include {
+			t.Errorf("include=%v stdout=%q stderr=%q secret included=%v", include, out, errOut, found)
+		}
+	}
+}
+
+func TestSecretWatchStartupWarnings(t *testing.T) {
+	dir := t.TempDir()
+	writeCLIFile(t, dir, "index.html", "public")
+	writeCLIFile(t, dir, ".env", "synthetic-marker")
+	out, errOut := captureCLIOutput(t, func() {
+		var f contentFlags
+		src, err := f.source(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkWatchSource(src); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := client.Watch(ctx, nil, "artifact-id", src, client.WatchOptions{OnReady: cancel}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if out != "" || !strings.Contains(errOut, `bundle path ".env" excluded: conventional secret path`) || strings.Contains(errOut, dir) || strings.Contains(errOut, "synthetic-marker") {
+		t.Fatalf("watch startup missing safe stderr warning: %q", errOut)
+	}
+}
+
+func TestSecretExplicitWatchStartupWarning(t *testing.T) {
+	for _, source := range []string{".env", ".ssh/identity", ".docker/config.json"} {
+		t.Run(source, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, filepath.FromSlash(source))
+			if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := writeCLIFile(t, dir, "safe.txt", "synthetic-marker")
+			rel, err := filepath.Rel(filepath.Dir(file), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(rel, file); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			// The original selected path must warn even if watch resolves a
+			// symlink before creating its Source for later publications.
+			out, errOut := captureCLIOutput(t, func() {
+				var f contentFlags
+				src, err := f.source(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := checkWatchSource(src); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := client.Watch(ctx, nil, "artifact-id", src, client.WatchOptions{OnReady: cancel}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			want := `warning: explicit file "` + filepath.Base(source) + `" matches a conventional secret path; publishing as requested` + "\n"
+			if out != "" || errOut != want {
+				t.Fatalf("stdout=%q stderr=%q; want only relative explicit-file warning %q", out, errOut, want)
+			}
+		})
 	}
 }
 

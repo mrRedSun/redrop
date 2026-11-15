@@ -218,7 +218,7 @@ func plural(n int) string {
 type contentFlags struct {
 	as, name, entry, note string
 	render                string
-	spa                   bool
+	spa, includeSecrets   bool
 }
 
 func (f *contentFlags) register(cmd *cobra.Command) {
@@ -226,6 +226,7 @@ func (f *contentFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.name, "name", "", "file name to use (required when PATH is - for stdin; not valid with watch)")
 	cmd.Flags().StringVar(&f.render, "render", "auto", "render mode: auto (.md files unless --as is set), markdown, or none (raw)")
 	cmd.Flags().StringVar(&f.entry, "entry", "", "bundle start page (default index.html; without one a file listing is shown), or Markdown source with --render markdown")
+	cmd.Flags().BoolVar(&f.includeSecrets, "include-secrets", false, "include conventional secret paths in folder uploads (see redrop guide)")
 	cmd.Flags().BoolVar(&f.spa, "spa", false, "bundle is a single-page app: unknown extension-less paths serve the entry page")
 	cmd.Flags().StringVar(&f.note, "note", "", "note stored with this version; viewers see it in the info panel's version list")
 }
@@ -267,7 +268,7 @@ func (f *contentFlags) source(arg string) (*client.Source, error) {
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	src := &client.Source{Kind: f.as, Render: mode, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, OnSkipped: reportSkippedFiles, Warn: func(warning string) {
+	src := &client.Source{Kind: f.as, Render: mode, Name: f.name, Entry: f.entry, SPA: f.spa, Note: f.note, IncludeSecrets: f.includeSecrets, OnSkipped: reportSkippedFiles, Warn: func(warning string) {
 		fmt.Fprintln(os.Stderr, "warning: "+warning)
 	}}
 	if arg == "-" {

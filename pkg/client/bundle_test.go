@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -175,6 +177,252 @@ func TestPackFSDepthBoundAndWriteErrors(t *testing.T) {
 	}
 	if _, err := packFS(fstest.MapFS{"file.txt": &fstest.MapFile{Data: []byte("content")}}, brokenBundleWriter{}, walkHooks{}); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("archive write failure not propagated: %v", err)
+	}
+}
+
+// All markers are invented. The expected paths are independent of the skip rule.
+var secretFixturePaths = []string{
+	".env", ".env.local", ".env.production.local", "nested/.ENV", ".env.example.local",
+	".ssh/identity", ".aws/credentials", ".gnupg/private/identity",
+	"nested/.ssh/identity", ".docker/config.json", "nested/.docker/CONFIG.JSON", ".kube/config",
+	".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "nested/ID_RSA",
+	"server.key", "nested/client.P12", "client.pfx",
+}
+
+var secretFixtureExcluded = []string{
+	".env", ".env.local", ".env.production.local", "nested/.ENV", ".env.example.local",
+	".ssh", ".aws", ".gnupg", "nested/.ssh", ".docker/config.json", "nested/.docker/CONFIG.JSON", ".kube/config",
+	".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "nested/ID_RSA",
+	"server.key", "nested/client.P12", "client.pfx",
+}
+
+func TestSecretFolderPacking(t *testing.T) {
+	for _, mode := range []RenderMode{RenderNone, RenderMarkdown} {
+		for _, include := range []bool{false, true} {
+			label := string(mode) + "/default"
+			if include {
+				label = string(mode) + "/include"
+			}
+			t.Run(label, func(t *testing.T) {
+				dir := t.TempDir()
+				allowed := []string{"notes.md", ".env.example", ".env.sample", ".env.template", "nested/.ENV.EXAMPLE",
+					"id_rsa.pub", "id_dsa.pub", "id_ecdsa.pub", "id_ed25519.pub", "file.key.sig", ".logo.svg", ".schema.sql", ".subs.srt",
+					".docker/readme.txt", ".kube/config.yaml", ".SSH/readme.txt", "drafts~/notes.txt", "x.swp", "4913", "#", "##"}
+				for _, name := range append(append([]string(nil), allowed...), secretFixturePaths...) {
+					write(t, dir, name, "synthetic-marker")
+				}
+				for _, name := range []string{".git/config", "node_modules/pkg/lib.js", "notes~", ".#lock", ".notes.swp", "#notes#", "x___jb_tmp___", ".goutputstream-x"} {
+					write(t, dir, name, "editor-marker")
+				}
+				var warnings []string
+				src := &Source{Path: dir, Render: mode, Entry: "notes.md", Warn: func(w string) { warnings = append(warnings, w) }}
+				if include {
+					src.IncludeSecrets = true
+				}
+				p, err := Prepare(src)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer p.Close()
+				files := unpackPrepared(t, p)
+				want := append([]string(nil), allowed...)
+				if mode == RenderMarkdown {
+					want = append(want, "index.html")
+				}
+				if include {
+					want = append(want, secretFixturePaths...)
+				}
+				sort.Strings(want)
+				if got := sortedKeys(files); !reflect.DeepEqual(got, want) {
+					t.Errorf("folder contains excluded paths or loses allowed files: got %v; want %v", got, want)
+				}
+				var wantWarnings []string
+				if !include {
+					for _, name := range secretFixtureExcluded {
+						wantWarnings = append(wantWarnings, `bundle path "`+name+`" excluded: conventional secret path (use --include-secrets to include)`)
+					}
+				}
+				sort.Strings(warnings)
+				sort.Strings(wantWarnings)
+				if !reflect.DeepEqual(warnings, wantWarnings) {
+					t.Errorf("secret warning count=%d; want %d relative-path warnings", len(warnings), len(wantWarnings))
+				}
+				preparedWarnings := append([]string(nil), p.Warnings...)
+				sort.Strings(preparedWarnings)
+				if !reflect.DeepEqual(preparedWarnings, wantWarnings) {
+					t.Error("Prepared.Warnings differs from reported warnings")
+				}
+				if !include {
+					before, err := hashTree(dir)
+					if err != nil || before != p.Digest {
+						t.Fatalf("hashTree differs from folder pack: %v", err)
+					}
+					for _, name := range secretFixturePaths {
+						write(t, dir, name, "changed-synthetic-marker")
+					}
+					after, err := hashTree(dir)
+					if err != nil || after != before {
+						t.Error("secret edits changed the default content digest")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSecretMarkdownEntry(t *testing.T) {
+	for _, entry := range []string{".env", ".ssh/notes.md", ".aws/notes.md", ".gnupg/notes.md", ".docker/config.json", ".kube/config", "nested/.npmrc", "id_ed25519", "notes.key"} {
+		t.Run(entry, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, entry, "# Synthetic document\n")
+			src := &Source{Path: dir, Render: RenderMarkdown, Entry: entry}
+			p, err := Prepare(src)
+			if p != nil {
+				p.Close()
+			}
+			var usage *UsageError
+			if !errors.As(err, &usage) || !strings.Contains(err.Error(), "skip rule") {
+				t.Fatalf("secret Markdown entry accepted: %v", err)
+			}
+			src.IncludeSecrets = true
+			p, err = Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if files := unpackPrepared(t, p); files[entry] != "# Synthetic document\n" || files["index.html"] == "" {
+				t.Fatal("opt-in did not preserve the Markdown source")
+			}
+		})
+	}
+}
+
+func TestSecretSingleFileWarning(t *testing.T) {
+	for _, name := range []string{".env", ".ssh/identity", ".docker/config.json", "id_rsa", "server.key", "client.p12", "client.pfx"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, name, "synthetic-marker\x00\xff\n")
+			var warnings []string
+			src := &Source{Path: filepath.Join(dir, filepath.FromSlash(name)), Render: RenderNone, Warn: func(w string) { warnings = append(warnings, w) }}
+			p, err := Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			content, err := os.ReadFile(p.File)
+			if err != nil || string(content) != "synthetic-marker\x00\xff\n" {
+				t.Fatal("explicit secret file bytes changed")
+			}
+			want := `explicit file "` + filepath.Base(name) + `" matches a conventional secret path; publishing as requested`
+			if len(warnings) != 1 || warnings[0] != want || !reflect.DeepEqual(p.Warnings, warnings) {
+				t.Fatalf("explicit secret file lacks relative-path warning: %v", warnings)
+			}
+		})
+	}
+}
+
+func TestSecretExplicitSourceOptions(t *testing.T) {
+	for _, tc := range []struct {
+		label, source, name, kind string
+		render                    RenderMode
+		stdin, include            bool
+	}{
+		{label: "renamed", source: ".env", name: "safe.txt"},
+		{label: "secret name override", source: "safe.txt", name: ".env"},
+		{label: "stdin", name: ".env", stdin: true},
+		{label: "stdin opt-in", name: ".env", stdin: true, include: true},
+		{label: "bundle", source: ".env", kind: api.KindBundle},
+		{label: "bundle opt-in", source: ".env", kind: api.KindBundle, include: true},
+		{label: "Markdown", source: ".env", render: RenderMarkdown},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			const original = "# Synthetic source\n"
+			var warnings []string
+			src := &Source{Name: tc.name, Kind: tc.kind, Render: tc.render, IncludeSecrets: tc.include, Warn: func(w string) { warnings = append(warnings, w) }}
+			if tc.stdin {
+				src.Reader = strings.NewReader(original)
+			} else {
+				dir := t.TempDir()
+				write(t, dir, tc.source, original)
+				src.Path = filepath.Join(dir, tc.source)
+			}
+			p, err := Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			var content string
+			if p.Kind == api.KindBundle {
+				name := tc.name
+				if name == "" {
+					name = tc.source
+				}
+				content = unpackPrepared(t, p)[name]
+			} else {
+				body, err := os.ReadFile(p.File)
+				if err != nil {
+					t.Fatal(err)
+				}
+				content = string(body)
+			}
+			if content != original || len(warnings) != 1 || !strings.Contains(warnings[0], `explicit file ".env"`) {
+				t.Fatalf("explicit source content=%q warnings=%v; want original bytes and secret-name warning", content, warnings)
+			}
+		})
+	}
+}
+
+func TestSecretMarkdownOptInKeepsEditorFilter(t *testing.T) {
+	for _, entry := range []string{"notes~", ".#notes.md", "node_modules/readme.md", "docs/.git"} {
+		dir := t.TempDir()
+		write(t, dir, entry, "# Synthetic source\n")
+		p, err := Prepare(&Source{Path: dir, Render: RenderMarkdown, Entry: entry, IncludeSecrets: true})
+		if p != nil {
+			p.Close()
+		}
+		var usage *UsageError
+		if !errors.As(err, &usage) || !strings.Contains(err.Error(), "skip rule") {
+			t.Errorf("secret opt-in allowed editor/VCS entry %s: %v", entry, err)
+		}
+	}
+}
+
+func TestSecretSymlinksSkippedBeforeFollowing(t *testing.T) {
+	for _, name := range []string{".env", ".ssh", ".aws", ".gnupg", ".docker/config.json", ".kube/config", "private.key"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "index.html", "public")
+			link := filepath.Join(dir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/nonexistent-synthetic-target", link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			p, err := Prepare(&Source{Path: dir})
+			if err != nil {
+				t.Fatalf("secret symlink was followed: %v", err)
+			}
+			defer p.Close()
+			if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], `"`+name+`" excluded: conventional secret path`) {
+				t.Fatalf("secret symlink not excluded before following: %v", p.Warnings)
+			}
+		})
+	}
+}
+
+func TestSecretOnlyFolderWarnsBeforeFailing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".env", "synthetic-marker")
+	var warnings []string
+	p, err := Prepare(&Source{Path: dir, Warn: func(w string) { warnings = append(warnings, w) }})
+	if p != nil {
+		p.Close()
+	}
+	if !errors.Is(err, ErrEmptyDirectory) || len(warnings) != 1 || !strings.Contains(warnings[0], `".env" excluded`) {
+		t.Fatalf("secret-only folder err=%v warning count=%d; want empty folder and one warning", err, len(warnings))
 	}
 }
 

@@ -202,8 +202,14 @@ func Watch(ctx context.Context, up Uploader, artifactID string, src *Source, opt
 	// event filtering need for "./site", "site/", and similar spellings.
 	// It is absolute, so every path error from a publish outside the
 	// root-confined walk names an absolute path (see publishError).
-	if _, err := os.Stat(src.Path); err != nil {
+	st, err := os.Stat(src.Path)
+	if err != nil {
 		return filePathError(src.Path, err, os.Lstat)
+	}
+	if !st.IsDir() && src.Warn != nil {
+		if warning := explicitSecretWarning(src.Path, src.Name); warning != "" {
+			src.Warn(warning)
+		}
 	}
 	root, err := filepath.EvalSymlinks(src.Path)
 	if err != nil {
@@ -305,7 +311,7 @@ func (w *watcher) run() error {
 // maxChangeRetries debounce intervals.
 func (w *watcher) seed() error {
 	for {
-		sum, _, err := scanTree(w.root)
+		sum, _, err := scanTree(w.root, w.includeSecrets())
 		if err == nil {
 			w.published = sum
 			w.changeRetries = 0
@@ -474,24 +480,35 @@ func (w *watcher) ignored(name string) bool {
 		return true // outside the root: only root events matter
 	}
 	parts := strings.Split(rel, "/")
-	for _, part := range parts[:len(parts)-1] {
-		if skipEntryName(part, true) {
+	for i := range parts {
+		entry := strings.Join(parts[:i+1], "/")
+		mode := fs.ModeDir
+		if i == len(parts)-1 {
+			mode = 0
+			if info, err := os.Lstat(name); err == nil {
+				mode = info.Mode()
+			} else if w.dirs[name] {
+				mode = fs.ModeDir // a removed directory that held packed content
+			}
+		}
+		if skip, _, secret := skipEntry(entry, mode, w.includeSecrets()); skip {
+			if secret {
+				w.warn(secretPathWarning(entry))
+			}
 			return true
 		}
 	}
-	last := parts[len(parts)-1]
-	if skipEntryName(last, false) == skipEntryName(last, true) {
-		skip, _ := skipEntry(last, 0) // the type cannot change the answer
-		return skip
+	return false
+}
+
+func (w *watcher) includeSecrets() bool {
+	return w.src != nil && w.src.IncludeSecrets
+}
+
+func (w *watcher) warn(message string) {
+	if w.src != nil && w.src.Warn != nil {
+		w.src.Warn(message)
 	}
-	var mode fs.FileMode
-	if info, err := os.Lstat(name); err == nil {
-		mode = info.Mode()
-	} else if w.dirs[name] {
-		mode = fs.ModeDir // a removed directory that held packed content
-	}
-	skip, _ := skipEntry(last, mode)
-	return skip
 }
 
 func (w *watcher) notify(n Notice) {
@@ -504,7 +521,7 @@ func (w *watcher) notify(n Notice) {
 // last upload. UpdateDigest records the tree digest of the bytes actually
 // packed, using the same digest domain as hashTree.
 func (w *watcher) publishIfChanged() error {
-	sum, files, err := scanTree(w.root)
+	sum, files, err := scanTree(w.root, w.includeSecrets())
 	if err != nil {
 		return w.sourceError(w.scanError(err))
 	}
@@ -690,7 +707,7 @@ func (w *watcher) watchTree(start string) error {
 		return filePathError(w.root, err, os.Lstat)
 	}
 	defer root.Close()
-	walk := &bundleWalk{fsys: root.FS(), dir: func(name string) error {
+	walk := &bundleWalk{fsys: root.FS(), hooks: walkHooks{includeSecrets: w.includeSecrets(), warn: w.warn}, dir: func(name string) error {
 		p := filepath.Join(w.root, filepath.FromSlash(name))
 		if w.dirs == nil {
 			w.dirs = map[string]bool{}
@@ -709,12 +726,14 @@ func (w *watcher) watchTree(start string) error {
 // the tree; an explicitly named single-file root is always hashed (the
 // same rule `update` applies when publishing it).
 func hashTree(root string) (string, error) {
-	sum, _, err := scanTree(root)
+	sum, _, err := scanTree(root, false)
 	return sum, err
 }
 
-// scanTree is hashTree plus the number of files hashed (1 for a file root).
-func scanTree(root string) (string, int, error) {
+// scanTree is hashTree plus the source's secret option and the number of files
+// hashed (1 for a file root). Registration/events report skipped secrets;
+// repeated content scans stay quiet.
+func scanTree(root string, includeSecrets bool) (string, int, error) {
 	st, err := os.Stat(root)
 	if err != nil {
 		return "", 0, err
@@ -729,7 +748,7 @@ func scanTree(root string) (string, int, error) {
 	}
 	defer dir.Close()
 	db := &treeDigestBuilder{}
-	walk := &bundleWalk{fsys: dir.FS(), file: func(name string, content io.Reader, size int64) error {
+	walk := &bundleWalk{fsys: dir.FS(), hooks: walkHooks{includeSecrets: includeSecrets}, file: func(name string, content io.Reader, size int64) error {
 		sum, err := copyHashed(io.Discard, content, size)
 		if err == nil {
 			db.add(name, sum)
