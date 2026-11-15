@@ -30,7 +30,27 @@ ALTER TABLE versions ADD COLUMN note_public INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE artifacts ADD COLUMN last_version INTEGER NOT NULL DEFAULT 0;
 UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = artifacts.id), 0));`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3}
+// schemaV4 adds viewer feedback (DESIGN.md "Viewer feedback"): a
+// per-artifact switch, off for existing artifacts, and the comments. A
+// comment keeps its version number when that version is deleted, and goes
+// with its artifact.
+const schemaV4 = `ALTER TABLE artifacts ADD COLUMN feedback INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE feedback (
+    id           TEXT PRIMARY KEY,
+    artifact_id  TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    version      INTEGER NOT NULL,
+    page         TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    quote_exact  TEXT NOT NULL DEFAULT '',
+    quote_prefix TEXT NOT NULL DEFAULT '',
+    quote_suffix TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    resolved_at  INTEGER
+);
+CREATE INDEX feedback_artifact ON feedback(artifact_id, created_at);`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4}
 
 var ErrNotFound = errors.New("not found")
 

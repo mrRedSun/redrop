@@ -33,6 +33,8 @@ type Artifact struct {
 	LastViewedAt   *time.Time
 	InfoButton     *bool // nil = server default
 	OldVersions    bool  // viewers may open older versions
+	Feedback       bool  // viewers may leave comments
+	LastVersion    int   // highest version number ever used
 
 	// Current version details (joined).
 	Kind      string
@@ -83,7 +85,7 @@ func (v *NewVersion) size() int64 {
 }
 
 const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.token_id,''), a.token_name, a.title, a.current_version, a.password_hash,
-	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button, a.viewer_old_versions,
+	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button, a.viewer_old_versions, a.feedback, a.last_version,
 	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0), coalesce(v.created_at,0),
 	(SELECT coalesce(sum(size),0) FROM versions WHERE artifact_id = a.id),
 	(SELECT count(*) FROM versions WHERE artifact_id = a.id)
@@ -97,7 +99,7 @@ func scanArtifact(r scanner) (*Artifact, error) {
 	var exp, exh, last sql.NullInt64
 	var info sql.NullBool
 	err := r.Scan(&a.ID, &a.Slug, &a.UserID, &a.OwnerUsername, &a.TokenID, &a.TokenName, &a.Title, &a.CurrentVersion, &a.PasswordHash,
-		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last, &info, &a.OldVersions,
+		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last, &info, &a.OldVersions, &a.Feedback, &a.LastVersion,
 		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &published, &a.TotalSize, &a.Versions)
 	if err != nil {
 		return nil, notFound(err)
@@ -185,6 +187,7 @@ type NewArtifact struct {
 	ExpiresAt    *time.Time
 	InfoButton   *bool // nil = server default
 	OldVersions  bool
+	Feedback     bool
 }
 
 // ErrQuota is returned when a write would exceed a quota.
@@ -223,8 +226,8 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 		}
 		n := now()
 		if err := s.withNewSlug(func(slug string) error {
-			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, last_version)
-			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,1)`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions)
+			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, feedback, last_version)
+			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,1)`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions, na.Feedback)
 			return err
 		}); err != nil {
 			return err
@@ -286,6 +289,7 @@ type ArtifactUpdate struct {
 	SPA          *bool
 	InfoButton   *bool
 	OldVersions  *bool
+	Feedback     *bool
 }
 
 func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) error {
@@ -319,6 +323,9 @@ func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate)
 		}
 		if u.OldVersions != nil {
 			set, args = append(set, "viewer_old_versions = ?"), append(args, *u.OldVersions)
+		}
+		if u.Feedback != nil {
+			set, args = append(set, "feedback = ?"), append(args, *u.Feedback)
 		}
 		slugArg := -1
 		if u.RotateSlug {
