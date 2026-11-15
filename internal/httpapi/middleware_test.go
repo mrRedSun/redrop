@@ -104,6 +104,15 @@ func TestRedactPath(t *testing.T) {
 		"/reset/abc":                       "/reset/…",
 		"/setup/abc":                       "/setup/…",
 		"/api/v1/artifacts/x":              "/api/v1/artifacts/x",
+		// Review 26 n-A: non-canonical forms are redacted too.
+		"/api/v1//invites/secret123":       "/api/v1/invites/…",
+		"/API/v1/Invites/secret123/accept": "/api/v1/invites/…/accept",
+		"//reset/abc":                      "/reset/…",
+		"/api/v1/./reset/abc":              "/api/v1/reset/…",
+		"/api/v1/x/../invites/abc":         "/api/v1/invites/…",
+		"/Setup/abc/":                      "/setup/…",
+		"/invite/":                         "/invite/",
+		"/api/v1/artifacts//x":             "/api/v1/artifacts//x",
 	}
 	for in, want := range cases {
 		if got := redactPath(in); got != want {

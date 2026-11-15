@@ -4,6 +4,7 @@ import (
 	"context"
 	"mime"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -212,14 +213,21 @@ func (w *statusRecorder) Write(b []byte) (int, error) {
 }
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// redactPath hides the one-time secret that follows a SecretPrefixes
+// prefix. It matches the canonical path (empty and dot segments cleaned,
+// the prefix compared case-insensitively), so /api/v1//invites/<t> and
+// /API/v1/invites/<t> are redacted too, and logs a redacted path in that
+// canonical form.
 func redactPath(p string) string {
+	c := path.Clean("/" + p)
 	for _, pre := range dashpaths.SecretPrefixes {
-		if rest, ok := strings.CutPrefix(p, pre); ok {
-			if _, tail, found := strings.Cut(rest, "/"); found {
-				return pre + "…/" + tail
-			}
-			return pre + "…"
+		if len(c) <= len(pre) || !strings.EqualFold(c[:len(pre)], pre) {
+			continue
 		}
+		if _, tail, found := strings.Cut(c[len(pre):], "/"); found {
+			return pre + "…/" + tail
+		}
+		return pre + "…"
 	}
 	return p
 }
