@@ -25,7 +25,8 @@ type Artifact struct {
 	Views          int
 	Previews       int
 	AccessGen      int
-	Revoked        bool
+	Revoked        bool // by the owner
+	AdminRevoked   bool // by an administrator; only an administrator clears it
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	ExpiresAt      *time.Time
@@ -48,7 +49,7 @@ type Artifact struct {
 // Status computes the lifecycle state at time t.
 func (a *Artifact) Status(t time.Time) string {
 	switch {
-	case a.Revoked:
+	case a.Revoked || a.AdminRevoked:
 		return api.StatusRevoked
 	case a.ExpiresAt != nil && !t.Before(*a.ExpiresAt):
 		return api.StatusExpired
@@ -83,7 +84,7 @@ func (v *NewVersion) size() int64 {
 }
 
 const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.token_id,''), a.token_name, a.title, a.current_version, a.password_hash,
-	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button, a.viewer_old_versions,
+	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.admin_revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button, a.viewer_old_versions,
 	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0), coalesce(v.created_at,0),
 	(SELECT coalesce(sum(size),0) FROM versions WHERE artifact_id = a.id),
 	(SELECT count(*) FROM versions WHERE artifact_id = a.id)
@@ -97,7 +98,7 @@ func scanArtifact(r scanner) (*Artifact, error) {
 	var exp, exh, last sql.NullInt64
 	var info sql.NullBool
 	err := r.Scan(&a.ID, &a.Slug, &a.UserID, &a.OwnerUsername, &a.TokenID, &a.TokenName, &a.Title, &a.CurrentVersion, &a.PasswordHash,
-		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &created, &updated, &exp, &exh, &last, &info, &a.OldVersions,
+		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &a.AdminRevoked, &created, &updated, &exp, &exh, &last, &info, &a.OldVersions,
 		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &published, &a.TotalSize, &a.Versions)
 	if err != nil {
 		return nil, notFound(err)
@@ -281,6 +282,7 @@ type ArtifactUpdate struct {
 	MaxViews     *int
 	ResetViews   bool
 	Revoked      *bool
+	AdminRevoked *bool
 	RotateSlug   bool
 	BumpGen      bool
 	SPA          *bool
@@ -314,6 +316,9 @@ func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate)
 		if u.Revoked != nil {
 			set, args = append(set, "revoked = ?"), append(args, *u.Revoked)
 		}
+		if u.AdminRevoked != nil {
+			set, args = append(set, "admin_revoked = ?"), append(args, *u.AdminRevoked)
+		}
 		if u.InfoButton != nil {
 			set, args = append(set, "info_button = ?"), append(args, *u.InfoButton)
 		}
@@ -324,7 +329,7 @@ func (s *Store) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate)
 		if u.RotateSlug {
 			set, args, slugArg = append(set, "slug = ?"), append(args, ""), len(args)
 		}
-		if u.BumpGen || u.RotateSlug || u.PasswordHash != nil || (u.Revoked != nil && *u.Revoked) {
+		if u.BumpGen || u.RotateSlug || u.PasswordHash != nil || (u.Revoked != nil && *u.Revoked) || (u.AdminRevoked != nil && *u.AdminRevoked) {
 			set = append(set, "access_gen = access_gen + 1")
 		}
 		args = append(args, id)
@@ -657,7 +662,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var st Stats
 	n := now()
 	err := s.DB.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM artifacts),
-		(SELECT count(*) FROM artifacts WHERE revoked = 0 AND (expires_at IS NULL OR expires_at > ?) AND (max_views = 0 OR views < max_views)),
+		(SELECT count(*) FROM artifacts WHERE revoked = 0 AND admin_revoked = 0 AND (expires_at IS NULL OR expires_at > ?) AND (max_views = 0 OR views < max_views)),
 		(SELECT coalesce(sum(size),0) FROM versions)`, n).Scan(&st.Users, &st.Artifacts, &st.Active, &st.LogicalBytes)
 	return st, err
 }

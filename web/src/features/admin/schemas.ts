@@ -40,6 +40,8 @@ export const AdminArtifact = Schema.Struct({
   created_at: Timestamp,
   expires_at: Schema.NullOr(Timestamp),
   last_viewed_at: Schema.NullOr(Timestamp),
+  /** Set by an administrator; "Restore" clears only this, never the owner's own revocation. */
+  revoked_by_admin: Schema.Boolean,
 })
 export type AdminArtifact = typeof AdminArtifact.Type
 export const AdminArtifactList = ListOf(AdminArtifact)
@@ -77,6 +79,7 @@ export const CreateInviteRequest = Schema.Struct({
   quota_bytes: Schema.optionalKey(Schema.Number),
   ttl: Schema.optionalKey(Schema.String),
 })
+/** Sets or clears the administrator's revocation; the owner's own revocation is unaffected. */
 export const AdminArtifactUpdate = Schema.Struct({ revoked: Schema.Boolean })
 
 // ---- forms ----

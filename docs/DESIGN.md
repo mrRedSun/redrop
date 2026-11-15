@@ -402,6 +402,14 @@ within 250 ms rather than at once.
 
 * `active` → `expired` (TTL elapsed) or `exhausted` (max views reached) or
   `revoked` (manually, reversible).
+* An owner's and an administrator's revocations are stored apart
+  (`revoked`, `admin_revoked`); either one makes the artifact `revoked`.
+  The owner can undo only their own: restoring an artifact an
+  administrator revoked is refused (`403`), and the API (`revoked_by_admin`),
+  the dashboard and `redrop info` say "revoked by an administrator". Other
+  owner changes still work and do not bring the link back. An
+  administrator's restore clears only the administrator's revocation.
+  Revocations made before migration 4 count as the owner's.
 * Expired artifacts keep content for `REDROP_EXPIRED_RETENTION` (default 72 h)
   so they can be extended/revived, then are deleted. Exhausted artifacts are
   deleted after the visit window ends. Deletion is immediate when requested.

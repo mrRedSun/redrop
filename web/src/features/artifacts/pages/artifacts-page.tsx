@@ -90,7 +90,7 @@ function ArtifactTable({ rows, stale, filtered }: { rows: Artifact[] | undefined
             </Link>
           ),
         },
-        { header: 'Status', cell: (a) => <StatusBadge status={a.status} /> },
+        { header: 'Status', cell: (a) => <StatusBadge artifact={a} /> },
         { header: 'Kind', className: 'hidden md:table-cell', cell: (a) => <span className="text-muted-foreground">{a.kind}</span> },
         { header: 'Views', cell: (a) => (a.max_views ? `${a.views} / ${a.max_views}` : a.views) },
         { header: 'Expires', className: 'hidden md:table-cell', cell: (a) => (a.expires_at ? relativeTime(a.expires_at) : 'never') },
