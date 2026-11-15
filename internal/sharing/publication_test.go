@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +124,46 @@ func TestPublicationOneTurnPerAccount(t *testing.T) {
 	again.finish(nil)
 }
 
+// truncatedBundle is a valid tar.gz cut inside its file body, so the error
+// arrives while the body is read, after tar.Reader.Next succeeded.
+func truncatedBundle(t *testing.T) []byte {
+	t.Helper()
+	body := make([]byte, 3000)
+	if _, err := rand.Read(body); err != nil { // incompressible
+		t.Fatal(err)
+	}
+	b := budgetArchive(t, []tar.Header{{Name: "index.html", Size: int64(len(body)), Mode: 0o600}}, [][]byte{body})
+	return b[:len(b)-1000]
+}
+
+// corruptDeflateBundle is a gzip stream of two stored deflate blocks. The
+// first holds the tar header and the start of the body; the second has a
+// wrong NLEN, so decompression fails in the middle of the body.
+func corruptDeflateBundle(t *testing.T) []byte {
+	t.Helper()
+	var raw bytes.Buffer
+	tw := tar.NewWriter(&raw)
+	if err := tw.WriteHeader(&tar.Header{Name: "index.html", Size: 1000, Mode: 0o600}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(bytes.Repeat([]byte("x"), 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tarBytes := raw.Bytes()
+	out := []byte{0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff} // gzip header
+	block := func(final byte, data []byte, nlen uint16) {
+		out = append(out, final, byte(len(data)), byte(len(data)>>8), byte(nlen), byte(nlen>>8))
+		out = append(out, data...)
+	}
+	first, rest := tarBytes[:612], tarBytes[612:]
+	block(0, first, ^uint16(len(first)))
+	block(1, rest, ^uint16(len(rest))^1)
+	return out
+}
+
 func TestRejectedPublicationReleasesUpload(t *testing.T) {
 	site := func(t *testing.T) []byte {
 		return budgetArchive(t, []tar.Header{{Name: "index.html", Size: 5, Mode: 0o600}}, [][]byte{[]byte("hello")})
@@ -130,45 +172,56 @@ func TestRejectedPublicationReleasesUpload(t *testing.T) {
 		name string
 		run  func(t *testing.T, s *Service, a Actor) (Content, error)
 		kind apperr.Kind
+		msg  string
 	}{
+		{"truncated body", func(t *testing.T, s *Service, a Actor) (Content, error) {
+			c := budgetContent(t, s, a, truncatedBundle(t))
+			_, err := s.Create(context.Background(), a, c, Settings{})
+			return c, err
+		}, apperr.KindInvalid, "corrupt bundle archive"},
+		{"corrupt deflate block in body", func(t *testing.T, s *Service, a Actor) (Content, error) {
+			c := budgetContent(t, s, a, corruptDeflateBundle(t))
+			_, err := s.Create(context.Background(), a, c, Settings{})
+			return c, err
+		}, apperr.KindInvalid, "corrupt bundle archive"},
 		{"missing entry", func(t *testing.T, s *Service, a Actor) (Content, error) {
 			c := budgetContent(t, s, a, site(t))
 			c.Entry = "missing.html"
 			_, err := s.Create(context.Background(), a, c, Settings{})
 			return c, err
-		}, apperr.KindInvalid},
+		}, apperr.KindInvalid, ""},
 		{"corrupt archive", func(t *testing.T, s *Service, a Actor) (Content, error) {
 			c := budgetContent(t, s, a, []byte("not gzip"))
 			_, err := s.Create(context.Background(), a, c, Settings{})
 			return c, err
-		}, apperr.KindInvalid},
+		}, apperr.KindInvalid, ""},
 		{"checksum mismatch", func(t *testing.T, s *Service, a Actor) (Content, error) {
 			c := budgetContent(t, s, a, site(t))
 			c.SHA256 = hex.EncodeToString(make([]byte, 32))
 			_, err := s.Create(context.Background(), a, c, Settings{})
 			return c, err
-		}, apperr.KindInvalid},
+		}, apperr.KindInvalid, ""},
 		{"quota", func(t *testing.T, s *Service, a Actor) (Content, error) {
 			c := budgetContent(t, s, a, budgetArchive(t, []tar.Header{{Name: "index.html", Size: 8192, Mode: 0o600}}, [][]byte{bytes.Repeat([]byte{'x'}, 8192)}))
 			_, err := s.Create(context.Background(), a, c, Settings{})
 			return c, err
-		}, apperr.KindTooLarge},
+		}, apperr.KindTooLarge, ""},
 		{"invalid ttl", func(t *testing.T, s *Service, a Actor) (Content, error) {
 			c := budgetContent(t, s, a, site(t))
 			_, err := s.Create(context.Background(), a, c, Settings{TTL: "soon"})
 			return c, err
-		}, apperr.KindInvalid},
+		}, apperr.KindInvalid, ""},
 		{"unknown artifact", func(t *testing.T, s *Service, a Actor) (Content, error) {
 			c := budgetContent(t, s, a, site(t))
 			_, err := s.AddVersion(context.Background(), a, "missing", c)
 			return c, err
-		}, apperr.KindNotFound},
+		}, apperr.KindNotFound, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, a := budgetService(t, 4096, 1<<20)
 			c, err := tc.run(t, s, a)
-			if apperr.KindOf(err) != tc.kind {
-				t.Fatalf("error %v, want kind %d", err, tc.kind)
+			if apperr.KindOf(err) != tc.kind || !strings.Contains(fmt.Sprint(err), tc.msg) {
+				t.Fatalf("error %v, want kind %d %q", err, tc.kind, tc.msg)
 			}
 			assertReleased(t, s, c.UploadID, true)
 			stats, err := s.db.Stats(context.Background())
@@ -195,6 +248,19 @@ func TestPublicationKeepsUploadAfterCancellationOrConflict(t *testing.T) {
 			t.Fatalf("incomplete upload: %v, want conflict", err)
 		}
 		assertReleased(t, s, u.ID, false)
+	})
+	t.Run("blob store failure", func(t *testing.T) {
+		s, a := budgetService(t, 10000, 10000)
+		c := budgetContent(t, s, a, budgetArchive(t, []tar.Header{{Name: "index.html", Size: 5, Mode: 0o600}}, [][]byte{[]byte("hello")}))
+		// The blob store's temporary directory is gone: a server-side write
+		// failure, not the archive's fault.
+		if err := os.RemoveAll(s.blobs.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Create(ctx, a, c, Settings{}); apperr.KindOf(err) != apperr.KindInternal {
+			t.Fatalf("blob store failure: %v, want internal", err)
+		}
+		assertReleased(t, s, c.UploadID, false)
 	})
 	t.Run("cancelled while waiting", func(t *testing.T) {
 		s, a := budgetService(t, 10000, 10000)

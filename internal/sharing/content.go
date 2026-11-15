@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -198,7 +199,7 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 			return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
 		}
 		head := &headCapture{max: 512}
-		sum, size, err := attempt.put(io.TeeReader(tr, head), hdr.Size)
+		sum, size, err := attempt.put(io.TeeReader(archiveBody{tr}, head), hdr.Size)
 		if err != nil {
 			if errors.Is(err, blob.ErrTooLarge) {
 				return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
@@ -215,6 +216,26 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 		return nil, apperr.Invalid("bundle is empty")
 	}
 	return files, nil
+}
+
+// archiveBody reads one entry's body from the tar reader. A read error there
+// is the archive's fault: a truncated or corrupt compressed stream, or a body
+// shorter than its header says. It becomes the same client error as a corrupt
+// header, so the publication releases its upload. Application errors (the
+// work budget) and cancellation pass through unchanged. Write-side blob errors
+// never pass through here and stay internal.
+type archiveBody struct{ r io.Reader }
+
+func (b archiveBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == nil || err == io.EOF {
+		return n, err
+	}
+	var app *apperr.Error
+	if errors.As(err, &app) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return n, err
+	}
+	return n, apperr.Invalid("corrupt bundle archive")
 }
 
 // fileDirectoryCollision returns a file path that is also a parent directory
