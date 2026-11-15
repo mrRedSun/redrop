@@ -36,6 +36,7 @@ type ArtifactMeta struct {
 	TokenName    string     // API token that created it
 	InfoButton   bool       // effective: the artifact's setting or the server default
 	OldVersions  bool       // viewers may open older versions
+	Feedback     bool       // viewers may leave comments (the owner's setting)
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
@@ -114,7 +115,7 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		Size: a.Size, TotalSize: a.TotalSize, Files: a.Files, Version: a.CurrentVersion, Versions: a.Versions,
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
-		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a), OldVersions: a.OldVersions,
+		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a), OldVersions: a.OldVersions, Feedback: a.Feedback,
 	}
 }
 

@@ -56,6 +56,13 @@ type Config struct {
 	ContentMissBurst     int
 	ContentMissPerMinute int
 
+	// Viewer feedback (DESIGN.md "Viewer feedback"): comments a client
+	// may post (a burst, then a refill per minute), and the most comments
+	// one artifact keeps.
+	FeedbackBurst          int
+	FeedbackPerMinute      int
+	FeedbackMaxPerArtifact int
+
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
 	CountryHeader  string
@@ -225,6 +232,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ContentMissPerMinute, err = envPositiveInt("REDROP_CONTENT_MISS_PER_MINUTE", "5"); err != nil {
+		return nil, err
+	}
+	if c.FeedbackBurst, err = envPositiveInt("REDROP_FEEDBACK_BURST", "5"); err != nil {
+		return nil, err
+	}
+	if c.FeedbackPerMinute, err = envPositiveInt("REDROP_FEEDBACK_PER_MINUTE", "1"); err != nil {
+		return nil, err
+	}
+	if c.FeedbackMaxPerArtifact, err = envPositiveInt("REDROP_FEEDBACK_MAX_PER_ARTIFACT", "500"); err != nil {
 		return nil, err
 	}
 

@@ -36,3 +36,31 @@ func TestContentMissLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestFeedbackLimits(t *testing.T) {
+	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
+	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FeedbackBurst != 5 || c.FeedbackPerMinute != 1 || c.FeedbackMaxPerArtifact != 500 {
+		t.Fatalf("defaults: burst=%d perMinute=%d max=%d", c.FeedbackBurst, c.FeedbackPerMinute, c.FeedbackMaxPerArtifact)
+	}
+	t.Setenv("REDROP_FEEDBACK_BURST", "2")
+	t.Setenv("REDROP_FEEDBACK_PER_MINUTE", "3")
+	t.Setenv("REDROP_FEEDBACK_MAX_PER_ARTIFACT", "50")
+	if c, err = Load(); err != nil || c.FeedbackBurst != 2 || c.FeedbackPerMinute != 3 || c.FeedbackMaxPerArtifact != 50 {
+		t.Fatalf("overrides: %+v %v", c, err)
+	}
+	for _, key := range []string{"REDROP_FEEDBACK_BURST", "REDROP_FEEDBACK_PER_MINUTE", "REDROP_FEEDBACK_MAX_PER_ARTIFACT"} {
+		t.Run(key, func(t *testing.T) {
+			for _, v := range []string{"0", "-1", "lots"} {
+				t.Setenv(key, v)
+				if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("%s=%q: err %v, want an error naming the variable", key, v, err)
+				}
+			}
+		})
+	}
+}

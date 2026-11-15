@@ -44,6 +44,7 @@ type Settings struct {
 	MaxViews    int
 	InfoButton  *bool // nil = server default
 	OldVersions bool  // viewers may open older versions
+	Feedback    bool  // viewers may leave comments
 }
 
 // Patch changes an artifact's settings (nil = unchanged).
@@ -57,6 +58,7 @@ type Patch struct {
 	SPA         *bool
 	InfoButton  *bool
 	OldVersions *bool
+	Feedback    *bool
 }
 
 // --- validation and policy ---
@@ -239,7 +241,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	}
 	id, err := s.db.CreateArtifact(ctx, &store.NewArtifact{
 		UserID: actor.UserID, TokenID: actor.TokenID, TokenName: actor.TokenName,
-		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp, InfoButton: set.InfoButton, OldVersions: set.OldVersions,
+		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp, InfoButton: set.InfoButton, OldVersions: set.OldVersions, Feedback: set.Feedback,
 	}, v, s.cfg.MaxTotalBytes)
 	if err != nil {
 		return Artifact{}, mapStore(err)
@@ -358,7 +360,7 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 		}
 		u.MaxViews = p.MaxViews
 	}
-	u.ResetViews, u.Revoked, u.SPA, u.InfoButton, u.OldVersions = p.ResetViews, p.Revoked, p.SPA, p.InfoButton, p.OldVersions
+	u.ResetViews, u.Revoked, u.SPA, u.InfoButton, u.OldVersions, u.Feedback = p.ResetViews, p.Revoked, p.SPA, p.InfoButton, p.OldVersions, p.Feedback
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
 		return Artifact{}, mapStore(err)
 	}
