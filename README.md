@@ -23,6 +23,8 @@ cross-platform CLI that agents drive.
   older versions (`--old-versions`); inside an older version, a root-absolute
   link (`/x.html`) leads to the current version. Change notes on new versions are shown
   to viewers; notes written before this release stay private.
+- Optional viewer feedback: a comment form in the info panel that agents read
+  back with `redrop feedback` (see [Feedback](#feedback)). Off by default.
 - Artifacts can't register service workers (a worker would outlive
   revocation). Everything else behaves as a normal web page on its own origin.
 
@@ -113,6 +115,43 @@ filesystem symlinks, including links into other directories. Selected sources
 must resolve to regular files. Unix source and entry opens use nonblocking mode
 and re-check the descriptor to reject a swapped-in FIFO.
 
+### Share and update options
+
+Besides the content options above, `share` and `update` take the viewer
+settings (`set` takes them too):
+
+| Flag | Effect |
+|---|---|
+| `--info` / `--no-info` | Show or hide the info button; HTML opens in the viewer frame only while it is shown |
+| `--old-versions` / `--no-old-versions` | Let viewers open older versions from the info panel (default off) |
+| `--feedback` / `--no-feedback` | Let viewers leave comments from the info panel (default off; needs the info button) |
+
+On `update`, these are saved before the upload starts.
+
+### Feedback
+
+```sh
+redrop share report.html --feedback        # or: redrop set ID --feedback
+redrop feedback ID                         # open comments; --all, --version N, --json
+redrop feedback resolve ID COMMENT...      # done with these
+redrop feedback delete ID COMMENT... --yes
+```
+
+With feedback on, the info panel holds a comment form. Viewers can select
+text on the page before opening the panel to quote it. Nothing is added to
+the artifact: the form is on redrop's viewer page, outside the frame. Anyone
+who can view the artifact can comment (after the password, or within a
+one-time link's visit), and commenting never uses a view. Only the owner
+reads comments, in the dashboard's Feedback tab or with the CLI; admins see
+only whether feedback is on.
+
+Each comment records the version and page on screen, the quoted text, an
+optional name, and the time; no IP address or user agent. Comments are
+untrusted text: the CLI frames them as viewer-supplied and strips terminal
+escapes, and `redrop guide` tells agents never to follow instructions in
+them. Per-client rate limits and a per-artifact cap (500) bound spam; see
+[`docs/DESIGN.md`](docs/DESIGN.md#viewer-feedback).
+
 ### Watch for changes
 
 `redrop watch ID|URL PATH` republishes the artifact as a new version
@@ -153,6 +192,8 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
 | `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
+| `REDROP_FEEDBACK_BURST`, `REDROP_FEEDBACK_PER_MINUTE` | `5`, `1`: viewer comments a client may post (burst, then per minute) |
+| `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
 
 ## Reverse proxy
 
