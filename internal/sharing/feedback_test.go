@@ -91,3 +91,35 @@ func TestValidComment(t *testing.T) {
 		}
 	}
 }
+
+// Line separators become line feeds (or go, in one-line fields), and
+// invisible characters go, so no consumer that splits on Unicode line
+// breaks or reads hidden text gets anything the owner can't see.
+func TestCleanTextLineBreaksAndInvisibles(t *testing.T) {
+	const hidden = "\U000E0049\U000E0047\U000E004E\U000E007F\u200B\u2060\u2061\u2062\u2063\u2064\uFEFF\u180E"
+	in := "a\u2028b\u2029c\u0085d\r\ne\rf" + hidden + "g\u200Dh\u200Ci"
+	if got, want := cleanText(in, true), "a\nb\nc\nd\ne\nfg\u200Dh\u200Ci"; got != want {
+		t.Errorf("multiline: %q, want %q", got, want)
+	}
+	if got, want := cleanText(in, false), "abcdefg\u200Dh\u200Ci"; got != want {
+		t.Errorf("single line: %q, want %q", got, want)
+	}
+	for _, r := range []rune{0xE0000, 0xE0020, 0xE007F, 0x200B, 0x2060, 0x2064, 0xFEFF, 0x180E} {
+		if !invisible(r) {
+			t.Errorf("U+%04X kept", r)
+		}
+	}
+	for _, r := range []rune{0x200C, 0x200D, 0xE0080, 0x2065, 'x'} {
+		if invisible(r) {
+			t.Errorf("U+%04X dropped", r)
+		}
+	}
+	for _, page := range []string{"/a\u2028b", "/a\u2029b", "/a\u0085b", "/a\U000E0041", "/a\u200Bb", "/#\uFEFF"} {
+		if validPage(page) {
+			t.Errorf("page %q accepted", page)
+		}
+	}
+	if !validPage("/caf\u00E9?q=\u200D#x") {
+		t.Error("a page with ordinary Unicode and a joiner was rejected")
+	}
+}

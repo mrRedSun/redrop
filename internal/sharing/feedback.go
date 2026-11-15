@@ -60,12 +60,9 @@ type Comment struct {
 func (s *Service) FeedbackOpen(a *store.Artifact) bool { return a.Feedback && s.infoButton(a) }
 
 // PostFeedback stores a visitor's comment on a. The caller has already
-// decided that the visitor may view a (sharing.Decide); posting never counts
-// or consumes a view.
+// checked that a takes comments (FeedbackOpen) and that the visitor may view
+// it (Decide); posting never counts or consumes a view.
 func (s *Service) PostFeedback(ctx context.Context, a *store.Artifact, p FeedbackPost) error {
-	if !s.FeedbackOpen(a) {
-		return apperr.NotFound("not found")
-	}
 	c, err := validComment(a, p)
 	if err != nil {
 		return err
@@ -124,22 +121,39 @@ func validPage(p string) bool {
 	if path == "/"+api.ReservedPrefix || strings.HasPrefix(path, "/"+api.ReservedPrefix+"/") {
 		return false
 	}
-	return strings.IndexFunc(p, unicode.IsControl) < 0
+	return strings.IndexFunc(p, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.In(r, unicode.Zl, unicode.Zp) || invisible(r)
+	}) < 0
+}
+
+// lineBreak reports the line breaks other than \n and \r that consumers
+// may split on: LINE SEPARATOR, PARAGRAPH SEPARATOR and NEXT LINE.
+func lineBreak(r rune) bool { return r == '\u2028' || r == '\u2029' || r == '\u0085' }
+
+// invisible reports characters that render as nothing but that a reader
+// (an agent in particular) still receives: the tag block, which can spell
+// hidden ASCII text, and invisible format characters. ZERO WIDTH JOINER and
+// NON-JOINER stay; emoji sequences and several scripts need them.
+func invisible(r rune) bool {
+	return (r >= 0xE0000 && r <= 0xE007F) || r == '\u200B' || (r >= '\u2060' && r <= '\u2064') || r == '\uFEFF' || r == '\u180E'
 }
 
 // cleanText makes viewer text valid UTF-8 without control characters (C0,
-// DEL, C1). Multiline text keeps line feeds and tabs, with \r\n and lone \r
-// as \n; single-line text has none.
+// DEL, C1) or invisible characters. Multiline text keeps tabs, and every
+// line break (\r\n, \r, U+2028, U+2029, U+0085) becomes \n; single-line
+// text has no line breaks at all.
 func cleanText(s string, multiline bool) string {
-	s = strings.ToValidUTF8(s, "�")
-	if multiline {
-		s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
-	}
+	s = strings.ReplaceAll(strings.ToValidUTF8(s, "\uFFFD"), "\r\n", "\n")
 	return strings.Map(func(r rune) rune {
-		if multiline && (r == '\n' || r == '\t') {
+		switch {
+		case r == '\n' || r == '\r' || lineBreak(r):
+			if multiline {
+				return '\n'
+			}
+			return -1
+		case multiline && r == '\t':
 			return r
-		}
-		if unicode.IsControl(r) {
+		case unicode.IsControl(r), invisible(r):
 			return -1
 		}
 		return r
