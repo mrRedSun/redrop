@@ -176,9 +176,30 @@ traefik.http.routers.redrop-content.rule: >-
 Update this rule **before** deploying a version that mints word links; a rule
 that only matches the 26-character format sends new links nowhere. The content
 domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
-Set `REDROP_TRUSTED_PROXIES` to the proxy's addresses and
-`REDROP_CLIENT_IP_HEADER` to the header it sets (`X-Forwarded-For` for Traefik,
-`CF-Connecting-IP` behind Cloudflare) so per-client limits see real clients.
+### Client addresses
+
+Sign-in, link lookups, artifact passwords and link misses are limited per
+client. Behind a reverse proxy, redrop reads the client address from
+`REDROP_CLIENT_IP_HEADER`, but only on requests from a peer in
+`REDROP_TRUSTED_PROXIES`.
+
+- **`X-Forwarded-For`** (the default, for example Traefik alone): the header
+  is read from the right, skipping every trusted hop. List only proxies you
+  run. Never list a whole CDN's ranges: a CDN worker (such as a Cloudflare
+  Worker) sends requests from inside those ranges with any
+  `X-Forwarded-For` it likes, the walk skips the worker and the CDN edge,
+  and every limit sees whatever address the worker chose.
+- **Behind Cloudflare**, set `REDROP_CLIENT_IP_HEADER=CF-Connecting-IP` and
+  trust only your reverse proxy (for example
+  `REDROP_TRUSTED_PROXIES=192.0.2.10/32`). Cloudflare sets that header
+  itself, and a Worker's requests carry the Worker's own address. Make the
+  origin reachable only through Cloudflare (a firewall that admits only
+  Cloudflare's published ranges, or Authenticated Origin Pulls); otherwise
+  anyone who reaches the reverse proxy directly can send their own
+  `CF-Connecting-IP`.
+- The server logs a warning at startup when `REDROP_TRUSTED_PROXIES` has a
+  range wider than a /24 (IPv4) or a /48 (IPv6) while the header is
+  `X-Forwarded-For`.
 
 Status: in development, not yet released.
 

@@ -563,6 +563,17 @@ inside their containers on narrow screens. The document is readable without JS.
   one-time link lookups, artifact passwords, content misses) keys on
   `netutil.Network`: the trusted-proxy-resolved address, with IPv6 grouped
   by /64, so one host cannot rotate through its /64 to reset them.
+* **Trusted proxies.** With `X-Forwarded-For`, the client is the first
+  untrusted hop from the right. A range in `REDROP_TRUSTED_PROXIES` that
+  covers a whole CDN makes that spoofable: a CDN worker sends requests from
+  inside the range with any `X-Forwarded-For`, and the walk skips both its
+  hop and the edge's. Behind Cloudflare the supported setup is
+  `REDROP_CLIENT_IP_HEADER=CF-Connecting-IP` with only the reverse proxy
+  trusted, and an origin that only Cloudflare can reach (otherwise a direct
+  request through the proxy can forge the header). The server logs a
+  startup warning for a trusted range wider than a /24 (IPv4) or a /48
+  (IPv6) with `X-Forwarded-For`. The account backoff above does not depend
+  on client addresses, so it holds even when they are spoofed.
 * **Accounts.** Sign-in attempts are also slowed per account, from any
   network: five in a row, then each attempt waits twice as long as the one
   before, from 1 second up to 15 minutes (`429` with `Retry-After`). There

@@ -127,6 +127,9 @@ func (a *App) Run(ctx context.Context) error {
 	} else if url != "" {
 		a.log.Warn("no users exist yet; open this one-time link to create the admin account (valid 24h)", "url", url)
 	}
+	for _, w := range a.cfg.Warnings() {
+		a.log.Warn("insecure configuration", "warning", w)
+	}
 	go a.Accounts.WarmUp(ctx)
 	go a.janitor.Run(ctx)
 	srv := &http.Server{

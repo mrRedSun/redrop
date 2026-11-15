@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -278,6 +279,40 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("REDROP_PASSWORD_LOGIN=false needs at least one OIDC provider")
 	}
 	return c, nil
+}
+
+// Widest trusted-proxy ranges that do not draw a warning with
+// X-Forwarded-For. A wider range is likely a whole CDN or cloud network.
+const (
+	maxQuietProxyBitsV4 = 24
+	maxQuietProxyBitsV6 = 48
+)
+
+// Warnings lists settings that load but weaken a protection; the server
+// logs them at startup.
+//
+// With X-Forwarded-For, the client address is the first untrusted hop from
+// the right. Anyone who can send requests from inside a trusted range, such
+// as a CDN worker inside the CDN's published ranges, can then put any
+// address in front of it, and every per-client limit sees a new client.
+func (c *Config) Warnings() []string {
+	if http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" {
+		return nil
+	}
+	var wide []string
+	for _, n := range c.TrustedProxies {
+		ones, bits := n.Mask.Size()
+		if (bits == 32 && ones < maxQuietProxyBitsV4) || (bits == 128 && ones < maxQuietProxyBitsV6) {
+			wide = append(wide, n.String())
+		}
+	}
+	if len(wide) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("REDROP_TRUSTED_PROXIES has ranges wider than a /%d (IPv4) or /%d (IPv6) while REDROP_CLIENT_IP_HEADER is X-Forwarded-For: %s. "+
+		"Anyone who can send requests from inside them (for example a CDN worker) can choose the client address that rate limits see. "+
+		"Trust only your own reverse proxy; behind a CDN use its client header (CF-Connecting-IP) and an origin only the CDN can reach",
+		maxQuietProxyBitsV4, maxQuietProxyBitsV6, strings.Join(wide, ", "))}
 }
 
 // ContentHost returns the bare content domain (no port).
