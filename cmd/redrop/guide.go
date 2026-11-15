@@ -37,6 +37,8 @@ If the CLI is already installed:
 
 Or, without saving anything: export REDROP_URL=https://SERVER REDROP_TOKEN=rdp_...
 Flags --url/--token override the environment, which overrides the saved login.
+login and logout refuse a config file that is a symlink (exit 2); pass
+--config with the real file.
 
 ## Share
 
@@ -82,13 +84,14 @@ File-name filters are case-insensitive; directory names match exactly.
 
 Each excluded secret entry prints a stderr warning with its relative path,
 never its contents. Excluded directories are named without reading their
-contents. Watch warns at startup and when it encounters new secret paths.
+contents. Watch warns once per path: at startup and for new secret paths.
 --include-secrets on share, update, or watch opts secrets back in, including
 secret Markdown entries. Editor, VCS, and dependency filters stay active.
 Explicitly named single files still publish as requested, but warn when the
 selected path or name matches a secret rule, even with --include-secrets
-or a different --name. Their source bytes are unchanged. Warnings stay on
-stderr with --json.
+or a different --name. Their source bytes are unchanged. A selected folder
+that is .ssh, .aws or .gnupg, or is inside one, exits with 2 unless
+--include-secrets is given. Warnings stay on stderr with --json.
 
 Use a dedicated output folder containing only files intended for recipients.
 These name rules cannot detect every secret. Exclusions do not remove files

@@ -61,7 +61,7 @@ func (h adminAPI) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error)
 | `internal/brand` | The redrop icons and their HTTP serving. `iconsrc` describes the mark once and generates the SVG, ICO, and Apple touch icon using only the standard library. |
 | `internal/janitor` | Maintenance scheduling and daily SQLite snapshots. |
 | `internal/markdown` | Client-only Markdown conversion, escaped raw HTML, parsed-output sanitization, local-reference reporting, and a portable document template. Never used by the content server. |
-| `pkg/api`, `pkg/client`, `cmd/redrop` | Public JSON DTOs and reserved upload-path constant, the Go API client, typed publishing options/errors, shared confined `fs.FS` bundle packing, and CLI behavior. |
+| `pkg/api`, `pkg/client`, `cmd/redrop` | Public JSON DTOs, the reserved upload-path constant and the publication-busy problem code, the Go API client, typed publishing options/errors, shared confined `fs.FS` bundle packing, and CLI behavior. |
 
 ### Request flow
 

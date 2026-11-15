@@ -118,7 +118,10 @@ including a secret Markdown `--entry`; editor and VCS filters still apply.
 File-name matching is case-insensitive; directory names match exactly. Other
 useful hidden files remain included. Explicitly named single files still publish
 as requested, with unchanged source bytes and a warning if their path or name
-matches a secret rule. Supplied ZIP/tar.gz archives are not secret-filtered.
+matches a secret rule. Selecting a secret folder itself, or a folder inside one
+(`redrop share ~/.aws`), is refused unless `--include-secrets` is given. `watch`
+prints each secret warning once per path. Supplied ZIP/tar.gz archives are not
+secret-filtered.
 
 Use a dedicated output folder containing only files intended for recipients.
 Name-based exclusions cannot identify every secret, and they do not remove files

@@ -442,27 +442,42 @@ limits.
 
 ### Archive work limits
 
-Duplicate normalized file or directory paths are errors, not skipped bodies.
-The retained-file cap remains `REDROP_MAX_FILES`. A separate physical-entry cap
-is `max(128, 4 * REDROP_MAX_FILES)`, including every directory, regular file,
-PAX header and GNU extension header, even metadata hidden by Go's tar reader.
+Duplicate normalized file paths are errors, not skipped bodies. A file path
+that is also the parent directory of another file is an error too. Directory
+entries carry no content: as before, their names are neither validated nor
+kept in memory, and repeated directories (`tar -C dist . -C static .` with a
+shared `css/`) are accepted. Only regular-file paths are retained, at most
+`REDROP_MAX_FILES` of them.
+
+A separate entry cap is `max(128, 4 * REDROP_MAX_FILES)` non-metadata
+entries: every regular file, directory, link or special entry, including those
+archive/tar would return. PAX, global and GNU long-name headers are not
+counted as entries, so PAX-format archives get the same cap as others, but
+more than 16 of them in a row are refused.
 
 The decompressed stream has one byte budget covering content, discarded bodies,
 headers, padding and metadata. Its limit is the per-version content limit plus
-an overhead allowance of 4 KiB per permitted physical entry and 1 MiB of slack.
-A raw-block counting reader runs before the tar parser so hidden metadata
-cannot bypass either work cap. PAX size overrides and sparse-file extensions
-are rejected because they can change physical framing; normal PAX path and GNU
-long-name metadata remain supported. Paths, checksums, entry types and tar semantics
-still pass through the existing archive validator. Both compressed input and
-decompressed output check the publishing request context on every read.
-Checksum verification and blob copies check cancellation too. Publication's
-single admission slot bounds active extraction; waiting requests can cancel.
+an overhead allowance of 4 KiB per permitted entry and 1 MiB of slack.
+A raw-block counting reader runs before the tar parser so metadata hidden by
+Go's tar reader is counted too. It re-implements only tar framing, so after
+every header the tar reader returns, extraction checks that both agree on where
+that entry's body starts and ends (`inSync`): a regular file must have exactly
+its padded size left, a directory nothing, and a global header only padding.
+Any disagreement, such as a name precedence or prefix the counter does not
+model, rejects the archive as malformed before the next header is read. A
+differential test and fuzz target check the counter against archive/tar.
+PAX size overrides and sparse-file extensions are rejected because they can
+change physical framing; normal PAX path and GNU long-name metadata remain
+supported. Paths, checksums, entry types and tar semantics still pass through
+the existing archive validator. Both compressed input and decompressed output
+check the publishing request context on every read. Checksum verification and
+blob copies check cancellation too. Publication's single admission slot bounds
+active extraction; waiting requests can cancel.
 
-A rejected upload remains resumable until its idle expiry, but replaying
-finalization encounters the same bounded work or duplicate-path rejection.
-A trailing invalid entry cannot make repeated duplicate bodies decompress again.
-These limits bound per-attempt work, not a per-account request rate.
+A publication rejected for its content, settings, a limit or a quota deletes
+its upload once cleanup has succeeded, so a replay does no archive work and the
+upload no longer holds a session. These limits bound per-attempt work, not a
+per-account request rate.
 
 ### Disk budgets and upload expiry
 
@@ -487,22 +502,43 @@ separately from committed logical bytes and deduplicated blob storage.
 
 Before writing any materialized file, publication reserves its declared
 unpacked size in the same quota transaction. The version limit applies to the
-sum of unpacked file sizes. Upload bytes stay reserved too, so publishing needs
-temporary headroom for both the staged upload and its unpacked content. The
-commit converts the unpacked reservation to committed logical usage atomically;
-staging is released only after its file has been removed.
+sum of unpacked file sizes. The staged upload and its unpacked content are the
+same content to the owner, so the user quota counts each open upload once, as
+the larger of its staged and unpacked bytes: a user with 6 MB of headroom can
+publish a 6 MB file. `REDROP_MAX_TOTAL_SIZE` guards the disk and counts both,
+so the server total needs temporary headroom for the staged and unpacked
+copies. The commit converts the unpacked reservation to committed logical usage
+atomically; staging is released only after its file has been removed.
 
 Publication and blob garbage collection share one cancellable service admission
-slot. Each attempt tracks only the hashes it newly installed. On extraction,
-entry-validation or database failure, it removes those hashes only if no file
-record references them, before releasing its unpacked reservation. Existing
-blobs are never deleted by rollback, including deduplicated content shared with
-other artifacts. The slot covers commit and rollback, so a concurrent publisher
-cannot be about to reference a hash removed by another attempt. Failed cleanup
-keeps its reservation and logs an operational error rather than releasing
-unreclaimed capacity. Replays cannot clear a failed-cleanup reservation; they
-return a conflict until expiry safely reclaims the bytes. This design favors a small, bounded materialization path
-over parallel extraction. Uploaded chunks remain independently resumable.
+slot. Each account has at most one publication running or waiting for it; a
+second one gets an immediate `409` with the problem title
+`publication_in_progress`, and the CLI retries the same upload for up to five
+minutes. Another account's publication therefore waits for at most one attempt
+per other active account. Each attempt tracks only the hashes it newly
+installed. On extraction, entry-validation or database failure, it looks up
+only those hashes and removes the ones no file record references, before
+releasing its unpacked reservation. Existing blobs are never deleted by
+rollback, including deduplicated content shared with other artifacts. The slot
+covers commit and rollback, so a concurrent publisher cannot be about to
+reference a hash removed by another attempt. Failed cleanup keeps its
+reservation and logs an operational error rather than releasing unreclaimed
+capacity. Replays cannot clear a failed-cleanup reservation; they return a
+conflict until expiry safely reclaims the bytes.
+
+After a successful cleanup, a publication rejected for a deterministic client
+error (invalid content, archive, entry or settings, a limit or quota, or an
+unknown artifact) also deletes its upload, releasing its reservation and
+session. The CLI never resumes a rejected upload. Cancellation, conflicts (an
+incomplete or busy upload) and internal errors keep the upload until its idle
+expiry. This design favors a small, bounded materialization path over parallel
+extraction. Uploaded chunks remain independently resumable.
+
+Expired uploads without unpacked bytes are released without blob GC. Only an
+expired upload with unpacked bytes, left by a crash or a failed rollback, waits
+for a full GC that removes unreferenced blobs. If that GC fails, it logs the
+error and keeps those uploads, while the others are still released. GC keeps
+walking past a blob it cannot remove and reports the failures together.
 
 Migration 6 adds `uploads.materialized`, initialized to zero for existing
 sessions. Stop the old process before upgrading. Do not run multiple server
@@ -785,10 +821,14 @@ arm64). The server embeds all builds and serves `install.sh`/`install.ps1`, so
 `curl -fsSL https://<app>/install.sh | sh` installs a version matching the
 server and verifies SHA-256 checksums. Configuration is
 `redrop login --url … --token …` or the `REDROP_URL`/`REDROP_TOKEN`
-environment variables. Setting `REDROP_TOKEN` for the installer
-(`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
-command when a token is created. Every command supports `--json`; exit codes are stable
-(see `redrop guide`). The Go package `pkg/client` is the same client as a library.
+environment variables. `login` and `logout` replace the config file atomically
+through a fresh private (0600) temporary file in the same directory, never
+writing through a symlink. A config path that is itself a symlink is refused
+before anything changes ("pass `--config` with the real file"), so a linked
+target never keeps an old token while the command reports success. Setting
+`REDROP_TOKEN` for the installer (`curl … | REDROP_TOKEN=… sh`) also logs in;
+the dashboard shows that one-line command when a token is created. Every command
+supports `--json`; exit codes are stable (see `redrop guide`). The Go package `pkg/client` is the same client as a library.
 
 ### Directory uploads
 
@@ -845,13 +885,19 @@ allow an editor-filtered entry. Packing, hashing, directory registration, and
 the event filter all use the same source option.
 
 Every excluded secret entry emits a stderr warning containing only its relative
-path, never its contents. An excluded secret directory is named once per walk,
-without reading or listing its contents. Watch warns during registration and on
-excluded events, including newly created secret paths; repeated hash scans stay
-quiet. An explicitly selected single file still publishes as requested, and
-warns if its selected path or name matches a secret rule, even with
-`--include-secrets` or a different `--name`. Its source bytes are unchanged.
-Warnings stay on stderr even with `--json`.
+path, never its contents, and saying that its name is excluded by the secret
+rule: a differently named symlink to the same file is not a secret name. An
+excluded secret directory is named once per walk, without reading or listing
+its contents. Watch reports each secret warning once per path per run, whether
+it comes from registration, an event or a publish; a secret path created later
+warns once too, and repeated hash scans stay quiet. An explicitly selected
+single file still publishes as requested, and warns if its selected path or
+name matches a secret rule, even with `--include-secrets` or a different
+`--name`. Its source bytes are unchanged. A selected folder that is a secret
+directory, or is inside one, by its absolute or resolved path (`share ~/.aws`,
+`share .` inside `.ssh`), is a usage error unless `--include-secrets` is given,
+because the walk filters names only below the selected root. Warnings stay on
+stderr even with `--json`.
 
 Use a dedicated output directory containing only files intended for recipients.
 These are name-based exclusions, not secret-content detection. They do not
