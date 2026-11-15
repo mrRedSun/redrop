@@ -122,7 +122,7 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attem
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, contextReader{ctx: ctx, r: f}); err != nil {
 		return nil, "", apperr.Internal(err)
 	}
 	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), c.SHA256) {

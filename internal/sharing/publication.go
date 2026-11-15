@@ -21,10 +21,28 @@ type publication struct {
 }
 
 func (s *Service) beginPublication(ctx context.Context, actor Actor, uploadID string) (*publication, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, apperr.Internal(err)
+	}
 	select {
 	case s.publication <- struct{}{}:
 	case <-ctx.Done():
 		return nil, apperr.Internal(ctx.Err())
+	}
+	if !s.claimUpload(uploadID) {
+		<-s.publication
+		return nil, apperr.Conflict("upload is already in use; retry from its reported offset")
+	}
+	up, err := s.db.UploadByID(ctx, actor.UserID, uploadID)
+	if err != nil {
+		s.releaseUpload(uploadID)
+		<-s.publication
+		return nil, mapStore(err)
+	}
+	if up.Materialized != 0 {
+		s.releaseUpload(uploadID)
+		<-s.publication
+		return nil, apperr.Conflict("upload cleanup is pending; wait for expiry before starting another upload")
 	}
 	return &publication{s: s, ctx: ctx, actor: actor, uploadID: uploadID, created: make(map[string]struct{})}, nil
 }
@@ -36,11 +54,11 @@ func (p *publication) put(r io.Reader, size int64) (string, int64, error) {
 	if err := p.s.db.ReserveMaterialization(p.ctx, p.actor.UserID, p.uploadID, size, p.s.cfg.MaxTotalBytes); err != nil {
 		return "", 0, mapStore(err)
 	}
-	return p.s.blobs.PutTracked(r, size, p.created)
+	return p.s.blobs.PutTracked(contextReader{ctx: p.ctx, r: r}, size, p.created)
 }
 
 func (p *publication) close() {
-	defer func() { <-p.s.publication }()
+	defer func() { p.s.releaseUpload(p.uploadID); <-p.s.publication }()
 	// Cleanup must finish even when the publishing request was cancelled.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(p.ctx), 30*time.Second)
 	defer cancel()

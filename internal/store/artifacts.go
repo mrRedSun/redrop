@@ -555,17 +555,19 @@ func (s *Store) RecentFailures(ctx context.Context, artifactID string, since tim
 // --- uploads ---
 
 type Upload struct {
-	ID        string
-	UserID    string
-	Size      int64
-	Received  int64
-	ExpiresAt time.Time
+	ID           string
+	UserID       string
+	Size         int64
+	Received     int64
+	Materialized int64 // private in-flight or failed-cleanup reservation
+	ExpiresAt    time.Time
 }
 
 var ErrUploadLimit = errors.New("too many open uploads")
 
 func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl time.Duration, maxTotal int64, maxOpen int) (*Upload, error) {
-	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: time.Now().Add(ttl).UTC().Truncate(time.Second)}
+	n := now()
+	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: ts(n + int64(ttl/time.Second))}
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM uploads WHERE user_id = ?`, userID).Scan(&count); err != nil {
@@ -577,7 +579,7 @@ func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl
 		if err := checkQuota(ctx, tx, userID, size, maxTotal); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, now(), u.ExpiresAt.Unix())
+		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, n, u.ExpiresAt.Unix())
 		return err
 	})
 	return u, err
@@ -624,8 +626,8 @@ func (s *Store) ResetMaterialization(ctx context.Context, userID, id string) err
 func (s *Store) UploadByID(ctx context.Context, userID, id string) (*Upload, error) {
 	var u Upload
 	var exp int64
-	err := s.DB.QueryRowContext(ctx, `SELECT id, user_id, size, received, expires_at FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now()).
-		Scan(&u.ID, &u.UserID, &u.Size, &u.Received, &exp)
+	err := s.DB.QueryRowContext(ctx, `SELECT id, user_id, size, received, materialized, expires_at FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now()).
+		Scan(&u.ID, &u.UserID, &u.Size, &u.Received, &u.Materialized, &exp)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -659,6 +661,17 @@ func (s *Store) ExpiredUploads(ctx context.Context) ([]string, error) {
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// UploadExpired rechecks expiry after the service claims an idle upload. A
+// chunk may have renewed it since the maintenance candidate list was read.
+func (s *Store) UploadExpired(ctx context.Context, id string) (bool, error) {
+	var expired bool
+	err := s.DB.QueryRowContext(ctx, `SELECT expires_at <= ? FROM uploads WHERE id = ?`, now(), id).Scan(&expired)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return expired, err
 }
 
 func (s *Store) UploadExists(ctx context.Context, id string) bool {

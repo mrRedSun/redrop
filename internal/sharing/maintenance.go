@@ -39,7 +39,12 @@ func (s *Service) Sweep(ctx context.Context) {
 			return
 		}
 		for _, id := range ids {
-			s.discardUpload(ctx, id)
+			if s.claimUpload(id) {
+				if expired, err := s.db.UploadExpired(ctx, id); err == nil && expired {
+					s.discardUpload(ctx, id)
+				}
+				s.releaseUpload(id)
+			}
 		}
 	}
 	s.db.Cleanup(ctx, viewRetention)

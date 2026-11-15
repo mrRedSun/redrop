@@ -53,6 +53,27 @@ func (s *Service) GetUpload(ctx context.Context, actor Actor, id string) (*Uploa
 	return s.uploadView(u), nil
 }
 
+// claimUpload prevents expiry from unlinking a file while a slow chunk still
+// holds it open. Such bytes remain reserved until that request ends. It also
+// prevents simultaneous chunks or publication of a changing staged file.
+func (s *Service) claimUpload(id string) bool {
+	s.uploadMu.Lock()
+	defer s.uploadMu.Unlock()
+	if s.activeUploads[id] {
+		return false
+	}
+	if s.activeUploads == nil {
+		s.activeUploads = make(map[string]bool)
+	}
+	s.activeUploads[id] = true
+	return true
+}
+func (s *Service) releaseUpload(id string) {
+	s.uploadMu.Lock()
+	delete(s.activeUploads, id)
+	s.uploadMu.Unlock()
+}
+
 // OffsetMismatchError tells clients where to resume. It unwraps to a
 // Conflict application error.
 type OffsetMismatchError struct{ Received int64 }
@@ -65,6 +86,10 @@ func (e *OffsetMismatchError) Unwrap() error { return apperr.Conflict("%s", e.Er
 
 // AppendChunk writes body at offset, which must equal the bytes received so far.
 func (s *Service) AppendChunk(ctx context.Context, actor Actor, id string, offset int64, body io.Reader) (*Upload, error) {
+	if !s.claimUpload(id) {
+		return nil, apperr.Conflict("upload is already in use; retry from its reported offset")
+	}
+	defer s.releaseUpload(id)
 	u, err := s.GetUpload(ctx, actor, id)
 	if err != nil {
 		return nil, err

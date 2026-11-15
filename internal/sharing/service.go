@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
@@ -39,7 +40,9 @@ type Service struct {
 
 	// publication serializes materialization, commit/rollback, and GC. Waiting
 	// requests do no decompression and can leave through their context.
-	publication chan struct{}
+	publication   chan struct{}
+	uploadMu      sync.Mutex
+	activeUploads map[string]bool // chunks/publication/expiry never overlap for one upload
 
 	unlockLimiter   *security.Limiter // per IP + artifact
 	unlockIPLimiter *security.Limiter // per IP across artifacts

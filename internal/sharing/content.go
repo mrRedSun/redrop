@@ -134,12 +134,17 @@ func (h *headCapture) Write(p []byte) (int, error) {
 // extractBundle unpacks a tar.gz into blobs, enforcing file-count and
 // decompressed-size limits and rejecting links and special files.
 func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File, error) {
-	gz, err := gzip.NewReader(r)
+	ctx := attempt.ctx
+	gz, err := gzip.NewReader(contextReader{ctx: ctx, r: r})
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, apperr.Internal(ctx.Err())
+		}
 		return nil, apperr.Invalid("bundle must be a .tar.gz archive")
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	work := &archiveWorkReader{r: contextReader{ctx: ctx, r: gz}, remaining: s.archiveReadLimit(), maxEntries: s.archiveEntryLimit()}
+	tr := tar.NewReader(work)
 	var files []store.File
 	seen := map[string]bool{}
 	var total int64
@@ -149,12 +154,19 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 			break
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, apperr.Internal(ctx.Err())
+			}
+			var app *apperr.Error
+			if errors.As(err, &app) {
+				return nil, err
+			}
 			return nil, apperr.Invalid("corrupt bundle archive")
 		}
 		switch hdr.Typeflag {
-		case tar.TypeDir, tar.TypeXGlobalHeader, tar.TypeXHeader:
-			continue
-		case tar.TypeReg:
+		case tar.TypeXGlobalHeader, tar.TypeXHeader:
+			continue // physical metadata entries were already counted by work
+		case tar.TypeReg, tar.TypeDir:
 		default:
 			return nil, apperr.Invalid("bundle may only contain regular files (found a link or special file: %q)", hdr.Name)
 		}
@@ -162,10 +174,20 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 		if err != nil {
 			return nil, apperr.Invalid("%s", err.Error())
 		}
-		if p == "" || seen[p] {
-			continue
+		if p != "" && seen[p] {
+			return nil, apperr.Invalid("duplicate normalized bundle path %q", p)
 		}
 		seen[p] = true
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			continue
+		case tar.TypeReg:
+		default:
+			return nil, apperr.Invalid("bundle may only contain regular files (found a link or special file: %q)", hdr.Name)
+		}
+		if p == "" {
+			return nil, apperr.Invalid("regular bundle file has an empty path")
+		}
 		if len(files) >= s.cfg.MaxFiles {
 			return nil, apperr.Invalid("bundle has more than %d files", s.cfg.MaxFiles)
 		}

@@ -426,6 +426,30 @@ Bundles are uploaded as `tar.gz`. Extraction rejects absolute paths, `..`,
 links, devices, reserved paths, and enforces file-count and decompressed-size
 limits.
 
+### Archive work limits
+
+Duplicate normalized file or directory paths are errors, not skipped bodies.
+The retained-file cap remains `REDROP_MAX_FILES`. A separate physical-entry cap
+is `max(128, 4 * REDROP_MAX_FILES)`, including every directory, regular file,
+PAX header and GNU extension header, even metadata hidden by Go's tar reader.
+
+The decompressed stream has one byte budget covering content, discarded bodies,
+headers, padding and metadata. Its limit is the per-version content limit plus
+an overhead allowance of 4 KiB per permitted physical entry and 1 MiB of slack.
+A raw-block counting reader runs before the tar parser so hidden metadata
+cannot bypass either work cap. PAX size overrides and sparse-file extensions
+are rejected because they can change physical framing; normal PAX path and GNU
+long-name metadata remain supported. Paths, checksums, entry types and tar semantics
+still pass through the existing archive validator. Both compressed input and
+decompressed output check the publishing request context on every read.
+Checksum verification and blob copies check cancellation too. Publication's
+single admission slot bounds active extraction; waiting requests can cancel.
+
+A rejected upload remains resumable until its idle expiry, but replaying
+finalization encounters the same bounded work or duplicate-path rejection.
+A trailing invalid entry cannot make repeated duplicate bodies decompress again.
+These limits bound per-attempt work, not a per-account request rate.
+
 ### Disk budgets and upload expiry
 
 SQLite reserves each upload's declared bytes atomically with committed version
@@ -437,7 +461,12 @@ until maintenance removes their disk bytes, then releases the row.
 Uploads expire after one idle hour. Each completed nonempty chunk renews the
 hour, so a slow upload can resume across many chunks without a 24-hour abandoned
 session. The minute maintenance sweep reclaims expired sessions. Reading status,
-empty chunks and failed publication attempts do not extend expiry. Admin stats
+empty chunks and failed publication attempts do not extend expiry. An active
+chunk keeps its file and reservation until that request finishes; maintenance
+never unlinks a file a slow writer still holds open. Simultaneous chunks or
+publication for one upload return a conflict instead of modifying the same
+file concurrently. Expiry is rechecked after claiming an idle session, since a
+chunk may have just renewed it. Admin stats
 show `staged_bytes`, the successfully received upload bytes, and
 `reserved_bytes`, pending declared bytes plus unpacked publication reservations,
 separately from committed logical bytes and deduplicated blob storage.
@@ -457,7 +486,8 @@ blobs are never deleted by rollback, including deduplicated content shared with
 other artifacts. The slot covers commit and rollback, so a concurrent publisher
 cannot be about to reference a hash removed by another attempt. Failed cleanup
 keeps its reservation and logs an operational error rather than releasing
-unreclaimed capacity. This design favors a small, bounded materialization path
+unreclaimed capacity. Replays cannot clear a failed-cleanup reservation; they
+return a conflict until expiry safely reclaims the bytes. This design favors a small, bounded materialization path
 over parallel extraction. Uploaded chunks remain independently resumable.
 
 Migration 4 adds `uploads.materialized`, initialized to zero for existing
