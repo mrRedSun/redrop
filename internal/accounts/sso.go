@@ -17,6 +17,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 // SSO modes.
@@ -132,9 +133,9 @@ func FailurePath(mode string) string {
 
 // BeginSSO validates the request and builds the provider redirect.
 // current is required for SSOLink.
-func (s *Service) BeginSSO(ctx context.Context, ip, providerID, mode string, current *Principal, inviteToken string) (*SSOStart, error) {
-	if !s.loginIPLimiter.Allow(ip) {
-		return nil, apperr.RateLimited("too many sign-in attempts; wait a few minutes")
+func (s *Service) BeginSSO(ctx context.Context, network, providerID, mode string, current *Principal, inviteToken string) (*SSOStart, error) {
+	if !s.loginIPLimiter.Allow(network) {
+		return nil, tooManySignIns(s.loginIPLimiter, network)
 	}
 	p, err := s.discover(ctx, providerID)
 	if err != nil {
@@ -146,6 +147,9 @@ func (s *Service) BeginSSO(ctx context.Context, ip, providerID, mode string, cur
 	case SSOLink:
 		if current == nil || current.IsToken() {
 			return nil, apperr.Unauthorized("sign in first to link an account")
+		}
+		if err := s.mayLink(current); err != nil {
+			return nil, err
 		}
 		st.UserID = current.user.ID
 	case SSOInvite:
@@ -163,7 +167,32 @@ func (s *Service) BeginSSO(ctx context.Context, ip, providerID, mode string, cur
 	}, nil
 }
 
-// SSOResult is the outcome of a completed SSO flow.
+// mayLink refuses to link a new identity to an admin account from a
+// password session while admin actions require single sign-on: the new
+// identity would open admin sessions without the identity provider's checks
+// ever applying to this account.
+func (s *Service) mayLink(current *Principal) error {
+	return s.adminSSOFor(current, "to link another sign-in to an admin account, first sign in with single sign-on")
+}
+
+// mayUnlink applies the same rule to removing an identity: from a password
+// session, someone with only the admin's password could otherwise remove
+// the account's single sign-on, which that session could not link back.
+func (s *Service) mayUnlink(current *Principal) error {
+	return s.adminSSOFor(current, "to unlink a sign-in from an admin account, first sign in with single sign-on")
+}
+
+// adminSSOFor refuses a change to an admin account's identities from a
+// session that is not single sign-on, while admin actions require it.
+func (s *Service) adminSSOFor(current *Principal, msg string) error {
+	if s.cfg.AdminRequiresSSO && current.user.Role == api.RoleAdmin && current.method != MethodOIDC {
+		return apperr.Forbidden("%s", msg)
+	}
+	return nil
+}
+
+// SSOResult is the outcome of a completed SSO flow. Session is nil when the
+// flow keeps the caller's current session (linking).
 type SSOResult struct {
 	Session  *Session
 	Redirect string
@@ -236,15 +265,21 @@ func (s *Service) CompleteSSO(ctx context.Context, providerID, signedState strin
 			if existing.UserID != current.user.ID {
 				return nil, failPath, apperr.Conflict("that %s account is already linked to another user", label)
 			}
-		} else if err := s.db.LinkIdentity(ctx, current.user.ID, st.Provider, idt.Subject, c.Email); err != nil {
-			return nil, failPath, apperr.Internal(err)
+		} else {
+			// Checked again here: the role or session may have changed
+			// since the flow started.
+			if err := s.mayLink(current); err != nil {
+				return nil, failPath, err
+			}
+			if err := s.db.LinkIdentity(ctx, current.user.ID, st.Provider, idt.Subject, c.Email); err != nil {
+				return nil, failPath, apperr.Internal(err)
+			}
+			s.log.Info("identity linked", "user", current.user.Username, "provider", st.Provider, "session", current.method)
 		}
-		// Upgrade to an SSO session (enables admin pages when SSO is required).
-		if current.sessionHash != "" {
-			s.db.DeleteSession(ctx, current.sessionHash)
-		}
-		sess, err := s.newSession(ctx, current.user, MethodOIDC)
-		return &SSOResult{Session: sess, Redirect: dashpaths.AccountLinked}, failPath, err
+		// The session keeps its sign-in method: linking proves control of
+		// the identity, not of this account's single sign-on. An SSO
+		// session comes only from a normal SSO sign-in.
+		return &SSOResult{Redirect: dashpaths.AccountLinked}, failPath, nil
 
 	case SSOInvite:
 		if lookupErr == nil {

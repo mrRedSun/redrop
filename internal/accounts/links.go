@@ -28,9 +28,9 @@ func (s *Service) createLink(ctx context.Context, o *store.OneTime) (string, err
 }
 
 // lookupLink finds an unused, unexpired one-time link (rate limited per IP).
-func (s *Service) lookupLink(ctx context.Context, ip, purpose, token string) (*store.OneTime, error) {
-	if !s.linkLimiter.Allow(ip) {
-		return nil, apperr.RateLimited("too many requests")
+func (s *Service) lookupLink(ctx context.Context, network, purpose, token string) (*store.OneTime, error) {
+	if !s.linkLimiter.Allow(network) {
+		return nil, apperr.RateLimited("too many requests").WithRetryAfter(s.linkLimiter.Wait(network))
 	}
 	o, err := s.db.OneTimeByHash(ctx, purpose, ids.Hash(token))
 	if err != nil {
@@ -61,8 +61,8 @@ func (s *Service) SetupRequired(ctx context.Context) (bool, error) {
 }
 
 // Setup redeems the first-run link and creates the first admin.
-func (s *Service) Setup(ctx context.Context, ip, token, username, password string) (*Session, error) {
-	o, err := s.lookupLink(ctx, ip, store.PurposeSetup, token)
+func (s *Service) Setup(ctx context.Context, network, token, username, password string) (*Session, error) {
+	o, err := s.lookupLink(ctx, network, store.PurposeSetup, token)
 	if err != nil {
 		return nil, err
 	}
@@ -81,8 +81,8 @@ type InviteInfo struct {
 	ExpiresAt time.Time
 }
 
-func (s *Service) InviteInfo(ctx context.Context, ip, token string) (InviteInfo, error) {
-	o, err := s.lookupLink(ctx, ip, store.PurposeInvite, token)
+func (s *Service) InviteInfo(ctx context.Context, network, token string) (InviteInfo, error) {
+	o, err := s.lookupLink(ctx, network, store.PurposeInvite, token)
 	if err != nil {
 		if apperr.Is(err, apperr.KindRateLimited) {
 			return InviteInfo{}, err
@@ -93,8 +93,8 @@ func (s *Service) InviteInfo(ctx context.Context, ip, token string) (InviteInfo,
 }
 
 // AcceptInvite creates a password account from an invite.
-func (s *Service) AcceptInvite(ctx context.Context, ip, token, username, password string) (*Session, error) {
-	o, err := s.lookupLink(ctx, ip, store.PurposeInvite, token)
+func (s *Service) AcceptInvite(ctx context.Context, network, token, username, password string) (*Session, error) {
+	o, err := s.lookupLink(ctx, network, store.PurposeInvite, token)
 	if err != nil {
 		return nil, err
 	}
@@ -130,8 +130,8 @@ type ResetInfo struct {
 	Username string
 }
 
-func (s *Service) ResetInfo(ctx context.Context, ip, token string) (ResetInfo, error) {
-	o, err := s.lookupLink(ctx, ip, store.PurposeReset, token)
+func (s *Service) ResetInfo(ctx context.Context, network, token string) (ResetInfo, error) {
+	o, err := s.lookupLink(ctx, network, store.PurposeReset, token)
 	if err != nil {
 		if apperr.Is(err, apperr.KindRateLimited) {
 			return ResetInfo{}, err
@@ -146,8 +146,8 @@ func (s *Service) ResetInfo(ctx context.Context, ip, token string) (ResetInfo, e
 }
 
 // ResetPassword redeems a reset link; all of the user's sessions end.
-func (s *Service) ResetPassword(ctx context.Context, ip, token, password string) error {
-	o, err := s.lookupLink(ctx, ip, store.PurposeReset, token)
+func (s *Service) ResetPassword(ctx context.Context, network, token, password string) error {
+	o, err := s.lookupLink(ctx, network, store.PurposeReset, token)
 	if err != nil {
 		return err
 	}

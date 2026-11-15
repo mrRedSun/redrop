@@ -47,9 +47,15 @@ export function LinkActions({ artifact, afterDelete }: { artifact: Artifact; aft
             </a>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => setRevoked(!revoked)}>
-            {revoked ? <RotateCcw /> : <ShieldOff />} {revoked ? 'Restore' : 'Revoke'}
-          </DropdownMenuItem>
+          {artifact.revoked_by_admin ? (
+            <DropdownMenuItem disabled>
+              <ShieldOff /> Revoked by an administrator
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem onSelect={() => setRevoked(!revoked)}>
+              {revoked ? <RotateCcw /> : <ShieldOff />} {revoked ? 'Restore' : 'Revoke'}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onSelect={() => setConfirm('rotate')}>
             <RefreshCw /> Replace link
           </DropdownMenuItem>

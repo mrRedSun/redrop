@@ -31,9 +31,11 @@ func (m *Moderation) List(ctx context.Context, query, status string) ([]AdminArt
 	return out, nil
 }
 
-// SetRevoked revokes or restores any artifact.
+// SetRevoked sets or clears an administrator's revocation of any artifact.
+// It is stored apart from the owner's own revocation: the owner cannot clear
+// it, and clearing it leaves an owner's revocation in place.
 func (m *Moderation) SetRevoked(ctx context.Context, admin, id string, revoked bool) (AdminArtifact, error) {
-	if err := m.s.db.UpdateArtifact(ctx, id, store.ArtifactUpdate{Revoked: &revoked}); err != nil {
+	if err := m.s.db.UpdateArtifact(ctx, id, store.ArtifactUpdate{AdminRevoked: &revoked}); err != nil {
 		return AdminArtifact{}, mapStore(err)
 	}
 	a, err := m.s.db.ArtifactByID(ctx, id)

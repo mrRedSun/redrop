@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/config"
@@ -103,6 +104,15 @@ func TestRedactPath(t *testing.T) {
 		"/reset/abc":                       "/reset/…",
 		"/setup/abc":                       "/setup/…",
 		"/api/v1/artifacts/x":              "/api/v1/artifacts/x",
+		// Review 26 n-A: non-canonical forms are redacted too.
+		"/api/v1//invites/secret123":       "/api/v1/invites/…",
+		"/API/v1/Invites/secret123/accept": "/api/v1/invites/…/accept",
+		"//reset/abc":                      "/reset/…",
+		"/api/v1/./reset/abc":              "/api/v1/reset/…",
+		"/api/v1/x/../invites/abc":         "/api/v1/invites/…",
+		"/Setup/abc/":                      "/setup/…",
+		"/invite/":                         "/invite/",
+		"/api/v1/artifacts//x":             "/api/v1/artifacts//x",
 	}
 	for in, want := range cases {
 		if got := redactPath(in); got != want {
@@ -146,5 +156,24 @@ func TestAdminHandlersHoldOnlyAdminPorts(t *testing.T) {
 	want := []string{"*accounts.Administration", "*sharing.Moderation"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("adminAPI fields = %v, want %v", got, want)
+	}
+}
+
+func TestSetRetryAfter(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{apperr.RateLimited("slow down").WithRetryAfter(1500 * time.Millisecond), "2"},
+		{apperr.RateLimited("slow down").WithRetryAfter(15 * time.Minute), "900"},
+		{apperr.RateLimited("slow down"), ""},
+		{apperr.Unauthorized("no").WithRetryAfter(time.Minute), ""},
+	}
+	for _, c := range cases {
+		w := httptest.NewRecorder()
+		setRetryAfter(w, c.err)
+		if got := w.Header().Get("Retry-After"); got != c.want {
+			t.Errorf("%v: Retry-After %q, want %q", c.err, got, c.want)
+		}
 	}
 }

@@ -167,7 +167,11 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 	}
 	fmt.Fprintf(w, "id:\t%s\n", a.ID)
 	fmt.Fprintf(w, "title:\t%s\n", a.Title)
-	fmt.Fprintf(w, "status:\t%s\n", a.Status)
+	if a.RevokedByAdmin {
+		fmt.Fprintf(w, "status:\t%s by an administrator (only an administrator can restore it)\n", a.Status)
+	} else {
+		fmt.Fprintf(w, "status:\t%s\n", a.Status)
+	}
 	fmt.Fprintf(w, "kind:\t%s (%d file%s, %s)\n", a.Kind, a.Files, plural(a.Files), human(a.Size))
 	fmt.Fprintf(w, "version:\t%d of %d\n", a.Version, a.Versions)
 	fmt.Fprintf(w, "expires:\t%s (%s)\n", fmtTime(a.ExpiresAt), until(a.ExpiresAt))

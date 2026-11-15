@@ -1,10 +1,11 @@
 import { useAtomSuspense, useAtomValue } from '@effect/atom-react'
-import { ArrowLeft, ExternalLink } from 'lucide-react'
+import { ArrowLeft, ExternalLink, ShieldOff } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { paths } from '@/app/paths'
 import { CopyField } from '@/components/copy-field'
 import { AsyncResultView } from '@/components/async-result-view'
 import { PageHeader } from '@/components/page-header'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { StatCard } from '@/components/stat-card'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -33,10 +34,16 @@ export function Component() {
         <Link to={paths.artifacts}><ArrowLeft className="size-4" /> Artifacts</Link>
       </Button>
       <PageHeader
-        title={<span className="flex items-center gap-3">{artifact.title || artifact.id}<StatusBadge status={artifact.status} /></span>}
+        title={<span className="flex items-center gap-3">{artifact.title || artifact.id}<StatusBadge artifact={artifact} /></span>}
         description={`${artifact.kind} · created ${formatDate(artifact.created_at)}${artifact.token_name ? ` via ${artifact.token_name}` : ''}`}
         actions={<LinkActions artifact={artifact} afterDelete="list" />}
       />
+      {artifact.revoked_by_admin && (
+        <Alert variant="destructive" className="mb-6">
+          <ShieldOff />
+          <AlertDescription>An administrator revoked this artifact. Its link stays off until an administrator restores it.</AlertDescription>
+        </Alert>
+      )}
       <Card className="mb-6">
         <CardHeader><CardTitle className="text-base">Share link</CardTitle></CardHeader>
         <CardContent className="flex items-center gap-2">

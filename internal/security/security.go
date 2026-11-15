@@ -2,6 +2,7 @@
 package security
 
 import (
+	"container/list"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -131,13 +132,40 @@ func (s *Signer) Verify(v string) (string, bool) {
 
 // --- rate limiting (fixed window per key) ---
 
-// Limiter is a fixed-window counter per key. A background goroutine drops
-// expired windows once per window; Close stops it.
+// maxKeyLen bounds the bytes a Limiter stores per key. Longer keys are
+// replaced by their SHA-256, so a caller that passes attacker-sized input
+// still costs a fixed amount of memory per key.
+const maxKeyLen = 64
+
+// WhenFull is what a Limiter does with a new key while its table is full.
+type WhenFull int
+
+const (
+	// EvictOldest drops the entry whose window started first, so a new
+	// client is never refused. For limits that something else also bounds
+	// (per-network limits, behind per-account and per-artifact ones): an
+	// attacker who rotates networks gains nothing from the eviction.
+	EvictOldest WhenFull = iota
+	// RefuseNew refuses the new key until a window expires (fail closed).
+	// For limits that are the only bound on what they count.
+	RefuseNew
+)
+
+// Limiter is a fixed-window counter per key. It tracks at most maxKeys keys,
+// so a flood of distinct keys cannot grow memory; a new key that does not
+// fit is handled by its WhenFull policy. Known keys keep their own count.
+// Entries are kept in window-start order, so expiring and evicting take
+// constant time. A background goroutine drops expired windows once per
+// window; Close stops it.
 type Limiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	hits   map[string]*bucket
+	mu      sync.Mutex
+	limit   int
+	window  time.Duration
+	maxKeys int
+	full    WhenFull
+	now     func() time.Time
+	hits    map[string]*list.Element // of *bucket
+	order   *list.List               // buckets by window start, oldest first
 
 	stop      chan struct{} // closed by Close
 	done      chan struct{} // closed when the sweeper has returned
@@ -145,20 +173,25 @@ type Limiter struct {
 }
 
 type bucket struct {
+	key   string
 	start time.Time
 	n     int
 }
 
-func NewLimiter(limit int, window time.Duration) *Limiter {
+// NewLimiter allows limit hits per key per window, for at most maxKeys keys
+// at a time, handling a full table as full says. now is the clock
+// (time.Now, or a test's).
+func NewLimiter(limit int, window time.Duration, maxKeys int, full WhenFull, now func() time.Time) *Limiter {
 	l := &Limiter{
-		limit: limit, window: window, hits: map[string]*bucket{},
+		limit: limit, window: window, maxKeys: maxKeys, full: full, now: now,
+		hits: map[string]*list.Element{}, order: list.New(),
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
-	go l.sweep()
+	go l.sweeper()
 	return l
 }
 
-func (l *Limiter) sweep() {
+func (l *Limiter) sweeper() {
 	defer close(l.done)
 	t := time.NewTicker(l.window)
 	defer t.Stop()
@@ -168,14 +201,25 @@ func (l *Limiter) sweep() {
 			return
 		case <-t.C:
 			l.mu.Lock()
-			for k, b := range l.hits {
-				if time.Since(b.start) > l.window {
-					delete(l.hits, k)
-				}
-			}
+			l.dropExpired(l.now())
 			l.mu.Unlock()
 		}
 	}
+}
+
+func (l *Limiter) expired(b *bucket, now time.Time) bool { return now.Sub(b.start) > l.window }
+
+// dropExpired removes expired windows from the oldest end. Each entry is
+// removed once, so this is constant time per request on average.
+func (l *Limiter) dropExpired(now time.Time) {
+	for e := l.order.Front(); e != nil && l.expired(e.Value.(*bucket), now); e = l.order.Front() {
+		l.remove(e)
+	}
+}
+
+func (l *Limiter) remove(e *list.Element) {
+	delete(l.hits, e.Value.(*bucket).key)
+	l.order.Remove(e)
 }
 
 // Close stops the sweeper and returns once it has exited. It is safe to
@@ -187,23 +231,87 @@ func (l *Limiter) Close() {
 	<-l.done
 }
 
+func limiterKey(key string) string {
+	if len(key) <= maxKeyLen {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return string(sum[:])
+}
+
 // Allow records a hit and reports whether the key is within its limit.
 func (l *Limiter) Allow(key string) bool {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.hits[key]
-	if b == nil || time.Since(b.start) > l.window {
-		b = &bucket{start: time.Now()}
-		l.hits[key] = b
+	now := l.now()
+	l.dropExpired(now)
+	e, ok := l.hits[key]
+	if !ok {
+		if len(l.hits) >= l.maxKeys {
+			if l.full == RefuseNew {
+				return false
+			}
+			l.remove(l.order.Front())
+		}
+		e = l.order.PushBack(&bucket{key: key, start: now})
+		l.hits[key] = e
 	}
+	b := e.Value.(*bucket)
 	b.n++
 	return b.n <= l.limit
 }
 
-// Blocked reports whether the key is over the limit without recording.
-func (l *Limiter) Blocked(key string) bool {
+// Wait is how long until key may be allowed again: the end of its window,
+// or, for a key refused by a full RefuseNew table, the end of the oldest
+// window. It is 0 when key would be allowed now. Callers send it as
+// Retry-After.
+func (l *Limiter) Wait(key string) time.Duration {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.hits[key]
-	return b != nil && time.Since(b.start) <= l.window && b.n >= l.limit
+	now := l.now()
+	l.dropExpired(now)
+	var b *bucket
+	if e, ok := l.hits[key]; ok {
+		if b = e.Value.(*bucket); b.n < l.limit {
+			return 0
+		}
+	} else if len(l.hits) < l.maxKeys || l.full == EvictOldest {
+		return 0
+	} else {
+		b = l.order.Front().Value.(*bucket)
+	}
+	// A window ends just after start+window (see expired).
+	return b.start.Add(l.window).Sub(now) + time.Nanosecond
+}
+
+// Refund takes back one hit recorded for key in its current window. Callers
+// that charge an attempt before checking it refund the ones that succeed,
+// so only failures use up the limit.
+func (l *Limiter) Refund(key string) {
+	key = limiterKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.hits[key]; ok {
+		if b := e.Value.(*bucket); b.n > 0 {
+			b.n--
+		}
+	}
+}
+
+// Blocked reports whether the key is over the limit without recording.
+func (l *Limiter) Blocked(key string) bool {
+	key = limiterKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.hits[key]
+	return ok && !l.expired(e.Value.(*bucket), l.now()) && e.Value.(*bucket).n >= l.limit
+}
+
+// Len is the number of keys currently tracked.
+func (l *Limiter) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.hits)
 }
