@@ -387,8 +387,14 @@ within 250 ms rather than at once.
   not burn one-time links.
 * Changing the password, rotating the link, or revoking bumps an access
   generation number that invalidates every outstanding access cookie.
-* Password attempts are rate limited per client IP and per artifact; failures
-  are recorded in the view log.
+* Password attempts are rate limited per client network and per artifact;
+  failures are recorded in the view log. An artifact takes at most 50 wrong
+  passwords per hour from all networks together, then its link is locked
+  for everyone until the hour has passed. Each attempt is charged to that
+  budget before the password is checked, and a right password gives its
+  charge back, so concurrent guesses cannot exceed it and visitors who know
+  the password never use it up. The view log keeps the count across
+  restarts.
 * Owners preview through a short-lived signed preview URL created from the
   dashboard; previews never count as views and bypass gates.
 

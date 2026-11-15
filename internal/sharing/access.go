@@ -189,16 +189,25 @@ func (s *Service) Open(ctx context.Context, a *store.Artifact, v Visitor, passwo
 		return nil, apperr.Gone("this link is no longer available")
 	}
 	if a.PasswordHash != "" {
+		locked := apperr.RateLimited("Too many wrong passwords. This link is temporarily locked; try again later.")
+		// The view log keeps the count across restarts.
 		if fails, _ := s.db.RecentFailures(ctx, a.ID, time.Now().Add(-time.Hour)); fails >= lockThreshold {
-			return nil, apperr.RateLimited("Too many wrong passwords. This link is temporarily locked; try again later.")
+			return nil, locked
 		}
 		if !s.unlockIPLimiter.Allow(v.Network) || !s.unlockLimiter.Allow(v.Network+"|"+a.ID) {
 			return nil, apperr.RateLimited("Too many attempts. Wait a few minutes and try again.")
 		}
-		if !security.CheckPassword(a.PasswordHash, password) {
+		// The artifact's hourly budget is charged before the slow check, so
+		// concurrent guesses cannot all read the count from before any of
+		// them failed. A right password gives its charge back.
+		if !s.unlockBudget.Allow(a.ID) {
+			return nil, locked
+		}
+		if !s.checkPassword(a.PasswordHash, password) {
 			s.db.RecordView(ctx, a.ID, store.OutcomeBadPassword, v.Country, v.Label())
 			return nil, apperr.Unauthorized("Wrong password.")
 		}
+		s.unlockBudget.Refund(a.ID)
 	}
 	window := s.cfg.ViewWindowPassword
 	if a.MaxViews > 0 {
