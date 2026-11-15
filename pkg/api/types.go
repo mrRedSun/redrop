@@ -22,6 +22,11 @@ const (
 	StatusRevoked   = "revoked"
 )
 
+// CodePublicationBusy is the problem title of the 409 returned while the same
+// account already has a publication running or waiting. The upload stays
+// valid; retry the same request after a short delay.
+const CodePublicationBusy = "publication_in_progress"
+
 // Roles.
 const (
 	RoleAdmin = "admin"

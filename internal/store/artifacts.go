@@ -192,22 +192,27 @@ type NewArtifact struct {
 // ErrQuota is returned when a write would exceed a quota.
 var ErrQuota = errors.New("quota exceeded")
 
-// checkQuota verifies user quota and server total inside tx.
-func checkQuota(ctx context.Context, tx *sql.Tx, userID string, add, maxTotal int64) error {
+// checkQuota verifies the user quota and the server total inside tx for a
+// pending change. User usage counts each open upload once, as the larger of
+// its staged and unpacked bytes, because both hold the same content; userBytes
+// replaces the usage of the upload named by replacing ("" for none). The
+// server total counts staged and unpacked bytes separately, because both are
+// on disk until the staged file is removed, and grows by totalAdd.
+func checkQuota(ctx context.Context, tx *sql.Tx, userID, replacing string, userBytes, totalAdd, maxTotal int64) error {
 	var used, quota, total int64
 	if err := tx.QueryRowContext(ctx, `SELECT quota_bytes FROM users WHERE id = ?`, userID).Scan(&quota); err != nil {
 		return err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT (SELECT coalesce(sum(v.size),0) FROM versions v JOIN artifacts a ON a.id = v.artifact_id WHERE a.user_id = ?) + (SELECT coalesce(sum(size + materialized),0) FROM uploads WHERE user_id = ?)`, userID, userID).Scan(&used); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT coalesce(sum(v.size),0) FROM versions v JOIN artifacts a ON a.id = v.artifact_id WHERE a.user_id = ?) + (SELECT coalesce(sum(max(size, materialized)),0) FROM uploads WHERE user_id = ? AND id != ?)`, userID, userID, replacing).Scan(&used); err != nil {
 		return err
 	}
-	if quota > 0 && used+add > quota {
+	if quota > 0 && used+userBytes > quota {
 		return ErrQuota
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT (SELECT coalesce(sum(size),0) FROM versions) + (SELECT coalesce(sum(size + materialized),0) FROM uploads)`).Scan(&total); err != nil {
 		return err
 	}
-	if maxTotal > 0 && total+add > maxTotal {
+	if maxTotal > 0 && total+totalAdd > maxTotal {
 		return ErrQuota
 	}
 	return nil
@@ -219,7 +224,7 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 		if err := finishMaterialization(ctx, tx, na.UserID, v.UploadID); err != nil {
 			return err
 		}
-		if err := checkQuota(ctx, tx, na.UserID, v.size(), maxTotal); err != nil {
+		if err := checkQuota(ctx, tx, na.UserID, v.UploadID, v.size(), v.size(), maxTotal); err != nil {
 			return err
 		}
 		var tok sql.NullString
@@ -246,7 +251,7 @@ func (s *Store) AddVersion(ctx context.Context, artifactID, userID string, v *Ne
 		if err := finishMaterialization(ctx, tx, userID, v.UploadID); err != nil {
 			return err
 		}
-		if err := checkQuota(ctx, tx, userID, v.size(), maxTotal); err != nil {
+		if err := checkQuota(ctx, tx, userID, v.UploadID, v.size(), v.size(), maxTotal); err != nil {
 			return err
 		}
 		// Never reuse a number, even one whose version was deleted.
@@ -581,7 +586,7 @@ func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl
 		if count >= maxOpen {
 			return ErrUploadLimit
 		}
-		if err := checkQuota(ctx, tx, userID, size, maxTotal); err != nil {
+		if err := checkQuota(ctx, tx, userID, "", size, size, maxTotal); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, n, u.ExpiresAt.Unix())
@@ -594,7 +599,11 @@ func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl
 // blob bytes are written. Upload bytes remain reserved until safely removed.
 func (s *Store) ReserveMaterialization(ctx context.Context, userID, id string, size, maxTotal int64) error {
 	return s.Tx(ctx, func(tx *sql.Tx) error {
-		if err := checkQuota(ctx, tx, userID, size, maxTotal); err != nil {
+		var usage int64 // the upload's user usage after this reservation
+		if err := tx.QueryRowContext(ctx, `SELECT max(size, materialized + ?) FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, size, id, userID, now()).Scan(&usage); err != nil {
+			return notFound(err)
+		}
+		if err := checkQuota(ctx, tx, userID, id, usage, size, maxTotal); err != nil {
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `UPDATE uploads SET materialized = materialized + ? WHERE id = ? AND user_id = ? AND expires_at > ?`, size, id, userID, now())
@@ -650,33 +659,40 @@ func (s *Store) DeleteUpload(ctx context.Context, id string) error {
 	return err
 }
 
-// PendingUploadBytes is the declared size of a user's open uploads.
-func (s *Store) ExpiredUploads(ctx context.Context) ([]string, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id FROM uploads WHERE expires_at <= ?`, now())
+// ExpiredUpload is an upload past its idle expiry. Materialized is nonzero
+// when a crashed or failed rollback may have left unpacked blobs behind.
+type ExpiredUpload struct {
+	ID           string
+	Materialized int64
+}
+
+// ExpiredUploads lists uploads whose idle expiry has passed.
+func (s *Store) ExpiredUploads(ctx context.Context) ([]ExpiredUpload, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, materialized FROM uploads WHERE expires_at <= ?`, now())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []ExpiredUpload
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var u ExpiredUpload
+		if err := rows.Scan(&u.ID, &u.Materialized); err != nil {
 			return nil, err
 		}
-		out = append(out, id)
+		out = append(out, u)
 	}
 	return out, rows.Err()
 }
 
-// UploadExpired rechecks expiry after the service claims an idle upload. A
-// chunk may have renewed it since the maintenance candidate list was read.
-func (s *Store) UploadExpired(ctx context.Context, id string) (bool, error) {
-	var expired bool
-	err := s.DB.QueryRowContext(ctx, `SELECT expires_at <= ? FROM uploads WHERE id = ?`, now(), id).Scan(&expired)
+// UploadExpired rechecks expiry after the service claims an idle upload, and
+// returns its unpacked-byte reservation. A chunk may have renewed it since the
+// maintenance candidate list was read.
+func (s *Store) UploadExpired(ctx context.Context, id string) (expired bool, materialized int64, err error) {
+	err = s.DB.QueryRowContext(ctx, `SELECT expires_at <= ?, materialized FROM uploads WHERE id = ?`, now(), id).Scan(&expired, &materialized)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, 0, nil
 	}
-	return expired, err
+	return expired, materialized, err
 }
 
 func (s *Store) UploadExists(ctx context.Context, id string) bool {
@@ -724,6 +740,40 @@ func (s *Store) ReferencedBlobs(ctx context.Context) (map[string]struct{}, error
 		out[b] = struct{}{}
 	}
 	return out, rows.Err()
+}
+
+// referenceBatch stays well below SQLite's bound-variable limit.
+const referenceBatch = 500
+
+// ReferencedBlobsAmong returns which of hashes some file still references.
+// Publication rollback uses it to look up only the blobs it created.
+func (s *Store) ReferencedBlobsAmong(ctx context.Context, hashes []string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	for start := 0; start < len(hashes); start += referenceBatch {
+		batch := hashes[start:min(start+referenceBatch, len(hashes))]
+		args := make([]any, len(batch))
+		for i, h := range batch {
+			args[i] = h
+		}
+		rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT blob FROM files WHERE blob IN (?`+strings.Repeat(",?", len(batch)-1)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var b string
+			if err := rows.Scan(&b); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[b] = struct{}{}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 type Stats struct {

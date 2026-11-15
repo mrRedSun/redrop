@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"time"
+
+	"github.com/mrRedSun/redrop/internal/store"
 )
 
 const (
@@ -26,28 +28,43 @@ func (s *Service) Sweep(ctx context.Context) {
 	} else if n > 0 {
 		s.log.Info("purged expired or used-up artifacts", "count", n)
 	}
-	if ids, err := s.db.ExpiredUploads(ctx); err == nil && len(ids) > 0 {
-		// A crashed or failed rollback may have left materialized blobs. Reclaim
-		// them before releasing the expired uploads' byte reservations.
-		refs, err := s.db.ReferencedBlobs(ctx)
-		if err != nil {
-			s.log.Error("expired upload references", "error", err)
-			return
-		}
-		if _, _, err := s.blobs.GC(refs, 0); err != nil {
-			s.log.Error("expired upload blobs", "error", err)
-			return
-		}
-		for _, id := range ids {
-			if s.claimUpload(id) {
-				if expired, err := s.db.UploadExpired(ctx, id); err == nil && expired {
-					s.discardUpload(ctx, id)
-				}
-				s.releaseUpload(id)
-			}
-		}
+	if expired, err := s.db.ExpiredUploads(ctx); err != nil {
+		s.log.Error("expired uploads", "error", err)
+	} else if len(expired) > 0 {
+		s.releaseExpiredUploads(ctx, expired)
 	}
 	s.db.Cleanup(ctx, viewRetention)
+}
+
+// releaseExpiredUploads removes expired uploads and their reservations. Only
+// an upload with unpacked bytes (a crashed or failed rollback) may have left
+// blobs behind; those are reclaimed by a full GC first, and kept while it
+// fails. Uploads without unpacked bytes never wait for that GC.
+func (s *Service) releaseExpiredUploads(ctx context.Context, expired []store.ExpiredUpload) {
+	needGC := false
+	for _, u := range expired {
+		needGC = needGC || u.Materialized != 0
+	}
+	reclaimed := false // a full GC succeeded in this sweep
+	if needGC {
+		refs, err := s.db.ReferencedBlobs(ctx)
+		if err == nil {
+			_, _, err = s.blobs.GC(refs, 0)
+		}
+		if err != nil {
+			s.log.Error("expired upload blobs", "error", err)
+		}
+		reclaimed = err == nil
+	}
+	for _, u := range expired {
+		if !s.claimUpload(u.ID) {
+			continue // a chunk or publication is using it
+		}
+		if still, materialized, err := s.db.UploadExpired(ctx, u.ID); err == nil && still && (materialized == 0 || reclaimed) {
+			s.discardUpload(ctx, u.ID)
+		}
+		s.releaseUpload(u.ID)
+	}
 }
 
 // CollectGarbage removes orphaned staging files and unreferenced blobs.

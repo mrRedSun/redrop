@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -118,12 +119,33 @@ func (s *Store) Open(h string) (*os.File, error) {
 	return os.Open(s.path(h))
 }
 
-// GC removes blobs that are not referenced and older than minAge.
+// GC removes blobs that are not referenced and older than minAge. A blob or
+// directory that cannot be read or removed does not stop the walk; GC returns
+// the failures joined (the first few, then a count).
 func (s *Store) GC(referenced map[string]struct{}, minAge time.Duration) (removed int, freed int64, err error) {
+	return s.gc(referenced, minAge, os.Remove)
+}
+
+// maxGCErrors bounds the failures GC reports individually.
+const maxGCErrors = 8
+
+// gc accepts a remove function so tests can reproduce filesystem failures as root.
+func (s *Store) gc(referenced map[string]struct{}, minAge time.Duration, remove func(string) error) (removed int, freed int64, err error) {
 	cutoff := time.Now().Add(-minAge)
-	err = filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
-		if werr != nil || d.IsDir() {
-			return werr
+	var errs []error
+	failed := 0
+	fail := func(err error) {
+		if failed++; failed <= maxGCErrors {
+			errs = append(errs, err)
+		}
+	}
+	walkErr := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			fail(werr)
+			return nil // skip what cannot be read; keep collecting elsewhere
+		}
+		if d.IsDir() {
+			return nil
 		}
 		name := d.Name()
 		if !validHash(name) {
@@ -136,17 +158,23 @@ func (s *Store) GC(referenced map[string]struct{}, minAge time.Duration) (remove
 		if ierr != nil || info.ModTime().After(cutoff) {
 			return nil
 		}
-		if err := os.Remove(p); err != nil {
-			if os.IsNotExist(err) {
-				return nil
+		if err := remove(p); err != nil {
+			if !os.IsNotExist(err) {
+				fail(err)
 			}
-			return err
+			return nil
 		}
 		removed++
 		freed += info.Size()
 		return nil
 	})
-	return
+	if walkErr != nil {
+		fail(walkErr)
+	}
+	if failed > maxGCErrors {
+		errs = append(errs, fmt.Errorf("%d more blob GC failures", failed-maxGCErrors))
+	}
+	return removed, freed, errors.Join(errs...)
 }
 
 // Usage returns the bytes stored on disk.

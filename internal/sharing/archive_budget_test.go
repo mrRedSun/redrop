@@ -259,6 +259,13 @@ func TestArchiveWorkBudget(t *testing.T) {
 			}
 			for i := range attempts {
 				_, err := s.Create(context.Background(), a, c, Settings{})
+				if i > 0 {
+					// A rejected upload is released, so a replay does no archive work.
+					if !apperr.Is(err, apperr.KindNotFound) {
+						t.Errorf("replay: %v, want the released upload not found", err)
+					}
+					continue
+				}
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Errorf("attempt %d: %v, want %s rejection", i+1, err, want)
 				}

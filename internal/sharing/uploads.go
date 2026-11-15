@@ -74,6 +74,27 @@ func (s *Service) releaseUpload(id string) {
 	s.uploadMu.Unlock()
 }
 
+// claimPublisher gives each account at most one publication running or
+// waiting for the service-wide slot, so the wait of every other account is
+// bounded by one attempt per active account.
+func (s *Service) claimPublisher(userID string) bool {
+	s.uploadMu.Lock()
+	defer s.uploadMu.Unlock()
+	if s.activePublishers[userID] {
+		return false
+	}
+	if s.activePublishers == nil {
+		s.activePublishers = make(map[string]bool)
+	}
+	s.activePublishers[userID] = true
+	return true
+}
+func (s *Service) releasePublisher(userID string) {
+	s.uploadMu.Lock()
+	delete(s.activePublishers, userID)
+	s.uploadMu.Unlock()
+}
+
 // OffsetMismatchError tells clients where to resume. It unwraps to a
 // Conflict application error.
 type OffsetMismatchError struct{ Received int64 }

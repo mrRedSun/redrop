@@ -219,8 +219,14 @@ func (s *Service) blobTitle(sum string) string {
 
 // --- owner operations ---
 
-// Create publishes an upload as a new artifact.
-func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (Artifact, error) {
+// Create publishes an upload as a new artifact. Every error after the
+// publication begins, including invalid settings, goes through its finish.
+func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (_ Artifact, err error) {
+	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer func() { attempt.finish(err) }()
 	exp, err := s.expiry(set.TTL)
 	if err != nil {
 		return Artifact{}, err
@@ -232,11 +238,9 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	if err != nil {
 		return Artifact{}, err
 	}
-	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
-	if err != nil {
+	if err := attempt.admit(); err != nil {
 		return Artifact{}, err
 	}
-	defer attempt.close()
 	v, title, err := s.materialize(ctx, actor, c, attempt)
 	if err != nil {
 		return Artifact{}, err
@@ -315,16 +319,19 @@ func (s *Service) list(ctx context.Context, f store.ListFilter, status string) (
 }
 
 // AddVersion publishes an upload as the new current version (same link).
-func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (Artifact, error) {
-	a, err := s.owned(ctx, actor, id)
-	if err != nil {
-		return Artifact{}, err
-	}
+func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (_ Artifact, err error) {
 	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
 	if err != nil {
 		return Artifact{}, err
 	}
-	defer attempt.close()
+	defer func() { attempt.finish(err) }()
+	a, err := s.owned(ctx, actor, id)
+	if err != nil {
+		return Artifact{}, err
+	}
+	if err := attempt.admit(); err != nil {
+		return Artifact{}, err
+	}
 	v, _, err := s.materialize(ctx, actor, c, attempt)
 	if err != nil {
 		return Artifact{}, err

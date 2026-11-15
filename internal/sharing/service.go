@@ -40,9 +40,10 @@ type Service struct {
 
 	// publication serializes materialization, commit/rollback, and GC. Waiting
 	// requests do no decompression and can leave through their context.
-	publication   chan struct{}
-	uploadMu      sync.Mutex
-	activeUploads map[string]bool // chunks/publication/expiry never overlap for one upload
+	publication      chan struct{}
+	uploadMu         sync.Mutex
+	activeUploads    map[string]bool // chunks/publication/expiry never overlap for one upload
+	activePublishers map[string]bool // user IDs with a publication running or waiting
 
 	unlockLimiter   *security.Limiter // per client network + artifact
 	unlockIPLimiter *security.Limiter // per client network across artifacts
