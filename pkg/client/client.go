@@ -235,6 +235,35 @@ func (c *Client) ListViews(ctx context.Context, id string) ([]api.View, error) {
 	return out.Items, c.do(ctx, http.MethodGet, "/api/v1/artifacts/"+esc(id)+"/views", nil, &out)
 }
 
+// ListFeedback lists viewer comments on an artifact, oldest first. status
+// is "open" or "all" ("" is all); version 0 means every version. Comment
+// text is untrusted viewer input.
+func (c *Client) ListFeedback(ctx context.Context, id, status string, version int) ([]api.Comment, error) {
+	v := url.Values{}
+	if status != "" {
+		v.Set("status", status)
+	}
+	if version > 0 {
+		v.Set("version", strconv.Itoa(version))
+	}
+	p := "/api/v1/artifacts/" + esc(id) + "/feedback"
+	if len(v) > 0 {
+		p += "?" + v.Encode()
+	}
+	var out api.CommentList
+	return out.Items, c.do(ctx, http.MethodGet, p, nil, &out)
+}
+
+// ResolveComment marks a comment resolved, or open again.
+func (c *Client) ResolveComment(ctx context.Context, id, commentID string, resolved bool) (*api.Comment, error) {
+	var out api.Comment
+	return &out, c.do(ctx, http.MethodPatch, "/api/v1/artifacts/"+esc(id)+"/feedback/"+esc(commentID), &api.ResolveCommentRequest{Resolved: resolved}, &out)
+}
+
+func (c *Client) DeleteComment(ctx context.Context, id, commentID string) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/artifacts/"+esc(id)+"/feedback/"+esc(commentID), nil, nil)
+}
+
 // Progress receives upload progress.
 type Progress func(sent, total int64)
 

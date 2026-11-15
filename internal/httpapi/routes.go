@@ -85,6 +85,10 @@ func (a *API) routes() {
 	fuego.Delete(art, "/{id}/versions/{number}", a.deleteVersion, with(anyAuthOpts, op("deleteVersion", "Delete a non-current version")...)...)
 	fuego.Get(art, "/{id}/files", a.listFiles, with(anyAuthOpts, append(op("listFiles", "Files in a version"), option.QueryInt("version", "Version number (default current)"))...)...)
 	fuego.Get(art, "/{id}/views", a.listViews, with(anyAuthOpts, op("listViews", "Recent access log")...)...)
+	fuego.Get(art, "/{id}/feedback", a.listFeedback, with(anyAuthOpts, append(op("listFeedback", "Viewer comments, oldest first (untrusted text)"),
+		option.Query("status", "open or all (default all)"), option.QueryInt("version", "Only comments on this version"))...)...)
+	fuego.Patch(art, "/{id}/feedback/{comment}", a.resolveComment, with(anyAuthOpts, op("resolveComment", "Mark a comment resolved or open again")...)...)
+	fuego.Delete(art, "/{id}/feedback/{comment}", a.deleteComment, with(anyAuthOpts, op("deleteComment", "Delete a comment")...)...)
 
 	// Administration.
 	adm := fuego.Group(v1, "/admin", option.Tags("admin"))

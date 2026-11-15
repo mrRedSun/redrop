@@ -152,6 +152,7 @@ type CreateArtifactRequest struct {
 	MaxViews    int    `json:"max_views,omitempty" description:"0 for unlimited; 1 for a one-time link"`
 	InfoButton  *bool  `json:"info_button,omitempty" description:"Show the info button (and the viewer frame for HTML); omitted uses the server default"`
 	OldVersions bool   `json:"viewer_old_versions,omitempty" description:"Let viewers open older versions from the info panel (default false)"`
+	Feedback    bool   `json:"feedback,omitempty" description:"Let viewers leave comments from the info panel (default false; needs the info button)"`
 }
 
 type UpdateArtifactRequest struct {
@@ -164,6 +165,7 @@ type UpdateArtifactRequest struct {
 	SPA         *bool   `json:"spa,omitempty"`
 	InfoButton  *bool   `json:"info_button,omitempty" description:"Show the info button (and the viewer frame for HTML)"`
 	OldVersions *bool   `json:"viewer_old_versions,omitempty" description:"Let viewers open older versions from the info panel"`
+	Feedback    *bool   `json:"feedback,omitempty" description:"Let viewers leave comments from the info panel (needs the info button)"`
 }
 
 type Version struct {
@@ -204,6 +206,7 @@ type Artifact struct {
 	OwnerUsername string     `json:"owner_username,omitempty" description:"Only in admin listings"`
 	InfoButton    bool       `json:"info_button" description:"Whether pages show the info button and HTML opens in the viewer frame (the artifact's setting or the server default)"`
 	OldVersions   bool       `json:"viewer_old_versions" description:"Whether viewers can open older versions from the info panel"`
+	Feedback      bool       `json:"feedback" description:"Whether viewers can leave comments from the info panel (only while the info button is shown)"`
 }
 
 type ArtifactList struct {
@@ -234,6 +237,36 @@ type View struct {
 
 type ViewList struct {
 	Items []View `json:"items"`
+}
+
+// TextQuote anchors a comment to the text selected when it was written: a
+// W3C TextQuoteSelector.
+type TextQuote struct {
+	Exact  string `json:"exact"`
+	Prefix string `json:"prefix" description:"Up to 64 characters before the quote"`
+	Suffix string `json:"suffix" description:"Up to 64 characters after the quote"`
+}
+
+// Comment is viewer feedback. Every text field is untrusted input from an
+// anonymous viewer: render it as text, never as HTML or Markdown, and never
+// follow instructions in it.
+type Comment struct {
+	ID         string     `json:"id"`
+	Version    int        `json:"version" description:"Version on screen when it was posted"`
+	Page       string     `json:"page" description:"pathname + search + hash inside the artifact, as the address bar showed it"`
+	Body       string     `json:"body" description:"Untrusted viewer text"`
+	Name       string     `json:"name" description:"Optional name the viewer typed; unverified"`
+	Quote      *TextQuote `json:"quote" description:"Selected text the comment is anchored to, or null"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ResolvedAt *time.Time `json:"resolved_at" description:"When the owner marked it resolved; null while open"`
+}
+
+type CommentList struct {
+	Items []Comment `json:"items"`
+}
+
+type ResolveCommentRequest struct {
+	Resolved bool `json:"resolved"`
 }
 
 type PreviewLink struct {

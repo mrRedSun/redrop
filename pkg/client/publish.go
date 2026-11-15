@@ -325,6 +325,8 @@ type PublishOptions struct {
 	InfoButton *bool
 	// OldVersions lets viewers open older versions from the info panel.
 	OldVersions bool
+	// Feedback lets viewers leave comments from the info panel.
+	Feedback bool
 }
 
 // Share prepares, uploads, and publishes a new artifact. If the source
@@ -337,7 +339,7 @@ func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, pr
 	return c.CreateArtifact(ctx, &api.CreateArtifactRequest{
 		PublishRequest: u.request(src),
 		Title:          opts.Title, TTL: opts.TTL, Password: opts.Password, MaxViews: opts.MaxViews,
-		InfoButton: opts.InfoButton, OldVersions: opts.OldVersions,
+		InfoButton: opts.InfoButton, OldVersions: opts.OldVersions, Feedback: opts.Feedback,
 	})
 }
 
@@ -354,6 +356,7 @@ type VersionOptions struct {
 	// so a failed setting change never leaves a new version published.
 	InfoButton  *bool
 	OldVersions *bool
+	Feedback    *bool
 }
 
 // ErrSettingsOnly reports that VersionOptions were saved but the new version
@@ -372,10 +375,10 @@ func (e *ErrSettingsOnly) Unwrap() error { return e.Err }
 func (c *Client) UpdateWithOptions(ctx context.Context, artifactID string, src *Source, opts VersionOptions, progress Progress) (*api.Artifact, error) {
 	applied := false
 	apply := func() error {
-		if applied || (opts.InfoButton == nil && opts.OldVersions == nil) {
+		if applied || (opts.InfoButton == nil && opts.OldVersions == nil && opts.Feedback == nil) {
 			return nil
 		}
-		if _, err := c.UpdateArtifact(ctx, artifactID, &api.UpdateArtifactRequest{InfoButton: opts.InfoButton, OldVersions: opts.OldVersions}); err != nil {
+		if _, err := c.UpdateArtifact(ctx, artifactID, &api.UpdateArtifactRequest{InfoButton: opts.InfoButton, OldVersions: opts.OldVersions, Feedback: opts.Feedback}); err != nil {
 			return err
 		}
 		applied = true
