@@ -44,7 +44,7 @@ func (a *API) login(c fuego.ContextWithBody[api.LoginRequest]) (api.Me, error) {
 	if err != nil {
 		return api.Me{}, err
 	}
-	s, err := a.accounts.Login(c.Context(), a.clients.IP(c.Request()), body.Username, body.Password, body.TOTP)
+	s, err := a.accounts.Login(c.Context(), a.clients.Network(c.Request()), body.Username, body.Password, body.TOTP)
 	if err != nil {
 		return api.Me{}, err
 	}
@@ -62,7 +62,7 @@ func (a *API) setup(c fuego.ContextWithBody[api.SetupRequest]) (api.Me, error) {
 	if err != nil {
 		return api.Me{}, err
 	}
-	s, err := a.accounts.Setup(c.Context(), a.clients.IP(c.Request()), body.Token, body.Username, body.Password)
+	s, err := a.accounts.Setup(c.Context(), a.clients.Network(c.Request()), body.Token, body.Username, body.Password)
 	if err != nil {
 		return api.Me{}, err
 	}
@@ -70,7 +70,7 @@ func (a *API) setup(c fuego.ContextWithBody[api.SetupRequest]) (api.Me, error) {
 }
 
 func (a *API) inviteInfo(c fuego.ContextNoBody) (api.InviteInfo, error) {
-	info, err := a.accounts.InviteInfo(c.Context(), a.clients.IP(c.Request()), c.PathParam("token"))
+	info, err := a.accounts.InviteInfo(c.Context(), a.clients.Network(c.Request()), c.PathParam("token"))
 	if err != nil {
 		return api.InviteInfo{}, err
 	}
@@ -82,7 +82,7 @@ func (a *API) acceptInvite(c fuego.ContextWithBody[api.AcceptInviteRequest]) (ap
 	if err != nil {
 		return api.Me{}, err
 	}
-	s, err := a.accounts.AcceptInvite(c.Context(), a.clients.IP(c.Request()), c.PathParam("token"), body.Username, body.Password)
+	s, err := a.accounts.AcceptInvite(c.Context(), a.clients.Network(c.Request()), c.PathParam("token"), body.Username, body.Password)
 	if err != nil {
 		return api.Me{}, err
 	}
@@ -90,7 +90,7 @@ func (a *API) acceptInvite(c fuego.ContextWithBody[api.AcceptInviteRequest]) (ap
 }
 
 func (a *API) resetInfo(c fuego.ContextNoBody) (api.ResetInfo, error) {
-	info, err := a.accounts.ResetInfo(c.Context(), a.clients.IP(c.Request()), c.PathParam("token"))
+	info, err := a.accounts.ResetInfo(c.Context(), a.clients.Network(c.Request()), c.PathParam("token"))
 	return api.ResetInfo{Valid: info.Valid, Username: info.Username}, err
 }
 
@@ -99,7 +99,7 @@ func (a *API) resetPassword(c fuego.ContextWithBody[api.ResetPasswordRequest]) (
 	if err != nil {
 		return api.OK{}, err
 	}
-	err = a.accounts.ResetPassword(c.Context(), a.clients.IP(c.Request()), c.PathParam("token"), body.Password)
+	err = a.accounts.ResetPassword(c.Context(), a.clients.Network(c.Request()), c.PathParam("token"), body.Password)
 	return api.OK{OK: err == nil}, err
 }
 
@@ -118,7 +118,7 @@ func (a *API) ssoStart(w http.ResponseWriter, r *http.Request) {
 	if mode == accounts.SSOLink {
 		current, _ = a.identify(r)
 	}
-	start, err := a.accounts.BeginSSO(r.Context(), a.clients.IP(r), r.PathValue("provider"), mode, current, r.URL.Query().Get("token"))
+	start, err := a.accounts.BeginSSO(r.Context(), a.clients.Network(r), r.PathValue("provider"), mode, current, r.URL.Query().Get("token"))
 	if err != nil {
 		redirectWithError(w, r, accounts.FailurePath(mode), err)
 		return
@@ -136,6 +136,8 @@ func (a *API) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		redirectWithError(w, r, failPath, err)
 		return
 	}
-	a.cookies.setSession(w, res.Session)
+	if res.Session != nil {
+		a.cookies.setSession(w, res.Session)
+	}
 	http.Redirect(w, r, res.Redirect, http.StatusSeeOther)
 }

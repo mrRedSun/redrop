@@ -95,6 +95,16 @@ const program = Effect.gen(function* () {
     yield* admin.deleteInvite(inv.id)
     const all = yield* admin.artifacts('', 'all')
     check('admin artifacts decode without links', all.every((a) => !('url' in a)))
+    // An administrator's revocation: the owner sees it and cannot undo it.
+    if (first && first.status === 'active') {
+      const revoked = yield* admin.setArtifactRevoked(first.id, true)
+      check('admin revocation is reported', revoked.status === 'revoked' && revoked.revoked_by_admin)
+      check('owner sees the admin revocation', (yield* artifacts.get(first.id)).revoked_by_admin)
+      const refused = yield* Effect.flip(artifacts.update(first.id, { revoked: false }))
+      check('owner cannot undo an admin revocation', refused._tag === 'Forbidden')
+      const restored = yield* admin.setArtifactRevoked(first.id, false)
+      check('admin restore clears it', restored.status === 'active' && !restored.revoked_by_admin)
+    }
   }
 
   yield* auth.logout

@@ -33,9 +33,12 @@ type ArtifactMeta struct {
 	UpdatedAt    time.Time
 	ExpiresAt    *time.Time
 	PurgeAt      *time.Time // when expired or used-up content is deleted
-	TokenName    string     // API token that created it
-	InfoButton   bool       // effective: the artifact's setting or the server default
-	OldVersions  bool       // viewers may open older versions
+	// RevokedByAdmin: an administrator revoked it, and only an
+	// administrator can restore it. Status is then "revoked".
+	RevokedByAdmin bool
+	TokenName      string // API token that created it
+	InfoButton     bool   // effective: the artifact's setting or the server default
+	OldVersions    bool   // viewers may open older versions
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
@@ -117,6 +120,7 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
 		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a), OldVersions: a.OldVersions,
+		RevokedByAdmin: a.AdminRevoked,
 	}
 }
 

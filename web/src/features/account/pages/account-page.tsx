@@ -22,7 +22,7 @@ export function Component() {
   return (
     <>
       <PageHeader title="Account" />
-      {linked && <Alert className="mb-6"><AlertDescription>Identity linked.</AlertDescription></Alert>}
+      {linked && <Alert className="mb-6"><AlertDescription>Identity linked. Your current session is unchanged; sign in with single sign-on to use it.</AlertDescription></Alert>}
       {error && (
         <Alert variant="destructive" className="mb-6">
           <AlertCircle />

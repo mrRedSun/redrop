@@ -113,9 +113,8 @@ aloud and typed. Older slugs keep working forever and are not migrated.
 * Misses are limited per client: a token bucket of `REDROP_CONTENT_MISS_BURST`
   (default 30) refilled at `REDROP_CONTENT_MISS_PER_MINUTE` (default 5). The
   client is the trusted-proxy-resolved address (`REDROP_TRUSTED_PROXIES`,
-  `REDROP_CLIENT_IP_HEADER`, e.g. `CF-Connecting-IP` or Traefik's
-  `X-Forwarded-For`), never a proxy's socket address; IPv6 clients are
-  grouped by /64. At most 100,000 clients are tracked.
+  `REDROP_CLIENT_IP_HEADER`, `REDROP_TRUSTED_HOPS`; see "Rate limits"),
+  never a proxy's socket address; IPv6 clients are grouped by /64. At most 100,000 clients are tracked.
 * Hits never spend budget, so normal use is not throttled however much it
   loads. A client that has spent its budget gets `429` with `Retry-After` for
   **every** artifact-host request, hits included, until a token refills. If
@@ -395,8 +394,15 @@ within 250 ms rather than at once.
   not burn one-time links.
 * Changing the password, rotating the link, or revoking bumps an access
   generation number that invalidates every outstanding access cookie.
-* Password attempts are rate limited per client IP and per artifact; failures
-  are recorded in the view log.
+* Password attempts are rate limited per client network and per artifact;
+  failures are recorded in the view log. An artifact takes about 50 wrong
+  passwords per hour from all networks together (up to twice that across a
+  window boundary: the budget is a fixed one-hour window), then its link is
+  locked for everyone until the hour has passed. Each attempt is charged to that
+  budget before the password is checked, and a right password gives its
+  charge back, so concurrent guesses cannot exceed it and visitors who know
+  the password never use it up. The view log keeps the count across
+  restarts.
 * Owners preview through a short-lived signed preview URL created from the
   dashboard; previews never count as views and bypass gates.
 
@@ -404,6 +410,14 @@ within 250 ms rather than at once.
 
 * `active` → `expired` (TTL elapsed) or `exhausted` (max views reached) or
   `revoked` (manually, reversible).
+* An owner's and an administrator's revocations are stored apart
+  (`revoked`, `admin_revoked`); either one makes the artifact `revoked`.
+  The owner can undo only their own: restoring an artifact an
+  administrator revoked is refused (`403`), and the API (`revoked_by_admin`),
+  the dashboard and `redrop info` say "revoked by an administrator". Other
+  owner changes still work and do not bring the link back. An
+  administrator's restore clears only the administrator's revocation.
+  Revocations made before migration 4 count as the owner's.
 * Expired artifacts keep content for `REDROP_EXPIRED_RETENTION` (default 72 h)
   so they can be extended/revived, then are deleted. Exhausted artifacts are
   deleted after the visit window ends. Deletion is immediate when requested.
@@ -490,7 +504,7 @@ unreclaimed capacity. Replays cannot clear a failed-cleanup reservation; they
 return a conflict until expiry safely reclaims the bytes. This design favors a small, bounded materialization path
 over parallel extraction. Uploaded chunks remain independently resumable.
 
-Migration 4 adds `uploads.materialized`, initialized to zero for existing
+Migration 6 adds `uploads.materialized`, initialized to zero for existing
 sessions. Stop the old process before upgrading. Do not run multiple server
 processes against the same data directory. Restore a whole-data-directory backup
 for rollback; older binaries do not enforce pending-byte reservations.
@@ -617,6 +631,152 @@ inside their containers on narrow screens. The document is readable without JS.
 * OIDC providers are configured by environment; identities are linked
   explicitly from the account page or by accepting an invite through OIDC.
   Accounts are never auto-linked by email address.
+* Linking keeps the current session and its sign-in method. Only a normal
+  single sign-on login creates an SSO session, so linking cannot satisfy
+  `REDROP_ADMIN_REQUIRE_OIDC`.
+* While `REDROP_ADMIN_REQUIRE_OIDC=true`, an admin account can link another
+  identity only from an SSO session; the start and the callback both check
+  it. A new identity linked from a password session would otherwise open
+  admin sessions without the identity provider's checks ever applying to
+  the account. Unlinking follows the same rule: from a password session,
+  someone with only the admin's password could otherwise remove the
+  account's single sign-on, which that session could not link back. An
+  admin who has only a password gets SSO by accepting an admin invite
+  (`redrop-server invite --admin`) through single sign-on, or by linking
+  before the setting is turned on.
+* **After upgrading to this rule, review admin identities.** Before it, a
+  password session could link any IdP account to an admin and turn the
+  session into an SSO one. A link made that way survives the upgrade and
+  still opens admin SSO sessions, and nothing records how a link was made
+  (the `identity linked` log line starts with this version). After
+  deploying, check the linked identities of every admin account and remove
+  the ones nobody recognises: each admin on their Account page, or the
+  operator with a read-only query on a copy or snapshot of the database:
+  `SELECT u.username, i.provider, i.email, datetime(i.created_at, 'unixepoch') FROM identities i JOIN users u ON u.id = i.user_id WHERE u.role = 'admin';`
+
+### Logging
+
+The app origin's requests are logged once, by `httpapi.logRequests`: API
+calls and failures, with method, status, size and duration, never query
+strings. A path segment that follows one of `dashpaths.SecretPrefixes`
+(invite, reset and setup tokens) is written as `…`. Fuego's own access log
+is off, and Fuego's other messages go to redrop's handler at `Info` or
+above only: its debug output includes decoded request bodies, with
+passwords and tokens. A test captures every log line, at debug level,
+while it opens and redeems each kind of one-time link, and checks that no
+token or password appears.
+
+### Rate limits
+
+* **Bounded tables.** Every fixed-window limiter (`security.Limiter`) tracks
+  at most 50,000 keys and stores keys over 64 bytes as their SHA-256, so a
+  full table costs about 10 MiB. Clients already in a table keep their own
+  count. What a full table does with a new key depends on whether anything
+  else bounds what it counts:
+  * **Evict the oldest entry** (`security.EvictOldest`) in the per-network
+    tables: sign-in and single sign-on starts, one-time link lookups, and
+    artifact passwords per network. The account backoff, the per-artifact
+    budget and the 256-bit link tokens bound guessing on their own, so a
+    newcomer is never refused, and an attacker who floods the table to push
+    others out gains nothing that rotating networks did not already give.
+  * **Refuse the new key** (`security.RefuseNew`: `429` until a window
+    expires) where the table is the only bound: the authenticator-code
+    ceiling (per account) and the artifact password budget (per artifact).
+    Their keys exist only for an account whose password was right, or for
+    a link the client knows, so an attacker cannot fill them with junk.
+  * The content miss limiter (`security.TokenBucket`, at most 100,000
+    clients) drops clients whose budget has refilled and refuses new ones
+    while every bucket is still refilling. It is the only bound on guessing
+    links, and a refused newcomer loses only misses: hits are still served.
+* **Retry-After.** Every limiter `429`, on the API and on the artifact
+  password gate, carries `Retry-After`: the end of the refused key's window
+  (or of the oldest window, for a full table that refuses), or the account
+  backoff's wait.
+* **Clients.** Every per-client limiter (sign-in, single sign-on starts,
+  one-time link lookups, artifact passwords, content misses) keys on
+  `netutil.Network`: the trusted-proxy-resolved address, with IPv6 grouped
+  by /64, so one host cannot rotate through its /64 to reset them.
+* **Trusted proxies.** Forwarded headers count only on requests whose
+  socket peer is in `REDROP_TRUSTED_PROXIES`. Without a hop count, the
+  client is the first `X-Forwarded-For` entry from the right that is not a
+  trusted address. A trusted range that covers a whole CDN makes that
+  spoofable: a CDN worker sends requests from inside the range with any
+  `X-Forwarded-For`, and the walk skips both its hop and the edge's. The
+  server logs a startup warning in this mode for a trusted range wider than
+  a /24 (IPv4) or a /48 (IPv6) with `X-Forwarded-For`. The account backoff
+  below does not depend on client addresses, so it holds even when they
+  are spoofed.
+* **Trusted hops.** `REDROP_TRUSTED_HOPS=N` reads the entry exactly N from
+  the right instead (`netutil.ClientResolver.fromHops`). It is the only
+  safe setting when the origin stays reachable without the CDN, so
+  `CF-Connecting-IP` can't be trusted. The production chain is client,
+  Cloudflare, Traefik, redrop, with `N=2`:
+  * **What the proxies do.** Cloudflare's documentation: with no
+    `X-Forwarded-For`, it sets one with the connecting address (equal to
+    `CF-Connecting-IP`); with one, it appends the connecting address.
+    Traefik v3 (`forwardedheaders` middleware and its proxy, read in the
+    source): from a source in `forwardedHeaders.trustedIPs` it keeps the
+    header and appends the source address; from any other source it deletes
+    every `X-Forwarded-*` header, then appends the source address, so the
+    header holds that one address. `notAppendXForwardedFor: true` would
+    stop the append and change the count.
+  * **Visitor through Cloudflare:** `[anything the visitor sent], visitor,
+    edge`. Position 2 is the visitor, written by Cloudflare.
+  * **Cloudflare Worker:** `[anything the Worker set], Worker egress,
+    edge`. Position 2 is written by Cloudflare. For cross-zone Worker
+    subrequests Cloudflare documents `CF-Connecting-IP: 2a06:98c0:3600::103`;
+    that the appended entry is the same address is the review's reading of
+    the documentation and was not exercised against Cloudflare. Either way
+    the entry is Cloudflare's, not the Worker's, so all Workers share one
+    bucket.
+  * **Direct to Traefik, skipping Cloudflare:** the source is untrusted, so
+    Traefik replaces the header with the source address. One entry, fewer
+    than N: the leftmost (and only) entry is the real peer.
+  * **Fallbacks.** No header, or an entry that is not an IP address at the
+    chosen position, gives the socket peer (Traefik): such requests share
+    Traefik's bucket rather than choosing their own.
+  * **Requirements.** N must match the chain exactly. Too large, and a
+    visitor's own entry is read (spoofable); too small, and the edge or
+    proxy address is read (everyone behind it shares a bucket). Traefik
+    must trust Cloudflare's ranges and keep appending, and Cloudflare's
+    "Remove visitor IP headers" transform must stay off. Only the socket
+    peer is checked against `REDROP_TRUSTED_PROXIES`. The setting needs
+    `REDROP_CLIENT_IP_HEADER=X-Forwarded-For`, accepts 0 to 10, and turns
+    the wide-range warning off.
+* **Accounts.** Sign-in attempts are also slowed per account, from any
+  network: five in a row, then each attempt waits twice as long as the one
+  before, from 1 second up to 15 minutes (`429` with `Retry-After`). Once
+  the attempts stop, the right password works again within 15 minutes. But
+  while they continue, the account's password sign-in stays refused: about
+  four attempts an hour, each timed to the end of the last wait, keep the
+  account at the 15-minute maximum, and the owner's right password is
+  refused without being checked. Single sign-on and API tokens are not
+  affected. A successful sign-in, or a day without attempts, starts over.
+  A possible follow-up is the usual device-cookie scheme: a browser that
+  signed in successfully gets a signed cookie, and its attempts skip the
+  shared backoff and are limited only by their own count, so the owner
+  keeps signing in while guesses from elsewhere stay slowed. Unknown usernames back off exactly like real ones, so the
+  backoff reveals nothing about which accounts exist. Each attempt is
+  charged before the password is checked, so concurrent guesses queue
+  instead of all reading the old count. The table is a fixed 65,536 slots
+  hashed with a per-process random seed: it is never full, and an attacker
+  cannot choose which accounts share a slot.
+* **Authenticator codes.** An account takes at most 5 wrong codes per
+  hour, at sign-in and when turning the authenticator off, from any
+  network. Each code works once: the last accepted 30-second step is
+  stored per user, and a code from that step or an earlier one is refused
+  ("already used"), including when two requests race with one code. A new
+  secret starts its own record.
+* **Sign-in input.** A username that fails the account name rule (2–32
+  characters) gets the wrong-login answer before any limiter or database
+  call. The unauthenticated sign-in and onboarding routes (`/auth/login`,
+  `/setup`, `/invites/{token}/accept`, `/reset/{token}`) accept at most
+  4 KiB of body; larger bodies get `413`.
+* **Request bodies.** Every route that takes a JSON body checks it before
+  decoding: another `Content-Type` (or a body without one) gets `415`, and
+  a body over its limit (4 KiB above, 1 MiB elsewhere) gets `413`, with or
+  without a declared length. Malformed JSON gets `400`. Upload chunks
+  (`PUT /uploads/{id}`) are raw bytes and keep their own limits.
 
 ## CLI
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/go-fuego/fuego"
 
@@ -30,8 +32,18 @@ func StatusOf(k apperr.Kind) int { return statusByKind[k] }
 // errors (validation, decoding) pass through; internal causes are logged and
 // never exposed.
 func toProblem(ctx context.Context, err error) fuego.HTTPError {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return fuego.HTTPError{Status: http.StatusRequestEntityTooLarge, Title: http.StatusText(http.StatusRequestEntityTooLarge), Detail: "request body is too large"}
+	}
 	var he fuego.HTTPError
 	if errors.As(err, &he) {
+		// Fuego's decoding errors wrap an HTTPError without a status; the
+		// wrapper (BadRequestError) carries it.
+		var ws fuego.ErrorWithStatus
+		if he.Status == 0 && errors.As(err, &ws) {
+			he.Status = ws.StatusCode()
+		}
 		return he
 	}
 	var ws fuego.ErrorWithStatus
@@ -47,10 +59,30 @@ func toProblem(ctx context.Context, err error) fuego.HTTPError {
 	if title == "" {
 		title = http.StatusText(status)
 	}
-	return fuego.HTTPError{Status: status, Title: title, Detail: e.Msg}
+	// Err is never serialized; it lets sendProblem read RetryAfter.
+	return fuego.HTTPError{Status: status, Title: title, Detail: e.Msg, Err: e}
+}
+
+// setRetryAfter sets Retry-After (whole seconds, rounded up) for a
+// rate-limited error that knows its wait.
+func setRetryAfter(w http.ResponseWriter, err error) {
+	var e *apperr.Error
+	if errors.As(err, &e) && e.Kind == apperr.KindRateLimited && e.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(e.RetryAfter.Seconds()))))
+	}
+}
+
+// sendProblem serializes every Fuego route's error (after toProblem): the
+// usual negotiated problem response, plus Retry-After on a rate limit that
+// knows its wait.
+func sendProblem(w http.ResponseWriter, r *http.Request, err error) {
+	setRetryAfter(w, err)
+	fuego.SendError(w, r, err)
 }
 
 // writeError renders an error from a plain net/http handler.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
-	fuego.SendJSONError(w, r, toProblem(r.Context(), err))
+	p := toProblem(r.Context(), err)
+	setRetryAfter(w, p)
+	fuego.SendJSONError(w, r, p)
 }

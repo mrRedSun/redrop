@@ -1,5 +1,5 @@
 import { Badge } from '@/components/ui/badge'
-import type { ArtifactStatus } from '../schemas'
+import { type ArtifactStatus, statusLabel } from '../schemas'
 
 const variants: Record<ArtifactStatus, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   active: 'default',
@@ -8,6 +8,6 @@ const variants: Record<ArtifactStatus, 'default' | 'secondary' | 'destructive' |
   revoked: 'destructive',
 }
 
-export function StatusBadge({ status }: { status: ArtifactStatus }) {
-  return <Badge variant={variants[status]}>{status}</Badge>
+export function StatusBadge({ artifact }: { artifact: { readonly status: ArtifactStatus; readonly revoked_by_admin: boolean } }) {
+  return <Badge variant={variants[artifact.status]}>{statusLabel(artifact)}</Badge>
 }

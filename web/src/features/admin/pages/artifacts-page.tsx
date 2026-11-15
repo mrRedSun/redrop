@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input'
 import { useDebouncedValue } from '@/hooks/use-debounced-value'
 import { formatBytes, relativeTime } from '@/lib/format'
 import { useKeepPrevious } from '@/runtime/use-keep-previous'
+import { statusLabel } from '@/features/artifacts/schemas'
 import * as admin from '../atoms'
 import type { AdminArtifact } from '../schemas'
 
@@ -44,7 +45,7 @@ export function Component() {
                 ),
               },
               { header: 'Owner', cell: (a) => a.owner_username },
-              { header: 'Status', cell: (a) => <Badge variant={a.status === 'revoked' ? 'destructive' : a.status === 'active' ? 'default' : 'secondary'}>{a.status}</Badge> },
+              { header: 'Status', cell: (a) => <Badge variant={a.status === 'revoked' ? 'destructive' : a.status === 'active' ? 'default' : 'secondary'}>{statusLabel(a)}</Badge> },
               { header: 'Views', className: 'hidden md:table-cell', cell: (a) => (a.max_views ? `${a.views} / ${a.max_views}` : a.views) },
               { header: 'Size', className: 'hidden md:table-cell', cell: (a) => formatBytes(a.total_size) },
               { header: 'Expires', className: 'hidden lg:table-cell', cell: (a) => (a.expires_at ? relativeTime(a.expires_at) : 'never') },
@@ -61,7 +62,8 @@ function ModerationActions({ artifact }: { artifact: AdminArtifact }) {
   const setRevoked = useAtomSet(admin.setArtifactRevoked(artifact.id))
   const remove = useAtomSet(admin.deleteArtifact(artifact.id), { mode: 'promise' })
   const [confirming, setConfirming] = useState(false)
-  const revoked = artifact.status === 'revoked'
+  // Restore clears only an administrator's revocation; an owner's own stays.
+  const revoked = artifact.revoked_by_admin
   return (
     <>
       <DropdownMenu>

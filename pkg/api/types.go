@@ -204,6 +204,8 @@ type Artifact struct {
 	OwnerUsername string     `json:"owner_username,omitempty" description:"Only in admin listings"`
 	InfoButton    bool       `json:"info_button" description:"Whether pages show the info button and HTML opens in the viewer frame (the artifact's setting or the server default)"`
 	OldVersions   bool       `json:"viewer_old_versions" description:"Whether viewers can open older versions from the info panel"`
+	// RevokedByAdmin is set when an administrator revoked the artifact.
+	RevokedByAdmin bool `json:"revoked_by_admin" description:"An administrator revoked it (status revoked); only an administrator can restore it"`
 }
 
 type ArtifactList struct {
@@ -331,5 +333,5 @@ type OK struct {
 
 // AdminArtifactUpdate is the only change admins may make to others' artifacts.
 type AdminArtifactUpdate struct {
-	Revoked bool `json:"revoked"`
+	Revoked bool `json:"revoked" description:"Set or clear the administrator's revocation; the owner's own revocation is unaffected"`
 }

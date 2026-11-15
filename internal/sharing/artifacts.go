@@ -372,6 +372,9 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 		}
 		u.MaxViews = p.MaxViews
 	}
+	if p.Revoked != nil && !*p.Revoked && a.AdminRevoked {
+		return Artifact{}, apperr.Forbidden("an administrator revoked this artifact; only an administrator can restore it")
+	}
 	u.ResetViews, u.Revoked, u.SPA, u.InfoButton, u.OldVersions = p.ResetViews, p.Revoked, p.SPA, p.InfoButton, p.OldVersions
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
 		return Artifact{}, mapStore(err)
