@@ -13,5 +13,16 @@
 <ol class="rd-revs">{{range .Revisions}}
 <li{{if .Viewing}} aria-current="page"{{end}}>{{if and .Href (not .Viewing)}}<a href="{{.Href}}">Version {{.Number}}</a>{{else}}Version {{.Number}}{{end}}{{if .Current}} <span class="rd-tag">current</span>{{end}}{{if and .Viewing (not .Current)}} <span class="rd-tag">viewing</span>{{end}} · <span data-rel="{{iso .Published}}">{{utc .Published}}</span>{{with .Note}}<span class="rd-note">{{.}}</span>{{end}}</li>{{end}}
 </ol>{{end}}
-<div class="rd-foot"><img src="/__redrop/favicon.svg" alt="" width="16" height="16">Shared with redrop</div>
+{{if .Feedback}}<form id="rd-fb" class="rd-fb" data-version="{{.Version}}" data-current="{{.Current}}" hidden>
+<h3>Feedback</h3>
+<p class="rd-fb-note">Only the person who shared this page sees what you send. To quote text, select it on the page before opening this panel.</p>
+<div id="rd-fb-quote" class="rd-fb-quote" hidden><q id="rd-fb-quote-text"></q><button type="button" id="rd-fb-unquote">Don't quote</button></div>
+<label for="rd-fb-body">Comment</label>
+<textarea id="rd-fb-body" name="body" rows="4" maxlength="4000" required></textarea>
+<label for="rd-fb-name">Your name <span class="rd-fb-opt">(optional)</span></label>
+<input id="rd-fb-name" name="name" maxlength="80" autocomplete="name">
+<button type="submit" id="rd-fb-send">Send</button>
+<p id="rd-fb-status" class="rd-fb-status" role="status" aria-live="polite"></p>
+</form>
+{{end}}<div class="rd-foot"><img src="/__redrop/favicon.svg" alt="" width="16" height="16">Shared with redrop</div>
 </div>{{end}}

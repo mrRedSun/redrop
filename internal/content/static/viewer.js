@@ -1,7 +1,8 @@
 // redrop viewer page and file page (DESIGN.md "Viewer frame"). Loaded from
 // /__redrop/viewer.js; the pages carry no inline script. It adds local and
 // relative times to the server-rendered info panel, a live expiry countdown
-// while the panel is open, and keeps the address bar on the frame's page.
+// while the panel is open, keeps the address bar on the frame's page, and
+// sends the panel's feedback form (DESIGN.md "Viewer feedback").
 (function () {
   'use strict'
   var doc = document
@@ -33,17 +34,8 @@
     })
   }
 
-  // ---- the address bar follows the frame ----
-  // The frame is on this origin, so its location is read directly after
-  // every load and every same-document URL change inside it (a fragment,
-  // history.pushState or replaceState, Back/Forward). The artifact's bytes
-  // stay untouched and nothing in its window is written or patched: the
-  // viewer only reads its location and listens for events.
-  // replaceState, never pushState: the frame owns the history entries.
   var frame = doc.getElementById('rd-frame')
-  if (!frame) return
   var OLD = /^\/__redrop\/v\/([1-9][0-9]*)(\/.*)$/
-  var POLL_MS = 250
   // barURL maps the frame's location to the address bar: version N's files
   // (/__redrop/v/N/path) show as path?redrop-version=N. It returns null for
   // another origin, for redrop's own pages, and for a location without a
@@ -63,6 +55,121 @@
     }
     return path + search + loc.hash
   }
+
+  // ---- feedback ----
+  // The form is in the panel, outside the artifact. The artifact is only
+  // read: its selection (for a quote) and its location (for the page and
+  // version). Nothing is written to its document or window, and no listener
+  // is added there: the selection is read when the panel opens.
+  var form = doc.getElementById('rd-fb')
+  if (form) feedback(form)
+
+  function feedback(form) {
+    var MAX_EXACT = 500, CONTEXT = 64
+    var body = doc.getElementById('rd-fb-body'), name = doc.getElementById('rd-fb-name')
+    var send = doc.getElementById('rd-fb-send'), status = doc.getElementById('rd-fb-status')
+    var box = doc.getElementById('rd-fb-quote'), boxText = doc.getElementById('rd-fb-quote-text')
+    var quote = null
+    function say(msg) { status.textContent = msg }
+    function setQuote(q) {
+      quote = q
+      boxText.textContent = q ? q.exact : ''
+      box.hidden = !q
+    }
+    // quoteOf returns a W3C text quote of win's selection, or null. Code
+    // points, as the server counts them; a long selection is shortened and
+    // its suffix taken after the shortened text, so the quote still anchors.
+    function quoteOf(win, skip) {
+      var sel = win.getSelection()
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return null
+      var range = sel.getRangeAt(0)
+      if (skip && skip.contains(range.commonAncestorContainer)) return null
+      var text = Array.from(range.toString())
+      if (!text.join('').trim()) return null
+      var d = range.startContainer.ownerDocument || range.startContainer
+      var root = d.body || d.documentElement
+      var before = d.createRange(), after = d.createRange()
+      before.setStart(root, 0)
+      before.setEnd(range.startContainer, range.startOffset)
+      after.setStart(range.endContainer, range.endOffset)
+      after.setEnd(root, root.childNodes.length)
+      var rest = text.slice(MAX_EXACT).concat(Array.from(after.toString()))
+      return {
+        exact: text.slice(0, MAX_EXACT).join(''),
+        prefix: Array.from(before.toString()).slice(-CONTEXT).join(''),
+        suffix: rest.slice(0, CONTEXT).join(''),
+      }
+    }
+    function capture() {
+      var q = null
+      try {
+        q = frame ? quoteOf(frame.contentWindow, null) : quoteOf(window, panel)
+      } catch (e) {
+        // Another origin, or a selection outside the document's body.
+      }
+      setQuote(q)
+    }
+    // where is the page and version on screen: the frame's page as the
+    // address bar shows it, else (no frame, or another origin) the address
+    // bar and this page's version.
+    function where() {
+      var current = Number(form.getAttribute('data-current'))
+      if (frame) {
+        try {
+          var loc = frame.contentWindow.location, page = barURL(loc)
+          if (page !== null) {
+            var m = OLD.exec(loc.pathname)
+            return { page: page, version: m ? Number(m[1]) : current }
+          }
+        } catch (e) {
+          // Another origin: fall back to the address bar.
+        }
+      }
+      return { page: location.pathname + location.search + location.hash, version: Number(form.getAttribute('data-version')) }
+    }
+    if (panel) {
+      panel.addEventListener('toggle', function (e) {
+        if (e.newState === 'open') capture()
+      })
+    }
+    doc.getElementById('rd-fb-unquote').addEventListener('click', function () { setQuote(null) })
+    form.addEventListener('submit', function (e) {
+      e.preventDefault()
+      if (!body.value.trim()) { say('Write a comment first.'); return }
+      var w = where()
+      var msg = { body: body.value, name: name.value, version: w.version, page: w.page }
+      if (quote) msg.quote = quote
+      send.disabled = true
+      say('Sending…')
+      fetch('/__redrop/feedback', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(msg),
+      }).then(function (res) {
+        if (res.status === 201) {
+          body.value = ''
+          setQuote(null)
+          say('Thanks, your feedback was sent.')
+          return
+        }
+        return res.json().then(function (j) {
+          say(j && typeof j.message === 'string' ? j.message : 'Feedback could not be sent.')
+        }, function () { say('Feedback is not available on this page right now.') })
+      }, function () {
+        say('Could not reach the server. Check your connection and try again.')
+      }).then(function () { send.disabled = false })
+    })
+    form.hidden = false
+  }
+
+  // ---- the address bar follows the frame ----
+  // The frame is on this origin, so its location is read directly after
+  // every load and every same-document URL change inside it (a fragment,
+  // history.pushState or replaceState, Back/Forward). The artifact's bytes
+  // stay untouched and nothing in its window is written or patched: the
+  // viewer only reads its location and listens for events.
+  // replaceState, never pushState: the frame owns the history entries.
+  if (!frame) return
+  var POLL_MS = 250
   function sync() {
     try {
       var next = barURL(frame.contentWindow.location)
