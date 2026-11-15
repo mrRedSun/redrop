@@ -387,9 +387,10 @@ within 250 ms rather than at once.
 * Changing the password, rotating the link, or revoking bumps an access
   generation number that invalidates every outstanding access cookie.
 * Password attempts are rate limited per client network and per artifact;
-  failures are recorded in the view log. An artifact takes at most 50 wrong
-  passwords per hour from all networks together, then its link is locked
-  for everyone until the hour has passed. Each attempt is charged to that
+  failures are recorded in the view log. An artifact takes about 50 wrong
+  passwords per hour from all networks together (up to twice that across a
+  window boundary: the budget is a fixed one-hour window), then its link is
+  locked for everyone until the hour has passed. Each attempt is charged to that
   budget before the password is checked, and a right password gives its
   charge back, so concurrent guesses cannot exceed it and visitors who know
   the password never use it up. The view log keeps the count across
@@ -562,9 +563,19 @@ inside their containers on narrow screens. The document is readable without JS.
   admin sessions without the identity provider's checks ever applying to
   the account. Unlinking follows the same rule: from a password session,
   someone with only the admin's password could otherwise remove the
-  account's single sign-on, which that session could not link back. An admin who has only a password gets SSO by accepting an
-  admin invite (`redrop-server invite --admin`) through single sign-on, or
-  by linking before the setting is turned on.
+  account's single sign-on, which that session could not link back. An
+  admin who has only a password gets SSO by accepting an admin invite
+  (`redrop-server invite --admin`) through single sign-on, or by linking
+  before the setting is turned on.
+* **After upgrading to this rule, review admin identities.** Before it, a
+  password session could link any IdP account to an admin and turn the
+  session into an SSO one. A link made that way survives the upgrade and
+  still opens admin SSO sessions, and nothing records how a link was made
+  (the `identity linked` log line starts with this version). After
+  deploying, check the linked identities of every admin account and remove
+  the ones nobody recognises: each admin on their Account page, or the
+  operator with a read-only query on a copy or snapshot of the database:
+  `SELECT u.username, i.provider, i.email, datetime(i.created_at, 'unixepoch') FROM identities i JOIN users u ON u.id = i.user_id WHERE u.role = 'admin';`
 
 ### Logging
 
@@ -657,10 +668,17 @@ token or password appears.
     the wide-range warning off.
 * **Accounts.** Sign-in attempts are also slowed per account, from any
   network: five in a row, then each attempt waits twice as long as the one
-  before, from 1 second up to 15 minutes (`429` with `Retry-After`). There
-  is no lockout: once an attacker stops, the right password works again
-  within 15 minutes. A successful sign-in, or a day without attempts,
-  starts over. Unknown usernames back off exactly like real ones, so the
+  before, from 1 second up to 15 minutes (`429` with `Retry-After`). Once
+  the attempts stop, the right password works again within 15 minutes. But
+  while they continue, the account's password sign-in stays refused: about
+  four attempts an hour, each timed to the end of the last wait, keep the
+  account at the 15-minute maximum, and the owner's right password is
+  refused without being checked. Single sign-on and API tokens are not
+  affected. A successful sign-in, or a day without attempts, starts over.
+  A possible follow-up is the usual device-cookie scheme: a browser that
+  signed in successfully gets a signed cookie, and its attempts skip the
+  shared backoff and are limited only by their own count, so the owner
+  keeps signing in while guesses from elsewhere stay slowed. Unknown usernames back off exactly like real ones, so the
   backoff reveals nothing about which accounts exist. Each attempt is
   charged before the password is checked, so concurrent guesses queue
   instead of all reading the old count. The table is a fixed 65,536 slots
