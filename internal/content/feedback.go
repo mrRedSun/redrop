@@ -20,9 +20,11 @@ import (
 // comments; otherwise it answers like any other reserved path.
 const feedbackPath = reservedPrefix + "feedback"
 
-// maxFeedbackRequest bounds a post's body: the longest fields, escaped as
-// JSON, fit well inside it.
-const maxFeedbackRequest = 32 << 10
+// maxFeedbackRequest bounds a post's body. The largest valid post, every
+// field at its limit in astral characters and every character escaped as a
+// JSON \u surrogate pair, is about 63 KB; browsers send raw UTF-8, about a
+// third of that.
+const maxFeedbackRequest = 64 << 10
 
 // feedbackRequest is the endpoint's JSON body.
 type feedbackRequest struct {
@@ -90,8 +92,6 @@ func (h *Handler) feedback(w http.ResponseWriter, r *http.Request, slug string) 
 			feedbackAnswer(w, http.StatusBadRequest, "invalid", e.Msg)
 		case apperr.KindConflict:
 			feedbackAnswer(w, http.StatusConflict, "feedback_full", e.Msg)
-		case apperr.KindNotFound:
-			methodNotAllowed(w) // closed since the checks above
 		default:
 			h.log.Error("post feedback", "error", err)
 			feedbackAnswer(w, http.StatusInternalServerError, "internal", "Something went wrong. Please try again.")

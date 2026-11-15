@@ -112,6 +112,16 @@ function page(opts: { text?: string; frameAt?: string | null; crossOrigin?: bool
       json: () => (r.json === undefined ? Promise.reject(new SyntaxError('not JSON')) : Promise.resolve(r.json)),
     })
   }
+  // Array.from records the longest input it was given (m3: bounded work).
+  let fromMax = 0
+  const TrackedArray = {
+    prototype: Array.prototype,
+    from(x: ArrayLike<unknown> | Iterable<unknown>) {
+      const a = Array.from(x as Iterable<unknown>)
+      fromMax = Math.max(fromMax, typeof x === 'string' ? x.length : a.length)
+      return a
+    },
+  }
   const top = new URL(start, ORIGIN)
   // The file page has no frame: the page's own selection is read.
   let ownSelection: unknown = Object.freeze({ isCollapsed: true, rangeCount: 0 })
@@ -125,13 +135,14 @@ function page(opts: { text?: string; frameAt?: string | null; crossOrigin?: bool
     },
     location: { origin: ORIGIN, pathname: top.pathname, search: top.search, hash: '' },
     history: { state: null, replaceState() {}, pushState() { throw new Error('no pushState') } },
-    URL, URLSearchParams, Date, Intl, Array, fetch,
+    URL, URLSearchParams, Date, Intl, Array: TrackedArray, fetch,
     setInterval: () => 0, clearInterval: () => {},
   })
   vm.runInContext(source, context)
   const flush = () => new Promise((r) => setImmediate(r))
   return {
     els, sent, reads, writes, td, panel,
+    fromMax: () => fromMax,
     select(from: number, to: number) { selection = td.select(from, to) },
     selectOwn(sel: unknown) { ownSelection = sel },
     reply(r: Reply) { reply = r },
@@ -193,6 +204,18 @@ await test('a long selection is shortened by code points and its suffix follows 
   assert.equal(q.prefix, 'p'.repeat(64))
   assert.equal(q.suffix, 'x'.repeat(64))
   assert.equal(text.indexOf(q.prefix + q.exact + q.suffix) >= 0, true, 'the triple is a text quote of the document')
+  onlyRead(p)
+})
+
+await test('a huge page and selection: the quote is right and no array grows with them', async () => {
+  const sel = 'q'.repeat(1_000_000)
+  const text = 'a'.repeat(2_000_000) + sel + 'b'.repeat(2_000_000)
+  const p = page({ text })
+  p.select(2_000_000, 2_000_000 + sel.length)
+  p.open()
+  await p.submit()
+  assert.deepEqual(p.payload().quote, { exact: 'q'.repeat(500), prefix: 'a'.repeat(64), suffix: 'q'.repeat(64) })
+  assert(p.fromMax() <= 2 * (500 + 64), `Array.from got ${p.fromMax()} units`)
   onlyRead(p)
 })
 

@@ -79,24 +79,32 @@
     // quoteOf returns a W3C text quote of win's selection, or null. Code
     // points, as the server counts them; a long selection is shortened and
     // its suffix taken after the shortened text, so the quote still anchors.
+    // Strings are cut in UTF-16 units before they become code point arrays,
+    // so the arrays stay small however long the page or selection is: n code
+    // points never need more than 2n units.
     function quoteOf(win, skip) {
       var sel = win.getSelection()
       if (!sel || sel.isCollapsed || !sel.rangeCount) return null
       var range = sel.getRangeAt(0)
       if (skip && skip.contains(range.commonAncestorContainer)) return null
-      var text = Array.from(range.toString())
-      if (!text.join('').trim()) return null
+      var s = range.toString()
+      if (!/\S/.test(s)) return null
+      var head = Array.from(s.slice(0, 2 * (MAX_EXACT + CONTEXT)))
       var d = range.startContainer.ownerDocument || range.startContainer
       var root = d.body || d.documentElement
-      var before = d.createRange(), after = d.createRange()
+      var before = d.createRange()
       before.setStart(root, 0)
       before.setEnd(range.startContainer, range.startOffset)
-      after.setStart(range.endContainer, range.endOffset)
-      after.setEnd(root, root.childNodes.length)
-      var rest = text.slice(MAX_EXACT).concat(Array.from(after.toString()))
+      var rest = head.slice(MAX_EXACT)
+      if (rest.length < CONTEXT) {
+        var after = d.createRange()
+        after.setStart(range.endContainer, range.endOffset)
+        after.setEnd(root, root.childNodes.length)
+        rest = rest.concat(Array.from(after.toString().slice(0, 2 * CONTEXT)))
+      }
       return {
-        exact: text.slice(0, MAX_EXACT).join(''),
-        prefix: Array.from(before.toString()).slice(-CONTEXT).join(''),
+        exact: head.slice(0, MAX_EXACT).join(''),
+        prefix: Array.from(before.toString().slice(-2 * CONTEXT)).slice(-CONTEXT).join(''),
         suffix: rest.slice(0, CONTEXT).join(''),
       }
     }
