@@ -4,13 +4,19 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/pem"
+	"errors"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -67,52 +73,97 @@ if [ "$1" = login ]; then
 fi
 `
 
-// runInstaller serves the real installer and a fake CLI build, then runs the
-// installer the way the dashboard's command does.
-func runInstaller(t *testing.T, token, loginExit string) (string, string, error) {
+// installFixture is a fake CLI build: the binary plus SHA256SUMS, served by
+// the real Installers handler, and a work directory to install into.
+type installFixture struct {
+	cliDir, name, work, bin, log string
+}
+
+func newInstallFixture(t *testing.T) *installFixture {
 	t.Helper()
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("install.sh targets Linux and macOS")
 	}
-	cliDir := t.TempDir()
-	name := "redrop-" + runtime.GOOS + "-" + runtime.GOARCH
-	if err := os.WriteFile(filepath.Join(cliDir, name), []byte(fakeCLI), 0o755); err != nil {
+	f := &installFixture{cliDir: t.TempDir(), name: "redrop-" + runtime.GOOS + "-" + runtime.GOARCH, work: t.TempDir()}
+	f.bin = filepath.Join(f.work, "bin")
+	f.log = filepath.Join(f.work, "log")
+	if err := os.WriteFile(filepath.Join(f.cliDir, f.name), []byte(fakeCLI), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(fakeCLI))
-	if err := os.WriteFile(filepath.Join(cliDir, "SHA256SUMS"), []byte(hex.EncodeToString(sum[:])+"  "+name+"\n"), 0o644); err != nil {
+	f.writeSums(t, hex.EncodeToString(sum[:]))
+	return f
+}
+
+func (f *installFixture) writeSums(t *testing.T, sum string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(f.cliDir, "SHA256SUMS"), []byte(sum+"  "+f.name+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// serve starts a server for the installers with the script's base URL set
+// to the server itself, and counts its requests.
+func (f *installFixture) serve(t *testing.T, requests *atomic.Int32) *httptest.Server {
+	t.Helper()
 	var h http.Handler
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests != nil {
+			requests.Add(1)
+		}
+		h.ServeHTTP(w, r)
+	}))
 	t.Cleanup(srv.Close)
-	h = New(nil, cliDir, srv.URL).Installers()
+	h = New(nil, f.cliDir, srv.URL).Installers()
+	return srv
+}
 
-	res, err := http.Get(srv.URL + "/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-
-	work := t.TempDir()
-	logPath := filepath.Join(work, "log")
+// run pipes script into sh the way the dashboard's command does.
+func (f *installFixture) run(script io.Reader, token, loginExit string, env ...string) (string, string, error) {
 	cmd := exec.Command("sh")
-	cmd.Stdin = res.Body
-	cmd.Env = []string{
+	cmd.Stdin = script
+	cmd.Env = append([]string{
 		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + work,
-		"REDROP_INSTALL_DIR=" + filepath.Join(work, "bin"),
-		"FAKE_LOG=" + logPath,
+		"HOME=" + f.work,
+		"REDROP_INSTALL_DIR=" + f.bin,
+		"FAKE_LOG=" + f.log,
 		"FAKE_LOGIN_EXIT=" + loginExit,
-	}
+	}, env...)
 	if token != "" {
 		cmd.Env = append(cmd.Env, "REDROP_TOKEN="+token)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
-	log, _ := os.ReadFile(logPath)
+	log, _ := os.ReadFile(f.log)
 	return string(log), stderr.String(), runErr
+}
+
+// binEntries lists the install directory, to catch leftover staged downloads.
+func (f *installFixture) binEntries(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(f.bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// runInstaller serves the real installer and a fake CLI build, then runs the
+// installer the way the dashboard's command does.
+func runInstaller(t *testing.T, token, loginExit string) (string, string, error) {
+	t.Helper()
+	f := newInstallFixture(t)
+	res, err := http.Get(f.serve(t, nil).URL + "/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	return f.run(res.Body, token, loginExit)
 }
 
 func TestInstallShLogsInWithToken(t *testing.T) {
@@ -166,5 +217,128 @@ func TestInstallShWithoutToken(t *testing.T) {
 	}
 	if strings.TrimSpace(log) != "argv:version env:unset" {
 		t.Errorf("installer without a token should only print the version:\n%s", log)
+	}
+}
+
+// The download is staged next to its destination and renamed into place, so
+// a successful install leaves only the binary behind.
+func TestInstallShLeavesOnlyTheBinary(t *testing.T) {
+	f := newInstallFixture(t)
+	res, err := http.Get(f.serve(t, nil).URL + "/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if _, stderr, err := f.run(res.Body, "", "0"); err != nil {
+		t.Fatalf("installer failed: %v\n%s", err, stderr)
+	}
+	if got := f.binEntries(t); !slices.Equal(got, []string{"redrop"}) {
+		t.Fatalf("install dir holds %q; want only redrop", got)
+	}
+	st, err := os.Stat(filepath.Join(f.bin, "redrop"))
+	if err != nil || st.Mode().Perm() != 0o755 {
+		t.Fatalf("installed binary: %v, mode %v", err, st.Mode())
+	}
+}
+
+// A download that does not match SHA256SUMS never replaces the installed
+// binary and leaves no staged file behind.
+func TestInstallShChecksumMismatch(t *testing.T) {
+	f := newInstallFixture(t)
+	f.writeSums(t, strings.Repeat("0", 64))
+	if err := os.MkdirAll(f.bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(f.bin, "redrop")
+	if err := os.WriteFile(old, []byte("previous build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.Get(f.serve(t, nil).URL + "/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	log, stderr, err := f.run(res.Body, "rdp_test-token", "0")
+	if err == nil || !strings.Contains(stderr, "checksum mismatch") {
+		t.Fatalf("installer = %v; want a checksum mismatch\n%s", err, stderr)
+	}
+	if log != "" {
+		t.Errorf("the unverified download ran:\n%s", log)
+	}
+	if got, _ := os.ReadFile(old); string(got) != "previous build" {
+		t.Errorf("installed binary was replaced: %q", got)
+	}
+	if got := f.binEntries(t); !slices.Equal(got, []string{"redrop"}) {
+		t.Fatalf("install dir holds %q; want only the previous redrop", got)
+	}
+}
+
+// Every prefix of the script that stops before its last line, as a cut-off
+// "curl | sh" would deliver, runs nothing: no download, no CLI, no files.
+func TestInstallShTruncatedRunsNothing(t *testing.T) {
+	f := newInstallFixture(t)
+	var requests atomic.Int32
+	srv := f.serve(t, &requests)
+	script := render(t, "install.sh.tmpl", srv.URL)
+	lines := strings.SplitAfter(script, "\n")
+	if last := lines[len(lines)-2]; last != "main \"$@\"\n" || lines[len(lines)-1] != "" {
+		t.Fatalf("script must end with the main call, got %q", last)
+	}
+	for i := range len(lines) - 2 {
+		prefix := strings.Join(lines[:i+1], "")
+		f.run(strings.NewReader(prefix), "rdp_test-token", "0")
+		if n := requests.Load(); n != 0 {
+			t.Fatalf("script cut after line %d made %d requests", i+1, n)
+		}
+		if _, err := os.Stat(f.log); err == nil {
+			t.Fatalf("script cut after line %d ran the CLI", i+1)
+		}
+		if _, err := os.Stat(f.bin); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("script cut after line %d created the install dir: %v", i+1, err)
+		}
+	}
+}
+
+// With an HTTPS base URL, curl refuses a redirect to plain HTTP. The
+// control run proves the TLS setup itself works.
+func TestInstallShRefusesHTTPSDowngrade(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl not available")
+	}
+	f := newInstallFixture(t)
+	var plainRequests atomic.Int32
+	plain := f.serve(t, &plainRequests)
+	var downgrade atomic.Bool
+	files := New(nil, f.cliDir, "").Installers()
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if downgrade.Load() {
+			http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusFound)
+			return
+		}
+		files.ServeHTTP(w, r)
+	}))
+	t.Cleanup(tlsSrv.Close)
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsSrv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := render(t, "install.sh.tmpl", tlsSrv.URL)
+
+	if _, stderr, err := f.run(strings.NewReader(script), "", "0", "CURL_CA_BUNDLE="+ca); err != nil {
+		t.Fatalf("install over HTTPS failed: %v\n%s", err, stderr)
+	}
+	if err := os.RemoveAll(f.bin); err != nil {
+		t.Fatal(err)
+	}
+	downgrade.Store(true)
+	_, stderr, err := f.run(strings.NewReader(script), "", "0", "CURL_CA_BUNDLE="+ca)
+	if err == nil || !strings.Contains(stderr, "download failed") {
+		t.Fatalf("installer = %v; want the downgraded download to fail\n%s", err, stderr)
+	}
+	if n := plainRequests.Load(); n != 0 {
+		t.Fatalf("curl followed the redirect to HTTP (%d requests)", n)
+	}
+	if _, err := os.Stat(filepath.Join(f.bin, "redrop")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a binary was installed: %v", err)
 	}
 }

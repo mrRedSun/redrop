@@ -646,9 +646,14 @@ paths and entry types.
 `redrop watch ID|URL PATH` reuses the update path, including the CLI's source
 construction, so `--render`, `--entry` and warnings behave as on `update` (the
 skipped-file count is not printed per publish). It debounces edits for 500ms by
-default, and publishes only changed content. The directory upload rule above
-applies. An explicitly named single file is not filtered. Uploads run one at
-a time, with one trailing publish for edits received during an upload.
+default, and publishes only changed content. Before announcing `watching`, it
+prepares the source once without uploading, so a source every publish would
+reject (a bad `--entry`, a folder with `--as html`) exits 2 with `share`'s
+message instead of at the first change. A tree that changes during that read,
+or an empty folder, is left to the watcher. Startup never publishes. The
+directory upload rule above applies. An explicitly named single file is not
+filtered. Uploads run one at a time, with one trailing publish for edits
+received during an upload.
 
 With `--json`, each publish or non-fatal notice is one compact JSON line.
 Events are `publish`, `retry`, `watch_error`, `root_vanished`,

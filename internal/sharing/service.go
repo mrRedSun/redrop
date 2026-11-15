@@ -53,9 +53,17 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		unlockIPLimiter: security.NewLimiter(60, time.Hour),
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
+		s.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// Close stops the rate limiters' background sweepers. The service stays
+// usable; call it once requests have drained, at shutdown.
+func (s *Service) Close() {
+	s.unlockLimiter.Close()
+	s.unlockIPLimiter.Close()
 }
 
 func mapStore(err error) error {

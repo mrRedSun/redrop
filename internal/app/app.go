@@ -93,7 +93,13 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	return a, nil
 }
 
-func (a *App) Close() error { return a.db.Close() }
+// Close releases what New built: the services' background goroutines,
+// then the database. Call it after Run has returned.
+func (a *App) Close() error {
+	a.Accounts.Close()
+	a.Sharing.Close()
+	return a.db.Close()
+}
 
 // Handler routes content-domain hosts to the content transport and every
 // other host to the API/dashboard.

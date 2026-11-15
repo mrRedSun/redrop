@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -46,7 +47,9 @@ password, and view limit stay the same.
 Edits are debounced (--debounce, default 500ms). Directory uploads use the
 skip rule listed under Share in "redrop guide"; explicitly named files are
 always uploaded. A watched .md file is re-rendered on each change (see
---render). Identical content never publishes a version. Each publish
+--render). PATH is checked once at startup, without uploading, so a source
+that share would reject (such as a bad --entry) exits 2 before watching
+starts. Identical content never publishes a version. Each publish
 prints the version number and time. With --json, each publish or typed
 notice (retry, watch_error, root_vanished, rewatch_failed, tree_changed,
 empty_folder) is one JSON line; retries include the upcoming attempt number
@@ -83,6 +86,9 @@ CLI's usual exit codes.`,
 				return err
 			}
 			src.OnSkipped = nil
+			if err := checkWatchSource(src); err != nil {
+				return err
+			}
 			c, err := newClient()
 			if err != nil {
 				return err
@@ -105,6 +111,26 @@ CLI's usual exit codes.`,
 	cf.register(cmd)
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
 	return cmd
+}
+
+// checkWatchSource prepares src once, the way every publish will, so a
+// source each publish would reject (a bad --entry, a folder with --as html)
+// exits at startup with share's message instead of at the first change.
+// Nothing is uploaded and warnings are left to the publishes. A tree that
+// changed while it was read, or an empty folder, is not an error: the
+// watcher waits for those to settle.
+func checkWatchSource(src *client.Source) error {
+	check := *src
+	check.Warn = nil
+	p, err := client.Prepare(&check)
+	switch {
+	case err == nil:
+		p.Close()
+		return nil
+	case errors.Is(err, client.ErrSourceChanged), errors.Is(err, client.ErrEmptyDirectory):
+		return nil
+	}
+	return mapErr(err)
 }
 
 // watchArtifact is client.Watch; tests replace it to inspect the source.

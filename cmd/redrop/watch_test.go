@@ -348,3 +348,135 @@ func TestWatchPassesRenderOptions(t *testing.T) {
 		}
 	})
 }
+
+// A source every publish would reject fails at startup, before the watcher
+// starts or the network is used, with the exit code and message share gives.
+func TestWatchRejectsBadSourceAtStartup(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	note := writeCLIFile(t, dir, "notes.md", "# Notes\n")
+	site := filepath.Join(dir, "site")
+	if err := os.MkdirAll(filepath.Join(site, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, site, "README.md", "# Readme\n")
+	writeCLIFile(t, filepath.Join(site, ".git"), "notes.md", "# Hidden\n")
+
+	started := false
+	orig := watchArtifact
+	watchArtifact = func(context.Context, client.Uploader, string, *client.Source, client.WatchOptions) error {
+		started = true
+		return nil
+	}
+	t.Cleanup(func() { watchArtifact = orig })
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		message string
+	}{
+		{"missing entry", []string{site, "--render", "markdown", "--entry", "missing.md"}, "--entry missing.md"},
+		{"skipped entry", []string{site, "--render", "markdown", "--entry", ".git/notes.md"}, "excluded from folder uploads"},
+		{"folder without entry", []string{site, "--render", "markdown"}, "requires --entry"},
+		{"entry on a single file", []string{note, "--entry", "other.md"}, "rendered Markdown uses --entry index.html"},
+		{"folder as html", []string{site, "--as", "html"}, "is a directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(command ...string) error {
+				var err error
+				captureCLIOutput(t, func() {
+					cmd := newRootCmd()
+					cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token"}, command...))
+					err = cmd.Execute()
+				})
+				return err
+			}
+			started = false
+			watchErr := run(append([]string{"watch", "artifact-id"}, tc.args...)...)
+			requireExitCode(t, watchErr, exitUsage)
+			if started {
+				t.Fatal("the watcher started for a source every publish rejects")
+			}
+			if !strings.Contains(watchErr.Error(), tc.message) {
+				t.Fatalf("error = %q; want %q", watchErr, tc.message)
+			}
+			shareErr := run(append([]string{"share"}, tc.args...)...)
+			requireExitCode(t, shareErr, exitUsage)
+			if watchErr.Error() != shareErr.Error() {
+				t.Fatalf("watch error %q differs from share error %q", watchErr, shareErr)
+			}
+		})
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("bad sources made %d requests; want none", got)
+	}
+}
+
+// A valid source, or a folder that is empty for now, still starts the real
+// watcher and prints "watching"; nothing is published at startup.
+func TestWatchValidSourcePrintsWatching(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	page := writeCLIFile(t, dir, "page.html", "<h1>Page</h1>")
+	site := filepath.Join(dir, "site")
+	empty := filepath.Join(dir, "empty")
+	for _, d := range []string{site, empty} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCLIFile(t, site, "README.md", "# Readme\n")
+
+	orig := watchArtifact
+	t.Cleanup(func() { watchArtifact = orig })
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"html file", []string{page}},
+		{"markdown folder with an entry", []string{site, "--render", "markdown", "--entry", "README.md"}},
+		{"empty folder", []string{empty}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Only a hang guard; the watch stops as soon as it is ready.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			ready := false
+			watchArtifact = func(ctx context.Context, up client.Uploader, id string, src *client.Source, opts client.WatchOptions) error {
+				announce := opts.OnReady
+				opts.OnReady = func() {
+					announce()
+					ready = true
+					cancel()
+				}
+				return client.Watch(ctx, up, id, src, opts)
+			}
+			_, errOut := captureCLIOutput(t, func() {
+				cmd := newRootCmd()
+				cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifact-id"}, tc.args...))
+				if err := cmd.ExecuteContext(ctx); err != nil {
+					t.Fatalf("watch returned %v; want success", err)
+				}
+			})
+			if !ready || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				t.Fatalf("watch did not become ready; stderr=%q", errOut)
+			}
+			if want := "watching " + tc.args[0] + " -> artifact-id"; !strings.HasPrefix(errOut, want) {
+				t.Fatalf("stderr = %q; want it to start with %q", errOut, want)
+			}
+		})
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("starting watch made %d requests; want none", got)
+	}
+}

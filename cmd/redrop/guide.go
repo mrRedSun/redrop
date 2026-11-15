@@ -224,8 +224,10 @@ on a page with an agent. Edits settle first (--debounce, default 500ms).
 The folder rules in Share apply; explicitly named files are still
 uploaded. --render, --entry, --as, --spa and --note work as on update, so a
 watched .md file is re-rendered on each change and --render none keeps it
-raw. Warnings print on stderr; the skipped-file count does not. Identical
-content publishes nothing. Each publish prints its
+raw. Warnings print on stderr; the skipped-file count does not. PATH is
+checked once at startup, without uploading: a source that share would
+reject, such as a bad --entry, exits 2 with share's message before
+"watching" is printed. Identical content publishes nothing. Each publish prints its
 version number and time. With --json, each publish or non-fatal notice is
 one JSON line:
 
