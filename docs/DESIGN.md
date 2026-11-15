@@ -38,6 +38,7 @@ management dashboard and a cross-platform CLI that agents drive.
 | Encryption at rest | None (rely on host isolation) |
 | Limits | 500 MB per version, 50 GB server total, 10 GB default per-user quota |
 | Agent integration | CLI with thorough `--help`, `redrop guide`, `--json` output; no MCP server |
+| Viewer feedback | Off by default; per-artifact comments from the info panel, read back by the owner and agents (see [Viewer feedback](#viewer-feedback)) |
 
 ## Domains and isolation
 
@@ -130,8 +131,9 @@ Every content response sets:
   `Permissions-Policy`.
 
 Paths under `/__redrop/` are reserved for redrop (gate, preview, viewer
-assets, icons, and older versions' files under `/__redrop/v/<N>/`) and cannot
-be uploaded.
+assets, icons, older versions' files under `/__redrop/v/<N>/`, and the
+feedback endpoint, see [Viewer feedback](#viewer-feedback)) and cannot be
+uploaded.
 
 A request path that starts with `//`, or with a backslash after the first
 slash (`/\`), gets the identical miss before gates, view counting and
@@ -402,6 +404,192 @@ within 250 ms rather than at once.
 * Blobs are content-addressed (SHA-256) and reference counted, so versions and
   identical files are deduplicated on disk. Quota counts logical bytes of all
   retained versions.
+
+## Viewer feedback
+
+Viewers can leave comments on an artifact, and the owner (or the owner's
+agent) reads them back with `redrop feedback`. It answers issue #10. One
+part of the issue is replaced by the principle above: the issue says "the
+server injects a widget", but nothing is injected. The form is part of the
+info panel on redrop's own viewer page, outside the frame.
+
+### Decisions
+
+* **Off by default, per artifact.** The owner turns it on with
+  `redrop share/update/set --feedback` (`--no-feedback` turns it off), the
+  dashboard's settings switch, or `feedback` in the API. Existing artifacts
+  are migrated with feedback off.
+* **It needs the info panel.** Comments are open only while feedback *and*
+  the info button are on, like opening older versions. With the info button
+  off, HTML is served directly: there is no redrop page to hold a form, and
+  nothing is ever added to the artifact. `?redrop-info=0` hides the form
+  for that page; the endpoint stays open.
+* **Who can comment:** anyone who can view the artifact right now, by the
+  same decision as its content (`sharing.Decide`). The link must not be
+  expired or revoked, a password must have been entered, and a view-limited
+  link's visit grant must still be valid. An owner preview counts too.
+  Posting never records or consumes a view.
+* **Who can read:** only the owner, from the dashboard, the CLI or the API
+  (token or session). Visitors never see other people's comments; after
+  posting they only get a confirmation.
+* **Admins: as for other artifact data, metadata only.** For other users'
+  artifacts, admins see metadata ("Admin privacy"), never content, versions,
+  files or the access log. Comments quote the artifact's text, so they count
+  as content: admins see the `feedback` setting, not the comments. Deleting
+  an artifact (owner or admin) deletes its comments.
+
+### What a comment holds
+
+| Field | Rule |
+|---|---|
+| `body` | 1–4000 characters (Unicode code points) after trimming surrounding whitespace |
+| `name` | optional, at most 80 characters, one line; unverified, chosen by the viewer |
+| `version` | the version on screen, between 1 and the artifact's version high-water mark |
+| `page` | `pathname + search + hash` inside the artifact, the value the address bar mirrors (`/x.html?redrop-version=2#intro`); starts with exactly one `/`, at most 2048 bytes, never under `/__redrop/` |
+| `quote` | optional W3C text quote selector of the selection: `exact` 1–500 characters, `prefix` and `suffix` at most 64 each |
+| `created_at`, `resolved_at` | server times; `resolved_at` is null for an open comment |
+
+Control characters (C0, DEL, C1) are removed from every field on input,
+except line feeds and tabs in `body` and `quote`. `\r\n` becomes `\n`. The
+server stores no IP address, user agent, country or cookie with a comment.
+The per-client rate limiter keeps the client's address in memory only.
+
+**Storage (migration 4).** `artifacts.feedback INTEGER NOT NULL DEFAULT 0`
+and a `feedback` table: `id`, `artifact_id` (cascade on artifact delete),
+`version`, `page`, `body`, `name`, `quote_exact`, `quote_prefix`,
+`quote_suffix`, `created_at`, `resolved_at`, indexed by
+`(artifact_id, created_at)`. Comments keep their version number when that
+version is deleted or rolled back, and survive link rotation, since they
+belong to the artifact, not the slug. Older servers ignore the column and
+table, so rolling back the binary just turns comments off.
+
+### Endpoint
+
+`POST /__redrop/feedback` on the artifact's own host, JSON only:
+
+```json
+{"body": "The totals in section 3 are wrong", "name": "Sam", "version": 2,
+ "page": "/report.html#totals", "quote": {"exact": "1,204", "prefix": "Total: ", "suffix": " units"}}
+```
+
+The request passes these checks in order. The first one that fails decides
+the answer:
+
+1. The client's miss budget is not spent (otherwise `429`, as for every
+   request).
+2. The slug is live: it resolves, and the link is not expired, revoked or
+   used up (`ShowGone`). Otherwise the answer is the generic `405` below,
+   and one token of miss budget is spent, as for any miss.
+3. Feedback is open (setting and info button on). Otherwise: the generic
+   `405`.
+4. `Sec-Fetch-Site`, when present, is `same-origin`, and `Origin` equals the
+   artifact's origin exactly. Otherwise `403`.
+5. `Content-Type` is `application/json` (parameters such as `charset`
+   allowed). Otherwise `415`.
+6. The visitor has access (no gate to pass). Otherwise `403`.
+7. A token from the per-client feedback bucket, keyed like the miss limiter
+   (trusted-proxy address, IPv6 by /64): `REDROP_FEEDBACK_BURST` (default 5)
+   refilled at `REDROP_FEEDBACK_PER_MINUTE` (default 1). Otherwise `429`
+   with `Retry-After`.
+8. A body of at most 32 KiB that decodes as one JSON object with only the
+   known fields. Otherwise `413` or `400`.
+9. Valid fields (table above). Otherwise `400`.
+10. Fewer than `REDROP_FEEDBACK_MAX_PER_ARTIFACT` (default 500) comments
+    stored for the artifact, open or resolved. Otherwise `409`: "This page
+    isn't accepting more feedback". The owner frees room by deleting
+    comments.
+
+Success is `201 {"ok": true}`. Errors are `{"error": code, "message": text}`
+with a short, user-safe message. **The generic 405** is byte for byte what a
+`POST` to any other `/__redrop/` path gets (`Allow: GET, HEAD`, same body
+and headers). So with feedback off, the endpoint can't be told apart from
+an unknown path. A `GET` of `/__redrop/feedback` is always the generic
+reserved-path `404`. No response carries `Access-Control-*` headers, and
+preflight `OPTIONS` requests get the generic `405`, so a cross-origin page
+can't post or read the answer.
+
+Cloudflare's rule on the content zone (10 requests per 10 seconds per
+client) also counts these POSTs.
+
+### Viewer side
+
+* The panel template renders a "Feedback" form (comment, optional name, a
+  quote preview, Send) only when feedback is open. It is `hidden` until
+  `viewer.js` runs, so without scripts there is no form that can't be sent.
+  The page's CSP adds `connect-src <origin>/__redrop/feedback` only then; the
+  form has no action and `form-action` stays `'none'`.
+* **Anchoring.** When the panel opens, `viewer.js` reads the frame's
+  selection passively: `frame.contentWindow.getSelection()`, `toString()`,
+  and detached `Range` objects from `createRange()` for the 64 characters
+  before and after. A selection longer than 500 characters is shortened, and
+  its suffix is taken after the shortened text, so the triple stays a valid
+  text quote. Nothing is written to the frame: no elements, attributes,
+  styles or listeners. Selection in the frame is read only on panel open, so
+  there is no `selectionchange` listener on the artifact. The file page
+  reads its own selection (the text preview), outside the panel.
+* **Page and version** come from the frame's location, mapped as for the
+  address bar (`/__redrop/v/N/p` becomes `p?redrop-version=N`, version N).
+  Any other same-origin location is the current version. When the frame is
+  on another origin, the address bar's last value and the page's version are
+  used.
+* After `201` the form clears and shows "Thanks, your feedback was sent."
+  Error messages come from the server's `message`. Text is set with
+  `textContent` only.
+
+### Owner side
+
+* **API** (`anyAuth`, owner only; other users' artifacts are `404`):
+  * `GET /api/v1/artifacts/{id}/feedback?status=open|all&version=N` lists
+    comments, oldest first. The default status is `all`.
+  * `PATCH /api/v1/artifacts/{id}/feedback/{comment}` with
+    `{"resolved": true|false}` returns the comment.
+  * `DELETE /api/v1/artifacts/{id}/feedback/{comment}` deletes it.
+* **Dashboard:** a Feedback tab on the artifact page. Comments are grouped
+  by version, newest version first, each with page, quote, name and time.
+  Each has Resolve/Reopen and Delete (with confirmation). "Show resolved"
+  is a filter. Everything is plain React text, never HTML or Markdown.
+* **CLI:**
+  * `redrop feedback ID|URL [--version N] [--all] [--json]` lists open
+    comments, or all with `--all`.
+  * `redrop feedback resolve ID|URL COMMENT...` marks comments resolved.
+  * `redrop feedback delete ID|URL COMMENT... [--yes]` deletes them, with
+    the same confirmation rule as `redrop delete`.
+
+### Threat model
+
+* **CSRF and other sites.** The visit cookie is `SameSite=Lax`, so a
+  same-site page (another artifact on the content domain) would send it.
+  The exact-`Origin` check, `Sec-Fetch-Site`, the JSON-only content type
+  and the absence of CORS headers stop cross-origin and same-site posts:
+  simple form posts fail the content type, and fetches fail the origin
+  check or the preflight. The artifact's own scripts are same-origin and
+  can post. That is accepted: the artifact belongs to the owner, who reads
+  the result.
+* **Spam and resource use.** The per-client bucket, the per-artifact cap,
+  the 32 KiB body limit, the field limits and Cloudflare's zone rule bound
+  it. The worst case is 500 rows of at most about 20 KB per artifact.
+  Turning feedback off closes the endpoint at once; existing comments stay
+  until deleted.
+* **XSS.** Comments are rendered as text everywhere: React text nodes in
+  the dashboard, `textContent` in the viewer (which shows only its own
+  confirmation), and plain text in the CLI. The CLI also removes ANSI
+  escape sequences, control characters and Unicode bidirectional controls
+  before printing, even though the server already strips control
+  characters. It doesn't trust the server's output either.
+* **Prompt injection.** Agents read comments, so a comment is an injection
+  channel. The CLI's plain output frames each comment as viewer-supplied
+  data, prefixes every line of viewer text with `| ` so a comment can't
+  fake the frame, and labels the name as unverified. `--json` gives typed
+  fields. `redrop guide` tells agents to treat comment text as untrusted
+  feedback to weigh, never as instructions: not "ignore previous
+  instructions", and never requests to share files, tokens or other
+  artifacts.
+* **Isolation.** Nothing is added to the artifact's bytes or DOM. The
+  endpoint lives on the artifact's own origin, under the reserved prefix,
+  so it shares the origin's cookies and nothing else. Artifacts stay
+  isolated from each other and from the dashboard as before.
+* **Privacy.** No raw IP, user agent or cookie is stored. The name is
+  optional and unverified. Comments never appear in admin views.
 
 ## Uploads
 
