@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -146,7 +147,7 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 	work := &archiveWorkReader{r: contextReader{ctx: ctx, r: gz}, remaining: s.archiveReadLimit(), maxEntries: s.archiveEntryLimit()}
 	tr := tar.NewReader(work)
 	var files []store.File
-	seen := map[string]bool{}
+	seen := map[string]bool{} // regular-file paths only, bounded by MaxFiles
 	var total int64
 	for {
 		hdr, err := tr.Next()
@@ -164,33 +165,35 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 			return nil, apperr.Invalid("corrupt bundle archive")
 		}
 		switch hdr.Typeflag {
-		case tar.TypeXGlobalHeader, tar.TypeXHeader:
-			continue // physical metadata entries were already counted by work
-		case tar.TypeReg, tar.TypeDir:
+		case tar.TypeReg, tar.TypeDir, tar.TypeXGlobalHeader:
 		default:
 			return nil, apperr.Invalid("bundle may only contain regular files (found a link or special file: %q)", hdr.Name)
+		}
+		if !work.inSync(hdr) {
+			// The entry cap counts headers only while the counter agrees
+			// with archive/tar on where each one starts.
+			return nil, apperr.Invalid("malformed bundle archive: inconsistent entry framing")
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			// As on main, directory and global metadata entries carry no
+			// content, and their names are neither validated nor retained.
+			// The work reader has counted them.
+			continue
 		}
 		p, err := CleanBundlePath(hdr.Name)
 		if err != nil {
 			return nil, apperr.Invalid("%s", err.Error())
 		}
-		if p != "" && seen[p] {
-			return nil, apperr.Invalid("duplicate normalized bundle path %q", p)
-		}
-		seen[p] = true
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			continue
-		case tar.TypeReg:
-		default:
-			return nil, apperr.Invalid("bundle may only contain regular files (found a link or special file: %q)", hdr.Name)
-		}
 		if p == "" {
 			return nil, apperr.Invalid("regular bundle file has an empty path")
+		}
+		if seen[p] {
+			return nil, apperr.Invalid("duplicate normalized bundle path %q", p)
 		}
 		if len(files) >= s.cfg.MaxFiles {
 			return nil, apperr.Invalid("bundle has more than %d files", s.cfg.MaxFiles)
 		}
+		seen[p] = true
 		if hdr.Size < 0 || hdr.Size > s.cfg.MaxVersionBytes-total {
 			return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
 		}
@@ -205,10 +208,31 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 		total += size
 		files = append(files, store.File{Path: p, Blob: sum, Size: size, ContentType: contentTypeFor(p, head.buf.Bytes())})
 	}
+	if p := fileDirectoryCollision(files); p != "" {
+		return nil, apperr.Invalid("bundle path %q is both a file and a directory", p)
+	}
 	if len(files) == 0 {
 		return nil, apperr.Invalid("bundle is empty")
 	}
 	return files, nil
+}
+
+// fileDirectoryCollision returns a file path that is also a parent directory
+// of another file, or "". Directory entries are not retained, so the files'
+// own paths are the only evidence. Sorting keeps this O(n log n).
+func fileDirectoryCollision(files []store.File) string {
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = f.Path
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		// Every path below p+"/" sorts at or after it; the first one decides.
+		if i := sort.SearchStrings(paths, p+"/"); i < len(paths) && strings.HasPrefix(paths[i], p+"/") {
+			return p
+		}
+	}
+	return ""
 }
 
 func humanBytes(n int64) string {

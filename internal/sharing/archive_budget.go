@@ -27,13 +27,16 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 // archiveWorkReader sees raw tar blocks before archive/tar hides PAX and GNU
-// extension headers. It counts every physical header, not just returned files.
-// archive/tar remains responsible for checksums, names, formats and semantics.
+// extension headers. It counts every non-metadata header (files, directories,
+// links), bounds runs of metadata headers, and charges every byte read.
+// archive/tar remains responsible for checksums, names, formats and semantics;
+// inSync checks after each returned header that both agree on the framing.
 type archiveWorkReader struct {
 	r            io.Reader
 	remaining    int64
 	maxEntries   int
-	entries      int
+	entries      int // non-metadata entries only
+	metadataRun  int // consecutive metadata headers
 	header       [512]byte
 	headerBytes  int
 	bodyLeft     int64 // includes padding to the next physical tar header
@@ -47,7 +50,7 @@ func (r *archiveWorkReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if r.remaining == 0 {
+	if r.remaining <= 0 {
 		return 0, apperr.TooLarge("bundle exceeds the decompression work byte limit")
 	}
 	nmax := min(int64(len(p)), r.remaining)
@@ -77,15 +80,23 @@ func (r *archiveWorkReader) Read(p []byte) (int, error) {
 	if r.headerBytes == len(r.header) {
 		r.headerBytes = 0
 		if r.header != [512]byte{} {
-			r.entries++
-			if r.entries > r.maxEntries {
-				return 0, apperr.TooLarge("bundle has more than %d archive entries, including metadata and directories", r.maxEntries)
+			kind := r.header[156]
+			if isArchiveMetadata(kind) {
+				r.metadataRun++
+				if r.metadataRun > maxConsecutiveMetadata {
+					return 0, apperr.TooLarge("bundle has more than %d consecutive metadata headers", maxConsecutiveMetadata)
+				}
+			} else {
+				r.metadataRun = 0
+				r.entries++
+				if r.entries > r.maxEntries {
+					return 0, apperr.TooLarge("bundle has more than %d archive entries, excluding metadata", r.maxEntries)
+				}
 			}
 			size, ok := tarPhysicalSize(r.header[124:136])
 			if !ok {
 				return 0, apperr.Invalid("invalid archive entry size")
 			}
-			kind := r.header[156]
 			switch kind {
 			case tar.TypeXHeader, tar.TypeXGlobalHeader, tar.TypeGNULongName:
 				// Go's tar parser uses the same 1 MiB metadata ceiling. Inspect
@@ -162,6 +173,37 @@ func (r *archiveWorkReader) finishMetadata() error {
 	return nil
 }
 
+// maxConsecutiveMetadata bounds PAX, global and GNU long-name headers in a
+// row. Writers emit at most a few before each entry; they are not counted as
+// entries, so PAX-format archives get the same entry cap as others.
+const maxConsecutiveMetadata = 16
+
+func isArchiveMetadata(kind byte) bool {
+	return kind == tar.TypeXHeader || kind == tar.TypeXGlobalHeader || kind == tar.TypeGNULongName || kind == tar.TypeGNULongLink
+}
+
+// inSync reports whether this counter and archive/tar agree on the framing
+// of the header tar.Reader just returned. archive/tar does not read ahead, so
+// after Next the counter must be exactly at the start of that entry's body.
+// The counter re-implements only enough of tar to find headers; any layout
+// where it would disagree (name precedence, prefixes, odd metadata) must be
+// refused here, or later headers could pass uncounted as body bytes.
+func (r *archiveWorkReader) inSync(hdr *tar.Header) bool {
+	if r.headerBytes != 0 {
+		return false
+	}
+	switch hdr.Typeflag {
+	case tar.TypeReg:
+		return hdr.Size >= 0 && hdr.Size <= (1<<63-1)-511 && r.bodyLeft == (hdr.Size+511)/512*512
+	case tar.TypeDir:
+		return r.bodyLeft == 0
+	case tar.TypeXGlobalHeader:
+		// archive/tar has read the PAX records; only padding remains.
+		return r.bodyLeft >= 0 && r.bodyLeft < 512
+	}
+	return false
+}
+
 func tarPhysicalSize(field []byte) (int64, bool) {
 	if field[0]&0x80 != 0 { // positive GNU base-256, sign bit is the next bit
 		if field[0] != 0x80 {
@@ -184,11 +226,11 @@ func tarPhysicalSize(field []byte) (int64, bool) {
 }
 
 func (s *Service) archiveEntryLimit() int {
-	// The independent physical-entry cap allows directory and PAX headers while
+	// The independent entry cap allows a directory per file and more, while
 	// preventing empty entries from scaling work with compressed input size.
 	return max(128, 4*s.cfg.MaxFiles)
 }
 func (s *Service) archiveReadLimit() int64 {
-	// 4 KiB per physical entry for headers/padding/metadata, plus 1 MiB slack.
+	// 4 KiB per entry for headers/padding/metadata, plus 1 MiB slack.
 	return s.cfg.MaxVersionBytes + int64(s.archiveEntryLimit())*4096 + 1<<20
 }

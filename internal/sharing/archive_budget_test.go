@@ -246,6 +246,7 @@ func TestArchiveWorkBudget(t *testing.T) {
 					bodies = append(bodies, nil)
 				}
 			case "metadata":
+				want = "metadata headers"
 				for range 200 {
 					headers = append(headers, tar.Header{Name: "pax", Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": "bounded metadata"}})
 					bodies = append(bodies, nil)
