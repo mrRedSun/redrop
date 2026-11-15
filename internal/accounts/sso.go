@@ -172,8 +172,21 @@ func (s *Service) BeginSSO(ctx context.Context, network, providerID, mode string
 // identity would open admin sessions without the identity provider's checks
 // ever applying to this account.
 func (s *Service) mayLink(current *Principal) error {
+	return s.adminSSOFor(current, "to link another sign-in to an admin account, first sign in with single sign-on")
+}
+
+// mayUnlink applies the same rule to removing an identity: from a password
+// session, someone with only the admin's password could otherwise remove
+// the account's single sign-on, which that session could not link back.
+func (s *Service) mayUnlink(current *Principal) error {
+	return s.adminSSOFor(current, "to unlink a sign-in from an admin account, first sign in with single sign-on")
+}
+
+// adminSSOFor refuses a change to an admin account's identities from a
+// session that is not single sign-on, while admin actions require it.
+func (s *Service) adminSSOFor(current *Principal, msg string) error {
 	if s.cfg.AdminRequiresSSO && current.user.Role == api.RoleAdmin && current.method != MethodOIDC {
-		return apperr.Forbidden("to link another sign-in to an admin account, first sign in with single sign-on")
+		return apperr.Forbidden("%s", msg)
 	}
 	return nil
 }

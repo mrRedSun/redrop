@@ -172,8 +172,12 @@ func (s *Service) Identities(ctx context.Context, p *Principal) ([]Identity, err
 	return out, nil
 }
 
-// UnlinkIdentity refuses to remove the last sign-in method.
+// UnlinkIdentity refuses to remove the last sign-in method, and follows the
+// admin single sign-on rule (mayUnlink).
 func (s *Service) UnlinkIdentity(ctx context.Context, p *Principal, id string) error {
+	if err := s.mayUnlink(p); err != nil {
+		return err
+	}
 	if p.user.PasswordHash == "" {
 		list, err := s.db.ListIdentities(ctx, p.user.ID)
 		if err != nil {

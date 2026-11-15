@@ -180,6 +180,22 @@ func (b *browser) get(target string) *http.Response {
 	return resp
 }
 
+// send makes a cookie-authenticated write (with the CSRF header) to the app.
+func (b *browser) send(method, path string) *http.Response {
+	b.h.t.Helper()
+	req, _ := http.NewRequest(method, b.h.srv.URL+path, nil)
+	req.Header.Set("X-Redrop-Request", "1")
+	for _, c := range b.cookies {
+		req.AddCookie(c)
+	}
+	resp, err := b.h.srv.Client().Do(req)
+	if err != nil {
+		b.h.t.Fatal(err)
+	}
+	b.h.t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
 // sso runs a whole single sign-on round trip in mode and returns the final
 // redirect from the app (the IdP step is skipped when the start refuses).
 func (b *browser) sso(mode string) *http.Response {
@@ -291,6 +307,51 @@ func TestAdminSSOCannotBeBypassedByLinking(t *testing.T) {
 		t.Error("step 5: SSO login as mallory set a session cookie")
 	}
 	status(fresh.get("/api/v1/admin/users"), 401, "step 5: admin API in mallory's browser")
+}
+
+// Review 26 m-C: while admin SSO is required, a password session cannot
+// unlink an admin account's identity either, since it could not link it
+// back. An SSO session can.
+func TestAdminSSOCannotBeRemovedByUnlinking(t *testing.T) {
+	h, idp := newSSOHarness(t)
+	h.setupAdmin()
+	bob := h.inviteUser("bob")
+	b := h.browser(bob.session)
+	idp.setUser("bob-at-idp")
+	if r := b.sso("link"); r.Header.Get("Location") != "/account?linked=1" {
+		t.Fatalf("a regular user links: %d %q", r.StatusCode, r.Header.Get("Location"))
+	}
+	if _, err := h.app.db.DB.Exec(`UPDATE users SET role = 'admin' WHERE id = ?`, bob.id); err != nil {
+		t.Fatal(err)
+	}
+	identities := func(b *browser) []api.Identity {
+		t.Helper()
+		r := b.get("/api/v1/me/identities")
+		expectStatus(t, r, 200, "identities")
+		return decode[api.IdentityList](t, r).Items
+	}
+	ids := identities(b)
+	if len(ids) != 1 {
+		t.Fatalf("identities: %+v", ids)
+	}
+
+	r := b.send("DELETE", "/api/v1/me/identities/"+ids[0].ID)
+	expectStatus(t, r, 403, "unlink from an admin password session")
+	if got := body(r); !strings.Contains(got, "first sign in with single sign-on") {
+		t.Fatalf("refusal: %s", got)
+	}
+	if len(identities(b)) != 1 {
+		t.Fatal("the identity was removed")
+	}
+
+	sso := h.browser(nil)
+	if r := sso.sso("login"); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/" {
+		t.Fatalf("SSO login with the identity: %d %q", r.StatusCode, r.Header.Get("Location"))
+	}
+	expectStatus(t, sso.send("DELETE", "/api/v1/me/identities/"+ids[0].ID), 200, "unlink from an admin SSO session")
+	if len(identities(sso)) != 0 {
+		t.Fatal("the identity is still linked")
+	}
 }
 
 // The callback re-checks the rule: a link started by a regular user whose

@@ -560,7 +560,9 @@ inside their containers on narrow screens. The document is readable without JS.
   identity only from an SSO session; the start and the callback both check
   it. A new identity linked from a password session would otherwise open
   admin sessions without the identity provider's checks ever applying to
-  the account. An admin who has only a password gets SSO by accepting an
+  the account. Unlinking follows the same rule: from a password session,
+  someone with only the admin's password could otherwise remove the
+  account's single sign-on, which that session could not link back. An admin who has only a password gets SSO by accepting an
   admin invite (`redrop-server invite --admin`) through single sign-on, or
   by linking before the setting is turned on.
 
