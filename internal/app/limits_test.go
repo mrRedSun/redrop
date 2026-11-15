@@ -97,3 +97,31 @@ func TestPerClientLimitersGroupIPv6(t *testing.T) {
 	expectStatus(t, unlock(addr(400)), 429, "sixth artifact password from the same /64")
 	expectStatus(t, unlock("2001:db8:79::1"), 401, "artifact password from another /64")
 }
+
+// Security review A4 through the whole server: requests shaped like
+// Cloudflare Worker subrequests ("<forged>, <Worker egress>, <edge>", from
+// the reverse proxy) with a new forged value each time. With
+// REDROP_TRUSTED_HOPS=2 they all count as the Worker egress address and
+// share one bucket; the old walk over trusted CDN ranges gives each forged
+// value its own.
+func TestTrustedHopsDefeatForgedForwardedFor(t *testing.T) {
+	worker := func(i int) string { return fmt.Sprintf("198.51.100.%d, 2a06:98c0:3600::103, 172.70.1.1", i%250+1) }
+	lookups := func(h *harness) map[int]int {
+		counts := map[int]int{}
+		for i := range 61 {
+			counts[h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", worker(i)).StatusCode]++
+		}
+		return counts
+	}
+
+	t.Setenv("REDROP_TRUSTED_PROXIES", "127.0.0.1/32,172.64.0.0/13,2a06:98c0::/29")
+	if got := lookups(newHarness(t)); got[200] != 61 {
+		t.Fatalf("walk over CDN ranges: %v, want every forged value let through", got)
+	}
+
+	t.Setenv("REDROP_TRUSTED_PROXIES", "127.0.0.1/32") // the reverse proxy only
+	t.Setenv("REDROP_TRUSTED_HOPS", "2")
+	if got := lookups(newHarness(t)); got[200] != 60 || got[429] != 1 {
+		t.Fatalf("two trusted hops: %v, want 60 lookups for the one Worker address, then 429", got)
+	}
+}

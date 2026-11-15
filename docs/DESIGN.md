@@ -105,9 +105,8 @@ aloud and typed. Older slugs keep working forever and are not migrated.
 * Misses are limited per client: a token bucket of `REDROP_CONTENT_MISS_BURST`
   (default 30) refilled at `REDROP_CONTENT_MISS_PER_MINUTE` (default 5). The
   client is the trusted-proxy-resolved address (`REDROP_TRUSTED_PROXIES`,
-  `REDROP_CLIENT_IP_HEADER`, e.g. `CF-Connecting-IP` or Traefik's
-  `X-Forwarded-For`), never a proxy's socket address; IPv6 clients are
-  grouped by /64. At most 100,000 clients are tracked.
+  `REDROP_CLIENT_IP_HEADER`, `REDROP_TRUSTED_HOPS`; see "Rate limits"),
+  never a proxy's socket address; IPv6 clients are grouped by /64. At most 100,000 clients are tracked.
 * Hits never spend budget, so normal use is not throttled however much it
   loads. A client that has spent its budget gets `429` with `Retry-After` for
   **every** artifact-host request, hits included, until a token refills. If
@@ -589,17 +588,53 @@ token or password appears.
   one-time link lookups, artifact passwords, content misses) keys on
   `netutil.Network`: the trusted-proxy-resolved address, with IPv6 grouped
   by /64, so one host cannot rotate through its /64 to reset them.
-* **Trusted proxies.** With `X-Forwarded-For`, the client is the first
-  untrusted hop from the right. A range in `REDROP_TRUSTED_PROXIES` that
-  covers a whole CDN makes that spoofable: a CDN worker sends requests from
-  inside the range with any `X-Forwarded-For`, and the walk skips both its
-  hop and the edge's. Behind Cloudflare the supported setup is
-  `REDROP_CLIENT_IP_HEADER=CF-Connecting-IP` with only the reverse proxy
-  trusted, and an origin that only Cloudflare can reach (otherwise a direct
-  request through the proxy can forge the header). The server logs a
-  startup warning for a trusted range wider than a /24 (IPv4) or a /48
-  (IPv6) with `X-Forwarded-For`. The account backoff above does not depend
-  on client addresses, so it holds even when they are spoofed.
+* **Trusted proxies.** Forwarded headers count only on requests whose
+  socket peer is in `REDROP_TRUSTED_PROXIES`. Without a hop count, the
+  client is the first `X-Forwarded-For` entry from the right that is not a
+  trusted address. A trusted range that covers a whole CDN makes that
+  spoofable: a CDN worker sends requests from inside the range with any
+  `X-Forwarded-For`, and the walk skips both its hop and the edge's. The
+  server logs a startup warning in this mode for a trusted range wider than
+  a /24 (IPv4) or a /48 (IPv6) with `X-Forwarded-For`. The account backoff
+  below does not depend on client addresses, so it holds even when they
+  are spoofed.
+* **Trusted hops.** `REDROP_TRUSTED_HOPS=N` reads the entry exactly N from
+  the right instead (`netutil.ClientResolver.fromHops`). It is the only
+  safe setting when the origin stays reachable without the CDN, so
+  `CF-Connecting-IP` can't be trusted. The production chain is client,
+  Cloudflare, Traefik, redrop, with `N=2`:
+  * **What the proxies do.** Cloudflare's documentation: with no
+    `X-Forwarded-For`, it sets one with the connecting address (equal to
+    `CF-Connecting-IP`); with one, it appends the connecting address.
+    Traefik v3 (`forwardedheaders` middleware and its proxy, read in the
+    source): from a source in `forwardedHeaders.trustedIPs` it keeps the
+    header and appends the source address; from any other source it deletes
+    every `X-Forwarded-*` header, then appends the source address, so the
+    header holds that one address. `notAppendXForwardedFor: true` would
+    stop the append and change the count.
+  * **Visitor through Cloudflare:** `[anything the visitor sent], visitor,
+    edge`. Position 2 is the visitor, written by Cloudflare.
+  * **Cloudflare Worker:** `[anything the Worker set], Worker egress,
+    edge`. Position 2 is written by Cloudflare. For cross-zone Worker
+    subrequests Cloudflare documents `CF-Connecting-IP: 2a06:98c0:3600::103`;
+    that the appended entry is the same address is the review's reading of
+    the documentation and was not exercised against Cloudflare. Either way
+    the entry is Cloudflare's, not the Worker's, so all Workers share one
+    bucket.
+  * **Direct to Traefik, skipping Cloudflare:** the source is untrusted, so
+    Traefik replaces the header with the source address. One entry, fewer
+    than N: the leftmost (and only) entry is the real peer.
+  * **Fallbacks.** No header, or an entry that is not an IP address at the
+    chosen position, gives the socket peer (Traefik): such requests share
+    Traefik's bucket rather than choosing their own.
+  * **Requirements.** N must match the chain exactly. Too large, and a
+    visitor's own entry is read (spoofable); too small, and the edge or
+    proxy address is read (everyone behind it shares a bucket). Traefik
+    must trust Cloudflare's ranges and keep appending, and Cloudflare's
+    "Remove visitor IP headers" transform must stay off. Only the socket
+    peer is checked against `REDROP_TRUSTED_PROXIES`. The setting needs
+    `REDROP_CLIENT_IP_HEADER=X-Forwarded-For`, accepts 0 to 10, and turns
+    the wide-range warning off.
 * **Accounts.** Sign-in attempts are also slowed per account, from any
   network: five in a row, then each attempt waits twice as long as the one
   before, from 1 second up to 15 minutes (`429` with `Retry-After`). There

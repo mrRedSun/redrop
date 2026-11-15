@@ -44,19 +44,22 @@ func TestWideTrustedProxyWarning(t *testing.T) {
 	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
 	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")
 	cases := []struct {
-		proxies, header string
-		wide            []string
+		proxies, header, hops string
+		wide                  []string
 	}{
-		{"127.0.0.1/32,::1/128", "", nil},
-		{"192.0.2.0/24,2001:db8:1::/48", "X-Forwarded-For", nil},
-		{"192.0.2.10", "x-forwarded-for", nil},
-		{"198.51.100.0/23", "X-Forwarded-For", []string{"198.51.100.0/23"}},
-		{"10.0.0.0/8,2001:db8::/32,127.0.0.1", "", []string{"10.0.0.0/8", "2001:db8::/32"}},
-		{"10.0.0.0/8,2001:db8::/32", "CF-Connecting-IP", nil},
+		{"127.0.0.1/32,::1/128", "", "", nil},
+		{"192.0.2.0/24,2001:db8:1::/48", "X-Forwarded-For", "", nil},
+		{"192.0.2.10", "x-forwarded-for", "", nil},
+		{"198.51.100.0/23", "X-Forwarded-For", "", []string{"198.51.100.0/23"}},
+		{"10.0.0.0/8,2001:db8::/32,127.0.0.1", "", "0", []string{"10.0.0.0/8", "2001:db8::/32"}},
+		{"10.0.0.0/8,2001:db8::/32", "CF-Connecting-IP", "", nil},
+		// A hop count reads a fixed entry, so wide ranges no longer matter.
+		{"10.0.0.0/8,2001:db8::/32,127.0.0.1", "", "2", nil},
 	}
 	for _, c := range cases {
 		t.Setenv("REDROP_TRUSTED_PROXIES", c.proxies)
 		t.Setenv("REDROP_CLIENT_IP_HEADER", c.header)
+		t.Setenv("REDROP_TRUSTED_HOPS", c.hops)
 		cfg, err := Load()
 		if err != nil {
 			t.Fatal(err)
@@ -68,7 +71,7 @@ func TestWideTrustedProxyWarning(t *testing.T) {
 			}
 			continue
 		}
-		if len(got) != 1 || !strings.Contains(got[0], strings.Join(c.wide, ", ")+".") || !strings.Contains(got[0], "CF-Connecting-IP") {
+		if len(got) != 1 || !strings.Contains(got[0], strings.Join(c.wide, ", ")+".") || !strings.Contains(got[0], "REDROP_TRUSTED_HOPS") {
 			t.Errorf("%s with %q: warnings %q, want one naming %v and the remedy", c.proxies, c.header, got, c.wide)
 		}
 	}
@@ -87,5 +90,29 @@ func TestAPIDocsSetting(t *testing.T) {
 	t.Setenv("REDROP_API_DOCS", "sometimes")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REDROP_API_DOCS") {
 		t.Fatalf("invalid value: %v", err)
+	}
+}
+
+func TestTrustedHopsSetting(t *testing.T) {
+	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
+	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")
+	if c, err := Load(); err != nil || c.TrustedHops != 0 {
+		t.Fatalf("default: %v %v", c, err)
+	}
+	t.Setenv("REDROP_TRUSTED_HOPS", "2")
+	if c, err := Load(); err != nil || c.TrustedHops != 2 {
+		t.Fatalf("REDROP_TRUSTED_HOPS=2: %v", err)
+	}
+	for _, bad := range []string{"-1", "two", "1.5", "11"} {
+		t.Setenv("REDROP_TRUSTED_HOPS", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REDROP_TRUSTED_HOPS") {
+			t.Errorf("REDROP_TRUSTED_HOPS=%q: err %v, want an error naming the variable", bad, err)
+		}
+	}
+	// Hops count X-Forwarded-For entries; a single-value header has none.
+	t.Setenv("REDROP_TRUSTED_HOPS", "1")
+	t.Setenv("REDROP_CLIENT_IP_HEADER", "CF-Connecting-IP")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "X-Forwarded-For") {
+		t.Fatalf("hops with CF-Connecting-IP: %v", err)
 	}
 }

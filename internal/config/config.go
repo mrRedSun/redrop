@@ -59,7 +59,11 @@ type Config struct {
 
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
-	CountryHeader  string
+	// TrustedHops (REDROP_TRUSTED_HOPS) is how many proxies append to
+	// X-Forwarded-For before redrop; 0 walks the header past trusted
+	// addresses instead.
+	TrustedHops   int
+	CountryHeader string
 
 	OIDC             []OIDCProvider
 	PasswordLogin    bool
@@ -250,6 +254,12 @@ func Load() (*Config, error) {
 		c.TrustedProxies = append(c.TrustedProxies, n)
 	}
 	c.ClientIPHeader = env("REDROP_CLIENT_IP_HEADER", "X-Forwarded-For")
+	if c.TrustedHops, err = strconv.Atoi(env("REDROP_TRUSTED_HOPS", "0")); err != nil || c.TrustedHops < 0 || c.TrustedHops > maxTrustedHops {
+		return nil, fmt.Errorf("REDROP_TRUSTED_HOPS must be a whole number from 0 to %d (got %q)", maxTrustedHops, env("REDROP_TRUSTED_HOPS", "0"))
+	}
+	if c.TrustedHops > 0 && http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" {
+		return nil, fmt.Errorf("REDROP_TRUSTED_HOPS counts X-Forwarded-For entries; it needs REDROP_CLIENT_IP_HEADER=X-Forwarded-For (got %q)", c.ClientIPHeader)
+	}
 	c.CountryHeader = env("REDROP_COUNTRY_HEADER", "CF-IPCountry")
 
 	if c.PasswordLogin, err = envBool("REDROP_PASSWORD_LOGIN", true); err != nil {
@@ -290,6 +300,9 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+// maxTrustedHops bounds REDROP_TRUSTED_HOPS; real proxy chains are short.
+const maxTrustedHops = 10
+
 // Widest trusted-proxy ranges that do not draw a warning with
 // X-Forwarded-For. A wider range is likely a whole CDN or cloud network.
 const (
@@ -300,12 +313,14 @@ const (
 // Warnings lists settings that load but weaken a protection; the server
 // logs them at startup.
 //
-// With X-Forwarded-For, the client address is the first untrusted hop from
-// the right. Anyone who can send requests from inside a trusted range, such
-// as a CDN worker inside the CDN's published ranges, can then put any
-// address in front of it, and every per-client limit sees a new client.
+// Without REDROP_TRUSTED_HOPS, the client address is the first untrusted
+// X-Forwarded-For hop from the right. Anyone who can send requests from
+// inside a trusted range, such as a CDN worker inside the CDN's published
+// ranges, can then put any address in front of it, and every per-client
+// limit sees a new client. With a hop count the ranges no longer decide
+// which entry is read, so there is nothing to warn about.
 func (c *Config) Warnings() []string {
-	if http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" {
+	if http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" || c.TrustedHops > 0 {
 		return nil
 	}
 	var wide []string
@@ -320,7 +335,7 @@ func (c *Config) Warnings() []string {
 	}
 	return []string{fmt.Sprintf("REDROP_TRUSTED_PROXIES has ranges wider than a /%d (IPv4) or /%d (IPv6) while REDROP_CLIENT_IP_HEADER is X-Forwarded-For: %s. "+
 		"Anyone who can send requests from inside them (for example a CDN worker) can choose the client address that rate limits see. "+
-		"Trust only your own reverse proxy; behind a CDN use its client header (CF-Connecting-IP) and an origin only the CDN can reach",
+		"Set REDROP_TRUSTED_HOPS to the number of proxies that append to X-Forwarded-For (2 for Cloudflare in front of a reverse proxy), or trust only your own reverse proxy",
 		maxQuietProxyBitsV4, maxQuietProxyBitsV6, strings.Join(wide, ", "))}
 }
 

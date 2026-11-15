@@ -150,7 +150,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_CONTENT_URL` | `https://usercontent.example` (a separate registrable domain) |
 | `REDROP_DATA_DIR` | `/data` |
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
-| `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
+| `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER`, `REDROP_TRUSTED_HOPS` | client IPs behind a reverse proxy (see [Client addresses](#client-addresses)) |
 | `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
 | `REDROP_API_DOCS` | `false` (default): `/api/docs`, the interactive API page, is off. It loads a third-party script without a pinned version and outside the dashboard's CSP, so enable it only on development servers. `/api/openapi.json` is always served |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
@@ -181,26 +181,44 @@ domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
 
 Sign-in, link lookups, artifact passwords and link misses are limited per
 client. Behind a reverse proxy, redrop reads the client address from
-`REDROP_CLIENT_IP_HEADER`, but only on requests from a peer in
-`REDROP_TRUSTED_PROXIES`.
+`REDROP_CLIENT_IP_HEADER` (default `X-Forwarded-For`), but only on requests
+whose socket peer is in `REDROP_TRUSTED_PROXIES`.
 
-- **`X-Forwarded-For`** (the default, for example Traefik alone): the header
-  is read from the right, skipping every trusted hop. List only proxies you
-  run. Never list a whole CDN's ranges: a CDN worker (such as a Cloudflare
-  Worker) sends requests from inside those ranges with any
-  `X-Forwarded-For` it likes, the walk skips the worker and the CDN edge,
-  and every limit sees whatever address the worker chose.
-- **Behind Cloudflare**, set `REDROP_CLIENT_IP_HEADER=CF-Connecting-IP` and
-  trust only your reverse proxy (for example
-  `REDROP_TRUSTED_PROXIES=192.0.2.10/32`). Cloudflare sets that header
-  itself, and a Worker's requests carry the Worker's own address. Make the
-  origin reachable only through Cloudflare (a firewall that admits only
-  Cloudflare's published ranges, or Authenticated Origin Pulls); otherwise
-  anyone who reaches the reverse proxy directly can send their own
+- **`REDROP_TRUSTED_HOPS=N`** (default `0`): the client is the
+  `X-Forwarded-For` entry exactly N positions from the right, counting the
+  rightmost as 1. Set N to the number of proxies that append to the header
+  on the way in. Anything a client writes into the header sits further left
+  and is never read. A header with fewer than N entries gives its leftmost
+  entry; an entry that is not an IP address gives the socket peer. Only the
+  socket peer is checked against `REDROP_TRUSTED_PROXIES`, so list just the
+  proxy redrop receives requests from.
+- **Cloudflare in front of Traefik**, origin reachable directly:
+
+  ```sh
+  REDROP_TRUSTED_PROXIES=192.0.2.10/32   # Traefik, as redrop sees it
+  REDROP_TRUSTED_HOPS=2                  # Cloudflare appends, then Traefik
+  ```
+
+  Traefik's entry point must trust Cloudflare's published ranges
+  (`forwardedHeaders.trustedIPs`) and keep `notAppendXForwardedFor` off
+  (the default); Cloudflare's "Remove visitor IP headers" transform must be
+  off. A visitor then resolves to their own address, every Cloudflare Worker
+  to Cloudflare's Worker egress address (one bucket for all Workers), and a
+  request sent to Traefik directly to its real source address, because
+  Traefik replaces the header from untrusted sources.
+- **`REDROP_TRUSTED_HOPS=0`** walks the header from the right and skips
+  every trusted entry, which suits a reverse proxy alone. Never list a
+  whole CDN's ranges for it: a CDN worker sends requests from inside those
+  ranges with any `X-Forwarded-For` it likes, the walk skips the worker and
+  the CDN edge, and every limit sees whatever address the worker chose. In
+  this mode the server logs a warning at startup when
+  `REDROP_TRUSTED_PROXIES` has a range wider than a /24 (IPv4) or a /48
+  (IPv6).
+- **`REDROP_CLIENT_IP_HEADER=CF-Connecting-IP`** is safe only when the
+  origin is reachable through Cloudflare alone (a firewall that admits only
+  Cloudflare's ranges, or Authenticated Origin Pulls); otherwise anyone who
+  reaches the reverse proxy directly can send their own
   `CF-Connecting-IP`.
-- The server logs a warning at startup when `REDROP_TRUSTED_PROXIES` has a
-  range wider than a /24 (IPv4) or a /48 (IPv6) while the header is
-  `X-Forwarded-For`.
 
 Status: in development, not yet released.
 

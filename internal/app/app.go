@@ -71,7 +71,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 		return nil, err
 	}
 	acc := accounts.New(db, cfg, secret, log)
-	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader}
+	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader, TrustedHops: cfg.TrustedHops}
 
 	site := web.New(opts.Dashboard, opts.CLIDir, cfg.PublicOrigin())
 	api := httpapi.New(acc, sh, cfg, clients, log)
