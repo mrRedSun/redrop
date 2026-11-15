@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
 	"github.com/mrRedSun/redrop/pkg/client"
 )
@@ -100,7 +101,7 @@ func sameResponse(t *testing.T, what string, a *http.Response, ab string, b *htt
 	ha.Del("Date")
 	hb.Del("Date")
 	if a.StatusCode != b.StatusCode || ab != bb || !reflect.DeepEqual(ha, hb) {
-		t.Fatalf("%s differs from an unknown reserved path:\n got %d %v %q\nwant %d %v %q", what, a.StatusCode, ha, ab, b.StatusCode, hb, bb)
+		t.Fatalf("%s: the responses differ:\n got %d %v %q\nwant %d %v %q", what, a.StatusCode, ha, ab, b.StatusCode, hb, bb)
 	}
 }
 
@@ -186,6 +187,7 @@ func TestFeedbackClosedIsAnUnknownPath(t *testing.T) {
 // posts to live artifacts don't, whether feedback is open or not.
 func TestFeedbackMissesSpendBudget(t *testing.T) {
 	t.Setenv("REDROP_CONTENT_MISS_BURST", "2")
+	t.Setenv("REDROP_CONTENT_MISS_PER_MINUTE", "1") // no refill within the test
 	h := newHarness(t)
 	c := client.New(h.srv.URL, h.setupAdmin())
 	off := h.share(c, feedbackHTML, client.PublishOptions{})
@@ -261,16 +263,38 @@ func TestFeedbackAccess(t *testing.T) {
 	}
 	r = h.content("POST", p.URL, "/__redrop/open", url.Values{"password": {"hunter22"}, "next": {"/"}}, "")
 	expectStatus(t, r, http.StatusSeeOther, "unlock")
-	visit := r.Cookies()
-	r, _ = h.comment(p.URL, okComment(1), visit...)
+	pVisit := r.Cookies()
+	r, _ = h.comment(p.URL, okComment(1), pVisit...)
 	expectStatus(t, r, http.StatusCreated, "password, unlocked")
+
+	// A lockout (too many wrong passwords) stops new unlocks but, as for
+	// the page, not a visit that already began.
+	ctx := context.Background()
+	for range 50 {
+		h.app.db.RecordView(ctx, p.ID, store.OutcomeBadPassword, "", "test")
+	}
+	r = h.content("POST", p.URL, "/__redrop/open", url.Values{"password": {"hunter22"}, "next": {"/"}}, "")
+	expectStatus(t, r, http.StatusTooManyRequests, "unlock during a lockout")
+	r, _ = h.comment(p.URL, okComment(1), pVisit...)
+	expectStatus(t, r, http.StatusCreated, "a visit from before the lockout")
+
+	// A password change ends every visit: commenting needs the new password.
+	newPassword := "correct-horse"
+	if _, err := c.UpdateArtifact(ctx, p.ID, &api.UpdateArtifactRequest{Password: &newPassword}); err != nil {
+		t.Fatal(err)
+	}
+	r, b = h.comment(p.URL, okComment(1), pVisit...)
+	expectStatus(t, r, http.StatusForbidden, "a visit from before the password change")
+	if !strings.Contains(b, `"access_required"`) {
+		t.Fatalf("after the password change: %s", b)
+	}
 
 	// One-time link: the visitor who opened it may comment, repeatedly,
 	// without using views; everyone else gets the miss.
 	o := h.share(c, feedbackHTML, client.PublishOptions{Feedback: true, MaxViews: 1})
 	r = h.content("POST", o.URL, "/__redrop/open", url.Values{"next": {"/"}}, "")
 	expectStatus(t, r, http.StatusSeeOther, "open once")
-	visit = r.Cookies()
+	visit := r.Cookies()
 	for range 2 {
 		r, _ = h.comment(o.URL, okComment(1), visit...)
 		expectStatus(t, r, http.StatusCreated, "one-time, with the visit")
@@ -281,12 +305,12 @@ func TestFeedbackAccess(t *testing.T) {
 	r, _ = h.comment(o.URL, okComment(1))
 	expectStatus(t, r, http.StatusMethodNotAllowed, "one-time, used up, no visit")
 
-	// A visit grant stops working when access changes (revoked here).
+	// Revoking ends the visit too: the one-time link is then the miss.
 	yes := true
-	if _, err := c.UpdateArtifact(context.Background(), p.ID, &api.UpdateArtifactRequest{Revoked: &yes}); err != nil {
+	if _, err := c.UpdateArtifact(ctx, o.ID, &api.UpdateArtifactRequest{Revoked: &yes}); err != nil {
 		t.Fatal(err)
 	}
-	r, _ = h.comment(p.URL, okComment(1), visit...)
+	r, _ = h.comment(o.URL, okComment(1), visit...)
 	expectStatus(t, r, http.StatusMethodNotAllowed, "revoked, with an old visit")
 }
 
@@ -310,7 +334,7 @@ func TestFeedbackValidation(t *testing.T) {
 		"not JSON":       {"body=x", http.StatusBadRequest},
 		"two objects":    {`{"body":"x","version":1,"page":"/"} {}`, http.StatusBadRequest},
 		"array":          {`[]`, http.StatusBadRequest},
-		"too large":      {map[string]any{"body": strings.Repeat("x", 40<<10), "version": 1, "page": "/"}, http.StatusRequestEntityTooLarge},
+		"too large":      {map[string]any{"body": strings.Repeat("x", 70<<10), "version": 1, "page": "/"}, http.StatusRequestEntityTooLarge},
 	} {
 		r, b := h.comment(a.URL, tc.payload)
 		expectStatus(t, r, tc.want, name)
@@ -322,6 +346,17 @@ func TestFeedbackValidation(t *testing.T) {
 	if n := len(h.comments(c, a.ID, "all")); n != 0 {
 		t.Fatalf("invalid posts stored %d comments", n)
 	}
+
+	// The largest valid post, every field at its limit in astral characters
+	// escaped as JSON surrogate pairs, fits the body limit.
+	astral := func(n int) string { return strings.Repeat(`\ud83d\ude00`, n) }
+	largest := `{"body":"` + astral(4000) + `","name":"` + astral(80) + `","version":1,"page":"/` + astral(511) +
+		`","quote":{"exact":"` + astral(500) + `","prefix":"` + astral(64) + `","suffix":"` + astral(64) + `"}}`
+	if len(largest) <= 60<<10 {
+		t.Fatalf("the largest post is only %d bytes", len(largest))
+	}
+	r, b := h.comment(a.URL, largest)
+	expectStatus(t, r, http.StatusCreated, "the largest valid post, fully escaped: "+b)
 }
 
 func TestFeedbackLimits(t *testing.T) {
@@ -496,6 +531,10 @@ func TestFeedbackForm(t *testing.T) {
 	if _, b = h.page("GET", on.URL, "/", inFrame); b != uploaded {
 		t.Fatalf("frame bytes changed: %q", b)
 	}
+	// With feedback on or off, the frame gets the same response.
+	fOn, bOn := h.page("GET", on.URL, "/", inFrame)
+	fOff, bOff := h.page("GET", off.URL, "/", inFrame)
+	sameResponse(t, "frame with feedback on and off", fOn, bOn, fOff, bOff)
 	if _, b = h.page("GET", on.URL, "/?redrop-info=0", nav); b != uploaded {
 		t.Fatalf("direct view changed: %q", b)
 	}
