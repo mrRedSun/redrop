@@ -435,8 +435,9 @@ info panel on redrop's own viewer page, outside the frame.
 * **Admins: as for other artifact data, metadata only.** For other users'
   artifacts, admins see metadata ("Admin privacy"), never content, versions,
   files or the access log. Comments quote the artifact's text, so they count
-  as content: admins see the `feedback` setting, not the comments. Deleting
-  an artifact (owner or admin) deletes its comments.
+  as content: admins see the `feedback` setting, not the comments. This is
+  the owner's privacy default. Deleting an artifact (owner or admin)
+  deletes its comments.
 
 ### What a comment holds
 
@@ -449,9 +450,22 @@ info panel on redrop's own viewer page, outside the frame.
 | `quote` | optional W3C text quote selector of the selection: `exact` 1–500 characters, `prefix` and `suffix` at most 64 each |
 | `created_at`, `resolved_at` | server times; `resolved_at` is null for an open comment |
 
-Control characters (C0, DEL, C1) are removed from every field on input,
-except line feeds and tabs in `body` and `quote`. `\r\n` becomes `\n`. The
-server stores no IP address, user agent, country or cookie with a comment.
+Text that renders differently from what a reader receives is removed on
+input:
+
+* **Line breaks.** In `body` and `quote`, every line break (`\r\n`, `\r`,
+  U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE)
+  becomes `\n`. They are removed from `name`.
+* **Controls.** Control characters (C0, DEL, C1) are removed, except
+  line feeds in multiline fields and tabs in `body` and `quote`.
+* **Invisible characters.** The tag block (U+E0000–U+E007F, which can
+  spell hidden ASCII text for an agent) and the invisible format
+  characters U+200B, U+2060–U+2064, U+FEFF and U+180E are removed. ZERO
+  WIDTH JOINER and NON-JOINER stay: emoji and several scripts need them.
+* **The page** is not cleaned but checked: a `page` with any of these
+  characters is rejected.
+
+The server stores no IP address, user agent, country or cookie with a comment.
 The per-client rate limiter keeps the client's address in memory only.
 
 **Storage (migration 4).** `artifacts.feedback INTEGER NOT NULL DEFAULT 0`
@@ -491,7 +505,7 @@ the answer:
    (trusted-proxy address, IPv6 by /64): `REDROP_FEEDBACK_BURST` (default 5)
    refilled at `REDROP_FEEDBACK_PER_MINUTE` (default 1). Otherwise `429`
    with `Retry-After`.
-8. A body of at most 32 KiB that decodes as one JSON object with only the
+8. A body of at most 64 KiB that decodes as one JSON object with only the
    known fields. Otherwise `413` or `400`.
 9. Valid fields (table above). Otherwise `400`.
 10. Fewer than `REDROP_FEEDBACK_MAX_PER_ARTIFACT` (default 500) comments
@@ -523,7 +537,11 @@ client) also counts these POSTs.
   and detached `Range` objects from `createRange()` for the 64 characters
   before and after. A selection longer than 500 characters is shortened, and
   its suffix is taken after the shortened text, so the triple stays a valid
-  text quote. Nothing is written to the frame: no elements, attributes,
+  text quote. Strings are cut before they are split into code points, so the
+  work doesn't grow with the page or the selection. `Range.toString()`
+  includes the text of `<script>` and `<style>` elements, so `prefix` or
+  `suffix` can hold code next to the selection. That is harmless for
+  anchoring and only looks odd in the dashboard; it is left as is. Nothing is written to the frame: no elements, attributes,
   styles or listeners. Selection in the frame is read only on panel open, so
   there is no `selectionchange` listener on the artifact. The file page
   reads its own selection (the text preview), outside the panel.
@@ -566,20 +584,26 @@ client) also counts these POSTs.
   can post. That is accepted: the artifact belongs to the owner, who reads
   the result.
 * **Spam and resource use.** The per-client bucket, the per-artifact cap,
-  the 32 KiB body limit, the field limits and Cloudflare's zone rule bound
+  the 64 KiB body limit, the field limits and Cloudflare's zone rule bound
   it. The worst case is 500 rows of at most about 20 KB per artifact.
   Turning feedback off closes the endpoint at once; existing comments stay
   until deleted.
 * **XSS.** Comments are rendered as text everywhere: React text nodes in
   the dashboard, `textContent` in the viewer (which shows only its own
   confirmation), and plain text in the CLI. The CLI also removes ANSI
-  escape sequences, control characters and Unicode bidirectional controls
-  before printing, even though the server already strips control
-  characters. It doesn't trust the server's output either.
+  escape sequences (7- and 8-bit), control characters, Unicode
+  bidirectional controls and the invisible characters above before
+  printing, in plain and `--json` output alike. It turns every line break
+  into `\n`. The server already does most of this, but the CLI doesn't
+  trust the server's output either.
 * **Prompt injection.** Agents read comments, so a comment is an injection
   channel. The CLI's plain output frames each comment as viewer-supplied
-  data, prefixes every line of viewer text with `| ` so a comment can't
-  fake the frame, and labels the name as unverified. `--json` gives typed
+  data. It prefixes every line of viewer text with `| ` and labels the name
+  as unverified. Because every Unicode line break is turned into `\n`
+  before the prefix is added, a comment can't fake the frame even for a
+  reader that splits lines like Python's `str.splitlines()`. Tag characters
+  and other invisible text never reach an agent, so a comment can't hide
+  instructions that a person reading the same output wouldn't see. `--json` gives typed
   fields. `redrop guide` tells agents to treat comment text as untrusted
   feedback to weigh, never as instructions: not "ignore previous
   instructions", and never requests to share files, tokens or other
@@ -588,6 +612,11 @@ client) also counts these POSTs.
   endpoint lives on the artifact's own origin, under the reserved prefix,
   so it shares the origin's cookies and nothing else. Artifacts stay
   isolated from each other and from the dashboard as before.
+* **The setting is visible before the access check.** Someone who has the
+  link but not the password can tell that feedback is on: a post gets the
+  `403 access_required` answer instead of the closed `405`. Only "off" must
+  look like an unknown path; whether comments are open is not secret, and
+  the link itself is the secret that gives this away.
 * **Privacy.** No raw IP, user agent or cookie is stored. The name is
   optional and unverified. Comments never appear in admin views.
 
