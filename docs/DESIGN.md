@@ -61,6 +61,14 @@ worker script, not even redrop's own `/__redrop/` scripts (requests with `Sec-Fe
 link is revoked or expires, and could take over the viewer page's own
 navigations.
 
+On a content domain that is not on the Public Suffix List, an artifact can set
+ordinary parent-domain cookies sent to sibling artifact hosts. Host-only
+`__Host-` access cookies cannot be forged this way, but cookie flooding can
+make a visitor's requests to other artifacts too large. The owner accepts this
+per-browser availability limitation because publishing is invite-only. Keep
+invitations restricted to trusted accounts. Separate origins do not make an
+unlisted content domain a cookie suffix boundary.
+
 The slug is the access secret. "Rotate link" replaces the slug; the artifact ID
 used by the API/CLI is stable. Artifact slugs appear in TLS SNI and DNS
 lookups; that is accepted.
@@ -106,9 +114,8 @@ aloud and typed. Older slugs keep working forever and are not migrated.
 * Misses are limited per client: a token bucket of `REDROP_CONTENT_MISS_BURST`
   (default 30) refilled at `REDROP_CONTENT_MISS_PER_MINUTE` (default 5). The
   client is the trusted-proxy-resolved address (`REDROP_TRUSTED_PROXIES`,
-  `REDROP_CLIENT_IP_HEADER`, e.g. `CF-Connecting-IP` or Traefik's
-  `X-Forwarded-For`), never a proxy's socket address; IPv6 clients are
-  grouped by /64. At most 100,000 clients are tracked.
+  `REDROP_CLIENT_IP_HEADER`, `REDROP_TRUSTED_HOPS`; see "Rate limits"),
+  never a proxy's socket address; IPv6 clients are grouped by /64. At most 100,000 clients are tracked.
 * Hits never spend budget, so normal use is not throttled however much it
   loads. A client that has spent its budget gets `429` with `Retry-After` for
   **every** artifact-host request, hits included, until a token refills. If
@@ -389,8 +396,15 @@ within 250 ms rather than at once.
   not burn one-time links.
 * Changing the password, rotating the link, or revoking bumps an access
   generation number that invalidates every outstanding access cookie.
-* Password attempts are rate limited per client IP and per artifact; failures
-  are recorded in the view log.
+* Password attempts are rate limited per client network and per artifact;
+  failures are recorded in the view log. An artifact takes about 50 wrong
+  passwords per hour from all networks together (up to twice that across a
+  window boundary: the budget is a fixed one-hour window), then its link is
+  locked for everyone until the hour has passed. Each attempt is charged to that
+  budget before the password is checked, and a right password gives its
+  charge back, so concurrent guesses cannot exceed it and visitors who know
+  the password never use it up. The view log keeps the count across
+  restarts.
 * Owners preview through a short-lived signed preview URL created from the
   dashboard; previews never count as views and bypass gates.
 
@@ -398,6 +412,14 @@ within 250 ms rather than at once.
 
 * `active` → `expired` (TTL elapsed) or `exhausted` (max views reached) or
   `revoked` (manually, reversible).
+* An owner's and an administrator's revocations are stored apart
+  (`revoked`, `admin_revoked`); either one makes the artifact `revoked`.
+  The owner can undo only their own: restoring an artifact an
+  administrator revoked is refused (`403`), and the API (`revoked_by_admin`),
+  the dashboard and `redrop info` say "revoked by an administrator". Other
+  owner changes still work and do not bring the link back. An
+  administrator's restore clears only the administrator's revocation.
+  Revocations made before migration 4 count as the owner's.
 * Expired artifacts keep content for `REDROP_EXPIRED_RETENTION` (default 72 h)
   so they can be extended/revived, then are deleted. Exhausted artifacts are
   deleted after the visit window ends. Deletion is immediate when requested.
@@ -468,7 +490,7 @@ input:
 The server stores no IP address, user agent, country or cookie with a comment.
 The per-client rate limiter keeps the client's address in memory only.
 
-**Storage (migration 4).** `artifacts.feedback INTEGER NOT NULL DEFAULT 0`
+**Storage (migration 7).** `artifacts.feedback INTEGER NOT NULL DEFAULT 0`
 and a `feedback` table: `id`, `artifact_id` (cascade on artifact delete),
 `version`, `page`, `body`, `name`, `quote_exact`, `quote_prefix`,
 `quote_suffix`, `created_at`, `resolved_at`, indexed by
@@ -635,6 +657,115 @@ Bundles are uploaded as `tar.gz`. Extraction rejects absolute paths, `..`,
 links, devices, reserved paths, and enforces file-count and decompressed-size
 limits.
 
+### Archive work limits
+
+Duplicate normalized file paths are errors, not skipped bodies. A file path
+that is also the parent directory of another file is an error too. Directory
+entries carry no content: as before, their names are neither validated nor
+kept in memory, and repeated directories (`tar -C dist . -C static .` with a
+shared `css/`) are accepted. Only regular-file paths are retained, at most
+`REDROP_MAX_FILES` of them.
+
+A separate entry cap is `max(128, 4 * REDROP_MAX_FILES)` non-metadata
+entries: every regular file, directory, link or special entry, including those
+archive/tar would return. PAX, global and GNU long-name headers are not
+counted as entries, so PAX-format archives get the same cap as others, but
+more than 16 of them in a row are refused.
+
+The decompressed stream has one byte budget covering content, discarded bodies,
+headers, padding and metadata. Its limit is the per-version content limit plus
+an overhead allowance of 4 KiB per permitted entry and 1 MiB of slack.
+A raw-block counting reader runs before the tar parser so metadata hidden by
+Go's tar reader is counted too. It re-implements only tar framing, so after
+every header the tar reader returns, extraction checks that both agree on where
+that entry's body starts and ends (`inSync`): a regular file must have exactly
+its padded size left, a directory nothing, and a global header only padding.
+Any disagreement, such as a name precedence or prefix the counter does not
+model, rejects the archive as malformed before the next header is read. A
+differential test and fuzz target check the counter against archive/tar.
+PAX size overrides and sparse-file extensions are rejected because they can
+change physical framing; normal PAX path and GNU long-name metadata remain
+supported. Paths, checksums, entry types and tar semantics still pass through
+the existing archive validator. Both compressed input and decompressed output
+check the publishing request context on every read. Checksum verification and
+blob copies check cancellation too. Publication's single admission slot bounds
+active extraction; waiting requests can cancel.
+
+A publication rejected for its content, settings, a limit or a quota deletes
+its upload once cleanup has succeeded, so a replay does no archive work and the
+upload no longer holds a session. A read error inside an entry's body, such as
+a truncated or corrupt compressed stream, is a corrupt archive like a bad
+header, not an internal error. These limits bound per-attempt work, not a
+per-account request rate.
+
+### Disk budgets and upload expiry
+
+SQLite reserves each upload's declared bytes atomically with committed version
+usage against both the owner's quota and `REDROP_MAX_TOTAL_SIZE`. Open sessions
+also have a per-user cap, `REDROP_MAX_OPEN_UPLOADS`, default 8 and a positive
+integer. Zero-byte sessions count. Expired sessions retain their reservation
+until maintenance removes their disk bytes, then releases the row.
+
+Uploads expire after one idle hour. Each completed nonempty chunk renews the
+hour, so a slow upload can resume across many chunks without a 24-hour abandoned
+session. The minute maintenance sweep reclaims expired sessions. Reading status,
+empty chunks and failed publication attempts do not extend expiry. An active
+chunk keeps its file and reservation until that request finishes; maintenance
+never unlinks a file a slow writer still holds open. Simultaneous chunks or
+publication for one upload return a conflict instead of modifying the same
+file concurrently. Expiry is rechecked after claiming an idle session, since a
+chunk may have just renewed it. Admin stats
+show `staged_bytes`, the successfully received upload bytes, and
+`reserved_bytes`, pending declared bytes plus unpacked publication reservations,
+separately from committed logical bytes and deduplicated blob storage.
+
+Before writing any materialized file, publication reserves its declared
+unpacked size in the same quota transaction. The version limit applies to the
+sum of unpacked file sizes. The staged upload and its unpacked content are the
+same content to the owner, so the user quota counts each open upload once, as
+the larger of its staged and unpacked bytes: a user with 6 MB of headroom can
+publish a 6 MB file. `REDROP_MAX_TOTAL_SIZE` guards the disk and counts both,
+so the server total needs temporary headroom for the staged and unpacked
+copies. The commit converts the unpacked reservation to committed logical usage
+atomically; staging is released only after its file has been removed.
+
+Publication and blob garbage collection share one cancellable service admission
+slot. Each account has at most one publication running or waiting for it; a
+second one gets an immediate `409` with the problem title
+`publication_in_progress`, and the CLI retries the same upload for up to five
+minutes. Another account's publication therefore waits for at most one attempt
+per other active account. Each attempt tracks only the hashes it newly
+installed. On extraction, entry-validation or database failure, it looks up
+only those hashes and removes the ones no file record references, before
+releasing its unpacked reservation. Existing blobs are never deleted by
+rollback, including deduplicated content shared with other artifacts. The slot
+covers commit and rollback, so a concurrent publisher cannot be about to
+reference a hash removed by another attempt. Failed cleanup keeps its
+reservation and logs an operational error rather than releasing unreclaimed
+capacity. Replays cannot clear a failed-cleanup reservation; they return a
+conflict until expiry safely reclaims the bytes.
+
+After a successful cleanup, a publication rejected for a deterministic client
+error (invalid content, archive, entry or settings, a limit or quota, or an
+unknown artifact) also deletes its upload, releasing its reservation and
+session. The CLI never resumes a rejected upload. Cancellation, conflicts (an
+incomplete or busy upload) and internal errors keep the upload until its idle
+expiry. This design favors a small, bounded materialization path over parallel
+extraction. Uploaded chunks remain independently resumable.
+
+Expired uploads without unpacked bytes are released without blob GC. Only an
+expired upload with unpacked bytes, left by a crash or a failed rollback, waits
+for a full GC that removes unreferenced blobs. If that GC fails, it logs the
+error and keeps those uploads, while the others are still released. GC keeps
+walking past a blob it cannot remove and reports the failures together.
+
+Migration 6 adds `uploads.materialized`, initialized to zero for existing
+sessions. Open uploads from before the upgrade count against quotas from then
+on: one that no longer fits its owner's quota is refused when published, and
+deleted like any other quota rejection. Stop the old process before upgrading. Do not run multiple server
+processes against the same data directory. Restore a whole-data-directory backup
+for rollback; older binaries do not enforce pending-byte reservations.
+
 ## Markdown documents
 
 Markdown is rendered **in the CLI's publishing client, before upload**, not by
@@ -757,6 +888,152 @@ inside their containers on narrow screens. The document is readable without JS.
 * OIDC providers are configured by environment; identities are linked
   explicitly from the account page or by accepting an invite through OIDC.
   Accounts are never auto-linked by email address.
+* Linking keeps the current session and its sign-in method. Only a normal
+  single sign-on login creates an SSO session, so linking cannot satisfy
+  `REDROP_ADMIN_REQUIRE_OIDC`.
+* While `REDROP_ADMIN_REQUIRE_OIDC=true`, an admin account can link another
+  identity only from an SSO session; the start and the callback both check
+  it. A new identity linked from a password session would otherwise open
+  admin sessions without the identity provider's checks ever applying to
+  the account. Unlinking follows the same rule: from a password session,
+  someone with only the admin's password could otherwise remove the
+  account's single sign-on, which that session could not link back. An
+  admin who has only a password gets SSO by accepting an admin invite
+  (`redrop-server invite --admin`) through single sign-on, or by linking
+  before the setting is turned on.
+* **After upgrading to this rule, review admin identities.** Before it, a
+  password session could link any IdP account to an admin and turn the
+  session into an SSO one. A link made that way survives the upgrade and
+  still opens admin SSO sessions, and nothing records how a link was made
+  (the `identity linked` log line starts with this version). After
+  deploying, check the linked identities of every admin account and remove
+  the ones nobody recognises: each admin on their Account page, or the
+  operator with a read-only query on a copy or snapshot of the database:
+  `SELECT u.username, i.provider, i.email, datetime(i.created_at, 'unixepoch') FROM identities i JOIN users u ON u.id = i.user_id WHERE u.role = 'admin';`
+
+### Logging
+
+The app origin's requests are logged once, by `httpapi.logRequests`: API
+calls and failures, with method, status, size and duration, never query
+strings. A path segment that follows one of `dashpaths.SecretPrefixes`
+(invite, reset and setup tokens) is written as `…`. Fuego's own access log
+is off, and Fuego's other messages go to redrop's handler at `Info` or
+above only: its debug output includes decoded request bodies, with
+passwords and tokens. A test captures every log line, at debug level,
+while it opens and redeems each kind of one-time link, and checks that no
+token or password appears.
+
+### Rate limits
+
+* **Bounded tables.** Every fixed-window limiter (`security.Limiter`) tracks
+  at most 50,000 keys and stores keys over 64 bytes as their SHA-256, so a
+  full table costs about 10 MiB. Clients already in a table keep their own
+  count. What a full table does with a new key depends on whether anything
+  else bounds what it counts:
+  * **Evict the oldest entry** (`security.EvictOldest`) in the per-network
+    tables: sign-in and single sign-on starts, one-time link lookups, and
+    artifact passwords per network. The account backoff, the per-artifact
+    budget and the 256-bit link tokens bound guessing on their own, so a
+    newcomer is never refused, and an attacker who floods the table to push
+    others out gains nothing that rotating networks did not already give.
+  * **Refuse the new key** (`security.RefuseNew`: `429` until a window
+    expires) where the table is the only bound: the authenticator-code
+    ceiling (per account) and the artifact password budget (per artifact).
+    Their keys exist only for an account whose password was right, or for
+    a link the client knows, so an attacker cannot fill them with junk.
+  * The content miss limiter (`security.TokenBucket`, at most 100,000
+    clients) drops clients whose budget has refilled and refuses new ones
+    while every bucket is still refilling. It is the only bound on guessing
+    links, and a refused newcomer loses only misses: hits are still served.
+* **Retry-After.** Every limiter `429`, on the API and on the artifact
+  password gate, carries `Retry-After`: the end of the refused key's window
+  (or of the oldest window, for a full table that refuses), or the account
+  backoff's wait.
+* **Clients.** Every per-client limiter (sign-in, single sign-on starts,
+  one-time link lookups, artifact passwords, content misses) keys on
+  `netutil.Network`: the trusted-proxy-resolved address, with IPv6 grouped
+  by /64, so one host cannot rotate through its /64 to reset them.
+* **Trusted proxies.** Forwarded headers count only on requests whose
+  socket peer is in `REDROP_TRUSTED_PROXIES`. Without a hop count, the
+  client is the first `X-Forwarded-For` entry from the right that is not a
+  trusted address. A trusted range that covers a whole CDN makes that
+  spoofable: a CDN worker sends requests from inside the range with any
+  `X-Forwarded-For`, and the walk skips both its hop and the edge's. The
+  server logs a startup warning in this mode for a trusted range wider than
+  a /24 (IPv4) or a /48 (IPv6) with `X-Forwarded-For`. The account backoff
+  below does not depend on client addresses, so it holds even when they
+  are spoofed.
+* **Trusted hops.** `REDROP_TRUSTED_HOPS=N` reads the entry exactly N from
+  the right instead (`netutil.ClientResolver.fromHops`). It is the only
+  safe setting when the origin stays reachable without the CDN, so
+  `CF-Connecting-IP` can't be trusted. The production chain is client,
+  Cloudflare, Traefik, redrop, with `N=2`:
+  * **What the proxies do.** Cloudflare's documentation: with no
+    `X-Forwarded-For`, it sets one with the connecting address (equal to
+    `CF-Connecting-IP`); with one, it appends the connecting address.
+    Traefik v3 (`forwardedheaders` middleware and its proxy, read in the
+    source): from a source in `forwardedHeaders.trustedIPs` it keeps the
+    header and appends the source address; from any other source it deletes
+    every `X-Forwarded-*` header, then appends the source address, so the
+    header holds that one address. `notAppendXForwardedFor: true` would
+    stop the append and change the count.
+  * **Visitor through Cloudflare:** `[anything the visitor sent], visitor,
+    edge`. Position 2 is the visitor, written by Cloudflare.
+  * **Cloudflare Worker:** `[anything the Worker set], Worker egress,
+    edge`. Position 2 is written by Cloudflare. For cross-zone Worker
+    subrequests Cloudflare documents `CF-Connecting-IP: 2a06:98c0:3600::103`;
+    that the appended entry is the same address is the review's reading of
+    the documentation and was not exercised against Cloudflare. Either way
+    the entry is Cloudflare's, not the Worker's, so all Workers share one
+    bucket.
+  * **Direct to Traefik, skipping Cloudflare:** the source is untrusted, so
+    Traefik replaces the header with the source address. One entry, fewer
+    than N: the leftmost (and only) entry is the real peer.
+  * **Fallbacks.** No header, or an entry that is not an IP address at the
+    chosen position, gives the socket peer (Traefik): such requests share
+    Traefik's bucket rather than choosing their own.
+  * **Requirements.** N must match the chain exactly. Too large, and a
+    visitor's own entry is read (spoofable); too small, and the edge or
+    proxy address is read (everyone behind it shares a bucket). Traefik
+    must trust Cloudflare's ranges and keep appending, and Cloudflare's
+    "Remove visitor IP headers" transform must stay off. Only the socket
+    peer is checked against `REDROP_TRUSTED_PROXIES`. The setting needs
+    `REDROP_CLIENT_IP_HEADER=X-Forwarded-For`, accepts 0 to 10, and turns
+    the wide-range warning off.
+* **Accounts.** Sign-in attempts are also slowed per account, from any
+  network: five in a row, then each attempt waits twice as long as the one
+  before, from 1 second up to 15 minutes (`429` with `Retry-After`). Once
+  the attempts stop, the right password works again within 15 minutes. But
+  while they continue, the account's password sign-in stays refused: about
+  four attempts an hour, each timed to the end of the last wait, keep the
+  account at the 15-minute maximum, and the owner's right password is
+  refused without being checked. Single sign-on and API tokens are not
+  affected. A successful sign-in, or a day without attempts, starts over.
+  A possible follow-up is the usual device-cookie scheme: a browser that
+  signed in successfully gets a signed cookie, and its attempts skip the
+  shared backoff and are limited only by their own count, so the owner
+  keeps signing in while guesses from elsewhere stay slowed. Unknown usernames back off exactly like real ones, so the
+  backoff reveals nothing about which accounts exist. Each attempt is
+  charged before the password is checked, so concurrent guesses queue
+  instead of all reading the old count. The table is a fixed 65,536 slots
+  hashed with a per-process random seed: it is never full, and an attacker
+  cannot choose which accounts share a slot.
+* **Authenticator codes.** An account takes at most 5 wrong codes per
+  hour, at sign-in and when turning the authenticator off, from any
+  network. Each code works once: the last accepted 30-second step is
+  stored per user, and a code from that step or an earlier one is refused
+  ("already used"), including when two requests race with one code. A new
+  secret starts its own record.
+* **Sign-in input.** A username that fails the account name rule (2–32
+  characters) gets the wrong-login answer before any limiter or database
+  call. The unauthenticated sign-in and onboarding routes (`/auth/login`,
+  `/setup`, `/invites/{token}/accept`, `/reset/{token}`) accept at most
+  4 KiB of body; larger bodies get `413`.
+* **Request bodies.** Every route that takes a JSON body checks it before
+  decoding: another `Content-Type` (or a body without one) gets `415`, and
+  a body over its limit (4 KiB above, 1 MiB elsewhere) gets `413`, with or
+  without a declared length. Malformed JSON gets `400`. Upload chunks
+  (`PUT /uploads/{id}`) are raw bytes and keep their own limits.
 
 ## CLI
 
@@ -765,10 +1042,14 @@ arm64). The server embeds all builds and serves `install.sh`/`install.ps1`, so
 `curl -fsSL https://<app>/install.sh | sh` installs a version matching the
 server and verifies SHA-256 checksums. Configuration is
 `redrop login --url … --token …` or the `REDROP_URL`/`REDROP_TOKEN`
-environment variables. Setting `REDROP_TOKEN` for the installer
-(`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
-command when a token is created. Every command supports `--json`; exit codes are stable
-(see `redrop guide`). The Go package `pkg/client` is the same client as a library.
+environment variables. `login` and `logout` replace the config file atomically
+through a fresh private (0600) temporary file in the same directory, never
+writing through a symlink. A config path that is itself a symlink is refused
+before anything changes ("pass `--config` with the real file"), so a linked
+target never keeps an old token while the command reports success. Setting
+`REDROP_TOKEN` for the installer (`curl … | REDROP_TOKEN=… sh`) also logs in;
+the dashboard shows that one-line command when a token is created. Every command
+supports `--json`; exit codes are stable (see `redrop guide`). The Go package `pkg/client` is the same client as a library.
 
 ### Directory uploads
 
@@ -808,6 +1089,40 @@ When `share`, `update`, or `watch` packs a directory, it skips:
   such as `.page.swp` and `.page.swo`.
 - JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
   `.goutputstream-*` files.
+- Conventional secret files `.env` and `.env.*`, except `.env.example`,
+  `.env.sample`, and `.env.template`; `.netrc`, `.npmrc`, `.pypirc`,
+  `.git-credentials`, and `.pgpass`; private-key names `id_rsa`, `id_dsa`,
+  `id_ecdsa`, and `id_ed25519`, plus `*.key`, `*.p12`, and `*.pfx`.
+  The corresponding `.pub` files remain included.
+- Secret directories `.ssh`, `.aws`, and `.gnupg`, including their contents;
+  `.docker/config.json` and `.kube/config` files, without excluding other
+  files under `.docker` or `.kube`. These rules apply at any depth.
+
+`--include-secrets` on `share`, `update`, and `watch` opts conventional secret
+paths back in; library callers set `Source.IncludeSecrets`. The editor, VCS,
+and dependency filters remain active. A Markdown `--entry` that matches a
+secret rule is a usage error unless secrets are included; opting in does not
+allow an editor-filtered entry. Packing, hashing, directory registration, and
+the event filter all use the same source option.
+
+Every excluded secret entry emits a stderr warning containing only its relative
+path, never its contents, and saying that its name is excluded by the secret
+rule: a differently named symlink to the same file is not a secret name. An
+excluded secret directory is named once per walk, without reading or listing
+its contents. Watch reports each secret warning once per path per run, whether
+it comes from registration, an event or a publish; a secret path created later
+warns once too, and repeated hash scans stay quiet. An explicitly selected
+single file still publishes as requested, and warns if its selected path or
+name matches a secret rule, even with `--include-secrets` or a different
+`--name`. Its source bytes are unchanged. A selected folder that is a secret
+directory, or is inside one, by its absolute or resolved path (`share ~/.aws`,
+`share .` inside `.ssh`), is a usage error unless `--include-secrets` is given,
+because the walk filters names only below the selected root. Warnings stay on
+stderr even with `--json`.
+
+Use a dedicated output directory containing only files intended for recipients.
+These are name-based exclusions, not secret-content detection. They do not
+remove secrets from already published versions.
 
 File-name filters are case-insensitive; directory names match exactly. The
 walk applies the rule before it follows an entry: a listed directory's own
@@ -816,9 +1131,10 @@ followed when either rule matches its name. An Emacs lock (`.#x`, a dangling
 symlink) is therefore skipped and counted rather than warned about, a
 `node_modules` link out of the folder does not fail the upload, and a skipped
 temp file that vanishes mid-walk is not a source change. One function,
-`skipEntry`, makes this decision for the walk, the watch event filter (for
-the last path component) and the Markdown `--entry` check (for every
-component, typed through the folder's `os.Root`). For an event on a name
+`skipEntry`, makes this decision from a root-relative path and listed type for
+the walk, the watch event filter, and the Markdown `--entry` check. The event
+filter and entry check apply it to every component; the entry check obtains
+types through the folder's `os.Root`. For an event on a name
 that is already gone, the filter uses the file rule unless the name was a
 registered directory, so editor temp-file churn neither rehashes the folder
 nor resets the watch's retry budget.
@@ -847,12 +1163,12 @@ rejects any blob that differs from the declared hash. Each failed chunk costs
 one local re-read of that prefix. A
 mismatch means the file changed during the upload: `share` and `update` start
 over once and then fail, and `watch` waits for the next settled change. A
-retried upload abandons the first upload session; the server removes it when
-it expires (24h). Directories, single files forced to
+retried upload abandons the first upload session; the server expires idle
+sessions after 1h and reclaims their staging bytes. Directories, single files forced to
 a bundle, and `.zip` input are packed into a temporary tar.gz first; stdin is
 spooled to a temporary file.
 
-Archive entries supplied with `--as bundle` are not editor-filtered. ZIP input
+Archive entries supplied with `--as bundle` are not editor- or secret-filtered. ZIP input
 is converted to tar.gz using the existing archive conventions: strip a common
 top-level folder and omit `._*` files, `__MACOSX/` entries, and non-regular
 entries. tar.gz input is passed through. The server still validates archive

@@ -110,7 +110,7 @@ func hashArtifactPassword(pw string) (string, error) {
 
 // materialize verifies a completed upload and stores it as version files.
 // It returns the version and a suggested title.
-func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*store.NewVersion, string, error) {
+func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attempt *publication) (*store.NewVersion, string, error) {
 	up, err := s.db.UploadByID(ctx, actor.UserID, c.UploadID)
 	if err != nil {
 		return nil, "", apperr.NotFound("upload not found or expired")
@@ -124,7 +124,7 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, contextReader{ctx: ctx, r: f}); err != nil {
 		return nil, "", apperr.Internal(err)
 	}
 	if !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), c.SHA256) {
@@ -134,12 +134,12 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 		return nil, "", apperr.Internal(err)
 	}
 
-	v := &store.NewVersion{Kind: c.Kind, SPA: c.SPA, Note: truncate(strings.TrimSpace(c.Note), maxNote), TokenName: actor.TokenName}
+	v := &store.NewVersion{UploadID: up.ID, Kind: c.Kind, SPA: c.SPA, Note: truncate(strings.TrimSpace(c.Note), maxNote), TokenName: actor.TokenName}
 	var title string
 	switch c.Kind {
 	case api.KindHTML:
 		head := &headCapture{max: 64 << 10}
-		sum, size, err := s.blobs.Put(io.TeeReader(f, head), s.cfg.MaxVersionBytes)
+		sum, size, err := attempt.put(io.TeeReader(f, head), up.Size)
 		if err != nil {
 			return nil, "", s.blobErr(err)
 		}
@@ -149,7 +149,7 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 	case api.KindFile:
 		name := sanitizeFilename(c.Filename)
 		head := &headCapture{max: 512}
-		sum, size, err := s.blobs.Put(io.TeeReader(f, head), s.cfg.MaxVersionBytes)
+		sum, size, err := attempt.put(io.TeeReader(f, head), up.Size)
 		if err != nil {
 			return nil, "", s.blobErr(err)
 		}
@@ -157,7 +157,7 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 		v.Files = []store.File{{Path: name, Blob: sum, Size: size, ContentType: contentTypeFor(name, head.buf.Bytes())}}
 		title = name
 	case api.KindBundle:
-		files, err := s.extractBundle(f)
+		files, err := s.extractBundle(f, attempt)
 		if err != nil {
 			return nil, "", err
 		}
@@ -178,8 +178,6 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content) (*sto
 	default:
 		return nil, "", apperr.Invalid("kind must be html, file, or bundle")
 	}
-	f.Close()
-	s.discardUpload(ctx, up.ID)
 	return v, title, nil
 }
 
@@ -204,6 +202,10 @@ func (s *Service) blobErr(err error) error {
 	if errors.Is(err, blob.ErrTooLarge) {
 		return apperr.TooLarge("content exceeds the %s per-version limit", humanBytes(s.cfg.MaxVersionBytes))
 	}
+	var app *apperr.Error
+	if errors.As(err, &app) {
+		return err
+	}
 	return apperr.Internal(err)
 }
 
@@ -219,8 +221,14 @@ func (s *Service) blobTitle(sum string) string {
 
 // --- owner operations ---
 
-// Create publishes an upload as a new artifact.
-func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (Artifact, error) {
+// Create publishes an upload as a new artifact. Every error after the
+// publication begins, including invalid settings, goes through its finish.
+func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (_ Artifact, err error) {
+	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer func() { attempt.finish(err) }()
 	exp, err := s.expiry(set.TTL)
 	if err != nil {
 		return Artifact{}, err
@@ -232,7 +240,10 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	if err != nil {
 		return Artifact{}, err
 	}
-	v, title, err := s.materialize(ctx, actor, c)
+	if err := attempt.admit(); err != nil {
+		return Artifact{}, err
+	}
+	v, title, err := s.materialize(ctx, actor, c, attempt)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -246,6 +257,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	if err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	attempt.committed = true
 	s.log.Info("artifact created", "id", id, "user", actor.Username, "kind", v.Kind, "token", actor.TokenName)
 	return s.reload(ctx, id)
 }
@@ -309,12 +321,20 @@ func (s *Service) list(ctx context.Context, f store.ListFilter, status string) (
 }
 
 // AddVersion publishes an upload as the new current version (same link).
-func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (Artifact, error) {
+func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (_ Artifact, err error) {
+	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	defer func() { attempt.finish(err) }()
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
 		return Artifact{}, err
 	}
-	v, _, err := s.materialize(ctx, actor, c)
+	if err := attempt.admit(); err != nil {
+		return Artifact{}, err
+	}
+	v, _, err := s.materialize(ctx, actor, c, attempt)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -322,6 +342,7 @@ func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Cont
 	if err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	attempt.committed = true
 	s.log.Info("artifact version published", "id", a.ID, "version", n, "user", actor.Username)
 	return s.reload(ctx, a.ID)
 }
@@ -359,6 +380,9 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 			return Artifact{}, err
 		}
 		u.MaxViews = p.MaxViews
+	}
+	if p.Revoked != nil && !*p.Revoked && a.AdminRevoked {
+		return Artifact{}, apperr.Forbidden("an administrator revoked this artifact; only an administrator can restore it")
 	}
 	u.ResetViews, u.Revoked, u.SPA, u.InfoButton, u.OldVersions, u.Feedback = p.ResetViews, p.Revoked, p.SPA, p.InfoButton, p.OldVersions, p.Feedback
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {

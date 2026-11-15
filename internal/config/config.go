@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -40,6 +41,7 @@ type Config struct {
 	MaxTotalBytes     int64
 	DefaultQuotaBytes int64
 	MaxFiles          int
+	MaxOpenUploads    int // per user, including expired sessions awaiting cleanup
 	ChunkSize         int64
 	KeepVersions      int // 0 = unlimited
 
@@ -65,11 +67,21 @@ type Config struct {
 
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
-	CountryHeader  string
+	// TrustedHops (REDROP_TRUSTED_HOPS) is how many proxies append to
+	// X-Forwarded-For before redrop; 0 walks the header past trusted
+	// addresses instead.
+	TrustedHops   int
+	CountryHeader string
 
 	OIDC             []OIDCProvider
 	PasswordLogin    bool
 	AdminRequiresSSO bool
+
+	// APIDocs serves the interactive API docs page at /api/docs. It loads a
+	// third-party script without a pinned version and without the
+	// dashboard's CSP, so it is off unless REDROP_API_DOCS=true.
+	// /api/openapi.json is always served.
+	APIDocs bool
 
 	SecretFile string
 }
@@ -225,6 +237,9 @@ func Load() (*Config, error) {
 	if c.MaxFiles, err = strconv.Atoi(env("REDROP_MAX_FILES", "20000")); err != nil {
 		return nil, fmt.Errorf("REDROP_MAX_FILES: %w", err)
 	}
+	if c.MaxOpenUploads, err = envPositiveInt("REDROP_MAX_OPEN_UPLOADS", "8"); err != nil {
+		return nil, err
+	}
 	if c.KeepVersions, err = strconv.Atoi(env("REDROP_KEEP_VERSIONS", "0")); err != nil {
 		return nil, fmt.Errorf("REDROP_KEEP_VERSIONS: %w", err)
 	}
@@ -259,6 +274,12 @@ func Load() (*Config, error) {
 		c.TrustedProxies = append(c.TrustedProxies, n)
 	}
 	c.ClientIPHeader = env("REDROP_CLIENT_IP_HEADER", "X-Forwarded-For")
+	if c.TrustedHops, err = strconv.Atoi(env("REDROP_TRUSTED_HOPS", "0")); err != nil || c.TrustedHops < 0 || c.TrustedHops > maxTrustedHops {
+		return nil, fmt.Errorf("REDROP_TRUSTED_HOPS must be a whole number from 0 to %d (got %q)", maxTrustedHops, env("REDROP_TRUSTED_HOPS", "0"))
+	}
+	if c.TrustedHops > 0 && http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" {
+		return nil, fmt.Errorf("REDROP_TRUSTED_HOPS counts X-Forwarded-For entries; it needs REDROP_CLIENT_IP_HEADER=X-Forwarded-For (got %q)", c.ClientIPHeader)
+	}
 	c.CountryHeader = env("REDROP_COUNTRY_HEADER", "CF-IPCountry")
 
 	if c.PasswordLogin, err = envBool("REDROP_PASSWORD_LOGIN", true); err != nil {
@@ -293,7 +314,49 @@ func Load() (*Config, error) {
 	if !c.PasswordLogin && len(c.OIDC) == 0 {
 		return nil, fmt.Errorf("REDROP_PASSWORD_LOGIN=false needs at least one OIDC provider")
 	}
+	if c.APIDocs, err = envBool("REDROP_API_DOCS", false); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// maxTrustedHops bounds REDROP_TRUSTED_HOPS; real proxy chains are short.
+const maxTrustedHops = 10
+
+// Widest trusted-proxy ranges that do not draw a warning with
+// X-Forwarded-For. A wider range is likely a whole CDN or cloud network.
+const (
+	maxQuietProxyBitsV4 = 24
+	maxQuietProxyBitsV6 = 48
+)
+
+// Warnings lists settings that load but weaken a protection; the server
+// logs them at startup.
+//
+// Without REDROP_TRUSTED_HOPS, the client address is the first untrusted
+// X-Forwarded-For hop from the right. Anyone who can send requests from
+// inside a trusted range, such as a CDN worker inside the CDN's published
+// ranges, can then put any address in front of it, and every per-client
+// limit sees a new client. With a hop count the ranges no longer decide
+// which entry is read, so there is nothing to warn about.
+func (c *Config) Warnings() []string {
+	if http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" || c.TrustedHops > 0 {
+		return nil
+	}
+	var wide []string
+	for _, n := range c.TrustedProxies {
+		ones, bits := n.Mask.Size()
+		if (bits == 32 && ones < maxQuietProxyBitsV4) || (bits == 128 && ones < maxQuietProxyBitsV6) {
+			wide = append(wide, n.String())
+		}
+	}
+	if len(wide) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("REDROP_TRUSTED_PROXIES has ranges wider than a /%d (IPv4) or /%d (IPv6) while REDROP_CLIENT_IP_HEADER is X-Forwarded-For: %s. "+
+		"Anyone who can send requests from inside them (for example a CDN worker) can choose the client address that rate limits see. "+
+		"Set REDROP_TRUSTED_HOPS to the number of proxies that append to X-Forwarded-For (2 for Cloudflare in front of a reverse proxy), or trust only your own reverse proxy",
+		maxQuietProxyBitsV4, maxQuietProxyBitsV6, strings.Join(wide, ", "))}
 }
 
 // ContentHost returns the bare content domain (no port).

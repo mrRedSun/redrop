@@ -54,7 +54,7 @@ func (h *Handler) feedback(w http.ResponseWriter, r *http.Request, slug string) 
 	}
 	switch {
 	case d == sharing.ShowGone:
-		if !h.misses.Take(h.missKey(r)) {
+		if !h.misses.Take(h.clients.Network(r)) {
 			h.tooManyMisses(w)
 			return
 		}
@@ -72,7 +72,7 @@ func (h *Handler) feedback(w http.ResponseWriter, r *http.Request, slug string) 
 	case d == sharing.ShowGate:
 		feedbackAnswer(w, http.StatusForbidden, "access_required", "Your access to this page has ended. Reload it to continue.")
 		return
-	case !h.posts.Take(h.missKey(r)):
+	case !h.posts.Take(h.clients.Network(r)):
 		w.Header().Set("Retry-After", strconv.Itoa((60+h.cfg.FeedbackPerMinute-1)/h.cfg.FeedbackPerMinute))
 		feedbackAnswer(w, http.StatusTooManyRequests, "rate_limited", "Too much feedback from your network. Wait a minute and try again.")
 		return

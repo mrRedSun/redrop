@@ -5,6 +5,7 @@ package apperr
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Kind classifies an error independently of any transport.
@@ -25,10 +26,11 @@ const (
 // Error is a user-safe error with a kind, a message, and an optional
 // machine-readable code (e.g. "totp_required").
 type Error struct {
-	Kind Kind
-	Code string
-	Msg  string
-	Err  error // internal cause, never shown to users
+	Kind       Kind
+	Code       string
+	Msg        string
+	RetryAfter time.Duration // for KindRateLimited: when to try again, if known
+	Err        error         // internal cause, never shown to users
 }
 
 func (e *Error) Error() string {
@@ -55,6 +57,9 @@ func RateLimited(format string, a ...any) *Error  { return newf(KindRateLimited,
 
 // WithCode attaches a machine-readable code.
 func (e *Error) WithCode(code string) *Error { e.Code = code; return e }
+
+// WithRetryAfter records when a rate-limited caller may try again.
+func (e *Error) WithRetryAfter(d time.Duration) *Error { e.RetryAfter = d; return e }
 
 // Internal wraps an unexpected error; its cause is logged, not shown.
 func Internal(err error) *Error { return &Error{Kind: KindInternal, Msg: "internal error", Err: err} }

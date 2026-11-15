@@ -104,7 +104,7 @@ func TestAdminArtifactCarriesNoSecrets(t *testing.T) {
 	walk(reflect.TypeOf(AdminArtifact{}))
 	sort.Strings(names)
 	want := []string{"CreatedAt", "ExpiresAt", "Feedback", "Files", "HasPassword", "ID", "InfoButton", "Kind", "LastViewedAt", "MaxViews", "OldVersions", "OwnerUsername",
-		"Previews", "PurgeAt", "Size", "Status", "Title", "TokenName", "TotalSize", "UpdatedAt", "Version", "Versions", "Views"}
+		"Previews", "PurgeAt", "RevokedByAdmin", "Size", "Status", "Title", "TokenName", "TotalSize", "UpdatedAt", "Version", "Versions", "Views"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("AdminArtifact fields changed:\n got %v\nwant %v", names, want)
 	}

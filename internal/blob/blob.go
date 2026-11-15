@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -44,6 +45,16 @@ var ErrTooLarge = errors.New("content exceeds size limit")
 // Put stores r and returns its hash and size. A non-negative limit caps the
 // size (0 allows only empty content); a negative limit means unlimited.
 func (s *Store) Put(r io.Reader, limit int64) (string, int64, error) {
+	return s.put(r, limit, nil)
+}
+
+// PutTracked records only blobs newly installed by this attempt. Callers must
+// serialize writes and GC until their database commit or rollback completes.
+func (s *Store) PutTracked(r io.Reader, limit int64, created map[string]struct{}) (string, int64, error) {
+	return s.put(r, limit, created)
+}
+
+func (s *Store) put(r io.Reader, limit int64, created map[string]struct{}) (string, int64, error) {
 	f, err := os.CreateTemp(s.tmp, "blob-*")
 	if err != nil {
 		return "", 0, err
@@ -81,7 +92,23 @@ func (s *Store) Put(r io.Reader, limit int64) (string, int64, error) {
 	if err := os.Rename(tmp, dst); err != nil {
 		return "", 0, err
 	}
+	if created != nil {
+		created[sum] = struct{}{}
+	}
 	return sum, n, nil
+}
+
+// Remove deletes a known blob. Publication rollback holds the same exclusion
+// as writes and GC and removes only newly created, unreferenced hashes.
+func (s *Store) Remove(h string) error {
+	if !validHash(h) {
+		return fs.ErrInvalid
+	}
+	err := os.Remove(s.path(h))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // Open returns the blob for reading.
@@ -92,12 +119,33 @@ func (s *Store) Open(h string) (*os.File, error) {
 	return os.Open(s.path(h))
 }
 
-// GC removes blobs that are not referenced and older than minAge.
+// GC removes blobs that are not referenced and older than minAge. A blob or
+// directory that cannot be read or removed does not stop the walk; GC returns
+// the failures joined (the first few, then a count).
 func (s *Store) GC(referenced map[string]struct{}, minAge time.Duration) (removed int, freed int64, err error) {
+	return s.gc(referenced, minAge, os.Remove)
+}
+
+// maxGCErrors bounds the failures GC reports individually.
+const maxGCErrors = 8
+
+// gc accepts a remove function so tests can reproduce filesystem failures as root.
+func (s *Store) gc(referenced map[string]struct{}, minAge time.Duration, remove func(string) error) (removed int, freed int64, err error) {
 	cutoff := time.Now().Add(-minAge)
-	err = filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
-		if werr != nil || d.IsDir() {
-			return werr
+	var errs []error
+	failed := 0
+	fail := func(err error) {
+		if failed++; failed <= maxGCErrors {
+			errs = append(errs, err)
+		}
+	}
+	walkErr := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			fail(werr)
+			return nil // skip what cannot be read; keep collecting elsewhere
+		}
+		if d.IsDir() {
+			return nil
 		}
 		name := d.Name()
 		if !validHash(name) {
@@ -110,13 +158,23 @@ func (s *Store) GC(referenced map[string]struct{}, minAge time.Duration) (remove
 		if ierr != nil || info.ModTime().After(cutoff) {
 			return nil
 		}
-		if os.Remove(p) == nil {
-			removed++
-			freed += info.Size()
+		if err := remove(p); err != nil {
+			if !os.IsNotExist(err) {
+				fail(err)
+			}
+			return nil
 		}
+		removed++
+		freed += info.Size()
 		return nil
 	})
-	return
+	if walkErr != nil {
+		fail(walkErr)
+	}
+	if failed > maxGCErrors {
+		errs = append(errs, fmt.Errorf("%d more blob GC failures", failed-maxGCErrors))
+	}
+	return removed, freed, errors.Join(errs...)
 }
 
 // Usage returns the bytes stored on disk.

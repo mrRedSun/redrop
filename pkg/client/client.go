@@ -185,12 +185,39 @@ func (c *Client) GetArtifact(ctx context.Context, id string) (*api.Artifact, err
 
 func (c *Client) CreateArtifact(ctx context.Context, req *api.CreateArtifactRequest) (*api.Artifact, error) {
 	var out api.Artifact
-	return &out, c.do(ctx, http.MethodPost, "/api/v1/artifacts", req, &out)
+	return &out, c.publish(ctx, "/api/v1/artifacts", req, &out)
 }
 
 func (c *Client) CreateVersion(ctx context.Context, id string, req *api.PublishRequest) (*api.Artifact, error) {
 	var out api.Artifact
-	return &out, c.do(ctx, http.MethodPost, "/api/v1/artifacts/"+esc(id)+"/versions", req, &out)
+	return &out, c.publish(ctx, "/api/v1/artifacts/"+esc(id)+"/versions", req, &out)
+}
+
+// A server runs one publication per account at a time and refuses another
+// with api.CodePublicationBusy. The upload stays valid, so the client retries
+// with backoff and concurrent shares by one account still succeed.
+var (
+	publishBusyDelay = 250 * time.Millisecond
+	publishBusyMax   = 5 * time.Second
+	publishBusyWait  = 5 * time.Minute
+)
+
+// publish posts a publication, retrying while another publication by the
+// same account is in progress, up to publishBusyWait.
+func (c *Client) publish(ctx context.Context, path string, in any, out *api.Artifact) error {
+	deadline := time.Now().Add(publishBusyWait)
+	for delay := publishBusyDelay; ; delay = min(2*delay, publishBusyMax) {
+		err := c.do(ctx, http.MethodPost, path, in, out)
+		var e *Error
+		if !errors.As(err, &e) || e.Status != http.StatusConflict || e.Title != api.CodePublicationBusy || time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
 }
 
 func (c *Client) UpdateArtifact(ctx context.Context, id string, req *api.UpdateArtifactRequest) (*api.Artifact, error) {

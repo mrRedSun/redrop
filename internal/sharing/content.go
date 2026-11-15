@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"html"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -133,15 +135,20 @@ func (h *headCapture) Write(p []byte) (int, error) {
 
 // extractBundle unpacks a tar.gz into blobs, enforcing file-count and
 // decompressed-size limits and rejecting links and special files.
-func (s *Service) extractBundle(r io.Reader) ([]store.File, error) {
-	gz, err := gzip.NewReader(r)
+func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File, error) {
+	ctx := attempt.ctx
+	gz, err := gzip.NewReader(contextReader{ctx: ctx, r: r})
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, apperr.Internal(ctx.Err())
+		}
 		return nil, apperr.Invalid("bundle must be a .tar.gz archive")
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	work := &archiveWorkReader{r: contextReader{ctx: ctx, r: gz}, remaining: s.archiveReadLimit(), maxEntries: s.archiveEntryLimit()}
+	tr := tar.NewReader(work)
 	var files []store.File
-	seen := map[string]bool{}
+	seen := map[string]bool{} // regular-file paths only, bounded by MaxFiles
 	var total int64
 	for {
 		hdr, err := tr.Next()
@@ -149,41 +156,104 @@ func (s *Service) extractBundle(r io.Reader) ([]store.File, error) {
 			break
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, apperr.Internal(ctx.Err())
+			}
+			var app *apperr.Error
+			if errors.As(err, &app) {
+				return nil, err
+			}
 			return nil, apperr.Invalid("corrupt bundle archive")
 		}
 		switch hdr.Typeflag {
-		case tar.TypeDir, tar.TypeXGlobalHeader, tar.TypeXHeader:
-			continue
-		case tar.TypeReg:
+		case tar.TypeReg, tar.TypeDir, tar.TypeXGlobalHeader:
 		default:
 			return nil, apperr.Invalid("bundle may only contain regular files (found a link or special file: %q)", hdr.Name)
+		}
+		if !work.inSync(hdr) {
+			// The entry cap counts headers only while the counter agrees
+			// with archive/tar on where each one starts.
+			return nil, apperr.Invalid("malformed bundle archive: inconsistent entry framing")
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			// As on main, directory and global metadata entries carry no
+			// content, and their names are neither validated nor retained.
+			// The work reader has counted them.
+			continue
 		}
 		p, err := CleanBundlePath(hdr.Name)
 		if err != nil {
 			return nil, apperr.Invalid("%s", err.Error())
 		}
-		if p == "" || seen[p] {
-			continue
+		if p == "" {
+			return nil, apperr.Invalid("regular bundle file has an empty path")
 		}
-		seen[p] = true
+		if seen[p] {
+			return nil, apperr.Invalid("duplicate normalized bundle path %q", p)
+		}
 		if len(files) >= s.cfg.MaxFiles {
 			return nil, apperr.Invalid("bundle has more than %d files", s.cfg.MaxFiles)
 		}
+		seen[p] = true
+		if hdr.Size < 0 || hdr.Size > s.cfg.MaxVersionBytes-total {
+			return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
+		}
 		head := &headCapture{max: 512}
-		sum, size, err := s.blobs.Put(io.TeeReader(tr, head), s.cfg.MaxVersionBytes-total)
+		sum, size, err := attempt.put(io.TeeReader(archiveBody{tr}, head), hdr.Size)
 		if err != nil {
 			if errors.Is(err, blob.ErrTooLarge) {
 				return nil, apperr.TooLarge("bundle exceeds the %s per-version limit when unpacked", humanBytes(s.cfg.MaxVersionBytes))
 			}
-			return nil, apperr.Internal(err)
+			return nil, s.blobErr(err)
 		}
 		total += size
 		files = append(files, store.File{Path: p, Blob: sum, Size: size, ContentType: contentTypeFor(p, head.buf.Bytes())})
+	}
+	if p := fileDirectoryCollision(files); p != "" {
+		return nil, apperr.Invalid("bundle path %q is both a file and a directory", p)
 	}
 	if len(files) == 0 {
 		return nil, apperr.Invalid("bundle is empty")
 	}
 	return files, nil
+}
+
+// archiveBody reads one entry's body from the tar reader. A read error there
+// is the archive's fault: a truncated or corrupt compressed stream, or a body
+// shorter than its header says. It becomes the same client error as a corrupt
+// header, so the publication releases its upload. Application errors (the
+// work budget) and cancellation pass through unchanged. Write-side blob errors
+// never pass through here and stay internal.
+type archiveBody struct{ r io.Reader }
+
+func (b archiveBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == nil || err == io.EOF {
+		return n, err
+	}
+	var app *apperr.Error
+	if errors.As(err, &app) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return n, err
+	}
+	return n, apperr.Invalid("corrupt bundle archive")
+}
+
+// fileDirectoryCollision returns a file path that is also a parent directory
+// of another file, or "". Directory entries are not retained, so the files'
+// own paths are the only evidence. Sorting keeps this O(n log n).
+func fileDirectoryCollision(files []store.File) string {
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = f.Path
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		// Every path below p+"/" sorts at or after it; the first one decides.
+		if i := sort.SearchStrings(paths, p+"/"); i < len(paths) && strings.HasPrefix(paths[i], p+"/") {
+			return p
+		}
+	}
+	return ""
 }
 
 func humanBytes(n int64) string {

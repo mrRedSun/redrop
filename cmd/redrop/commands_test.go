@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -174,6 +176,199 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestSecretCLIFlagAndWarnings(t *testing.T) {
+	for _, cmd := range []*cobra.Command{shareCmd(), updateCmd(), watchCmd()} {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			flag := cmd.Flags().Lookup("include-secrets")
+			if flag == nil || flag.DefValue != "false" || flag.Value.Type() != "bool" {
+				t.Fatal("--include-secrets boolean flag is missing or unsafe by default")
+			}
+		})
+	}
+	for _, include := range []bool{false, true} {
+		var f contentFlags
+		cmd := &cobra.Command{}
+		f.register(cmd)
+		if include {
+			if err := cmd.ParseFlags([]string{"--include-secrets"}); err != nil {
+				t.Error(err)
+				continue
+			}
+		}
+		dir := t.TempDir()
+		writeCLIFile(t, dir, "index.html", "public")
+		writeCLIFile(t, dir, ".env", "synthetic-marker")
+		var files map[string]string
+		out, errOut := captureCLIOutput(t, func() {
+			g.json = true
+			src, err := f.source(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := client.Prepare(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			gz, err := os.Open(p.File)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gz.Close()
+			zr, err := gzip.NewReader(gz)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer zr.Close()
+			files = map[string]string{}
+			tr := tar.NewReader(zr)
+			for {
+				h, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(tr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[h.Name] = string(body)
+			}
+		})
+		wantErr := ""
+		if !include {
+			wantErr = "warning: bundle path \".env\": name excluded by the secret rule (use --include-secrets to include)\n"
+		}
+		_, found := files[".env"]
+		if out != "" || errOut != wantErr || found != include {
+			t.Errorf("include=%v stdout=%q stderr=%q secret included=%v", include, out, errOut, found)
+		}
+	}
+}
+
+// m-B: the walk filters secret names below the selected folder only, so a
+// selected secret folder, or a folder inside one, is refused unless secrets
+// are included. Nothing is read or sent.
+func TestSecretFolderSelectionRefused(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	home := t.TempDir()
+	writeCLIFile(t, home, "index.html", "public")
+	for _, dir := range []string{".aws", ".aws/sub", ".ssh", ".gnupg"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(home, dir), "credentials", "synthetic-marker")
+	}
+	link := filepath.Join(home, "creds")
+	if err := os.Symlink(".aws", link); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(home)
+	for _, tc := range []struct{ path, cwd string }{
+		{".aws", home}, {filepath.Join(home, ".ssh"), home}, {".gnupg/", home},
+		{".aws/sub", home}, {".", filepath.Join(home, ".aws")}, {"creds", home},
+	} {
+		for _, command := range [][]string{{"share"}, {"update", "artifact-id"}, {"watch", "artifact-id"}} {
+			t.Run(command[0]+" "+tc.path, func(t *testing.T) {
+				t.Chdir(tc.cwd)
+				_, errOut := captureCLIOutput(t, func() {
+					cmd := newRootCmd()
+					cmd.SetArgs(append(append([]string{"--url", srv.URL, "--token", "test-token"}, command...), tc.path))
+					err := cmd.Execute()
+					requireExitCode(t, err, exitUsage)
+					if !strings.Contains(err.Error(), "secret directory") || !strings.Contains(err.Error(), "--include-secrets") {
+						t.Fatalf("error = %q; want the secret-directory refusal", err)
+					}
+				})
+				if strings.Contains(errOut, "synthetic-marker") {
+					t.Fatalf("stderr leaked contents: %q", errOut)
+				}
+			})
+		}
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("refused secret folders made %d requests; want none", got)
+	}
+	src := &client.Source{Path: filepath.Join(home, ".aws"), IncludeSecrets: true}
+	p, err := client.Prepare(src)
+	if err != nil {
+		t.Fatalf("--include-secrets refused: %v", err)
+	}
+	p.Close()
+}
+
+func TestSecretWatchStartupWarnings(t *testing.T) {
+	dir := t.TempDir()
+	writeCLIFile(t, dir, "index.html", "public")
+	writeCLIFile(t, dir, ".env", "synthetic-marker")
+	out, errOut := captureCLIOutput(t, func() {
+		var f contentFlags
+		src, err := f.source(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkWatchSource(src); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := client.Watch(ctx, nil, "artifact-id", src, client.WatchOptions{OnReady: cancel}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if out != "" || !strings.Contains(errOut, `bundle path ".env": name excluded by the secret rule`) || strings.Contains(errOut, dir) || strings.Contains(errOut, "synthetic-marker") {
+		t.Fatalf("watch startup missing safe stderr warning: %q", errOut)
+	}
+}
+
+func TestSecretExplicitWatchStartupWarning(t *testing.T) {
+	for _, source := range []string{".env", ".ssh/identity", ".docker/config.json"} {
+		t.Run(source, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, filepath.FromSlash(source))
+			if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := writeCLIFile(t, dir, "safe.txt", "synthetic-marker")
+			rel, err := filepath.Rel(filepath.Dir(file), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(rel, file); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			// The original selected path must warn even if watch resolves a
+			// symlink before creating its Source for later publications.
+			out, errOut := captureCLIOutput(t, func() {
+				var f contentFlags
+				src, err := f.source(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := checkWatchSource(src); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := client.Watch(ctx, nil, "artifact-id", src, client.WatchOptions{OnReady: cancel}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			want := `warning: explicit file "` + filepath.Base(source) + `" matches a conventional secret path; publishing as requested` + "\n"
+			if out != "" || errOut != want {
+				t.Fatalf("stdout=%q stderr=%q; want only relative explicit-file warning %q", out, errOut, want)
+			}
+		})
 	}
 }
 

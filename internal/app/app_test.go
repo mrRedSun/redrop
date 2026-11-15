@@ -29,6 +29,12 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, slog.New(slog.DiscardHandler), Options{})
+}
+
+// newHarnessWith builds the server with a chosen logger and options.
+func newHarnessWith(t *testing.T, log *slog.Logger, opts Options) *harness {
+	t.Helper()
 	t.Setenv("REDROP_DATA_DIR", t.TempDir())
 	t.Setenv("REDROP_PUBLIC_URL", "http://app.test")
 	t.Setenv("REDROP_CONTENT_URL", "http://content.test")
@@ -36,7 +42,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(cfg, slog.New(slog.DiscardHandler), Options{})
+	a, err := New(cfg, log, opts)
 	if err != nil {
 		t.Fatal(err)
 	}

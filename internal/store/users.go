@@ -78,9 +78,24 @@ func (s *Store) SetPassword(ctx context.Context, userID, hash string) error {
 	return err
 }
 
+// SetTOTP stores an authenticator secret. Changing the secret forgets the
+// last accepted time step, which belonged to the old one.
 func (s *Store) SetTOTP(ctx context.Context, userID, secret string, enabled bool) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_secret = ?, totp_enabled = ? WHERE id = ?`, secret, enabled, userID)
+	_, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_last_step = CASE WHEN totp_secret = ? THEN totp_last_step ELSE 0 END,
+		totp_secret = ?, totp_enabled = ? WHERE id = ?`, secret, secret, enabled, userID)
 	return err
+}
+
+// UseTOTPStep records step as the user's last accepted authenticator time
+// step, if it is later than the one recorded. It reports whether it was, so
+// of two requests with the same code exactly one succeeds.
+func (s *Store) UseTOTPStep(ctx context.Context, userID string, step int64) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_last_step = ? WHERE id = ? AND totp_last_step < ?`, step, userID, step)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (s *Store) UpdateUser(ctx context.Context, u *User) error {

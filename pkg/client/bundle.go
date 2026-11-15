@@ -28,8 +28,13 @@ type bundleFile struct {
 
 // walkHooks are the optional callbacks of a bundle walk.
 type walkHooks struct {
+	// includeSecrets opts folder sources into conventional secret paths.
+	// Editor, VCS and dependency filters remain active.
+	includeSecrets bool
 	// warn receives non-fatal warnings, such as a skipped broken symlink.
 	warn func(string)
+	// warned, if set, suppresses secret warnings already given in this run.
+	warned secretWarnings
 	// beforeRead, set only by tests, runs between a file's stat and its
 	// read, to reproduce a tree that changes mid-read.
 	beforeRead func(name string)
@@ -38,7 +43,7 @@ type walkHooks struct {
 // bundleWalk is the one traversal of a directory bundle. Packing, the watch
 // content digest (hashTree) and the watch directory registration all use it,
 // so they agree on which files count: the same os.Root confinement, symlink
-// rules and skip rule (skipEntryName, which the watch event filter also
+// rules and skip decision (skipEntry, which the watch event filter also
 // uses). Errors from entries that were listed and then vanished, and from
 // files that ended before their listed size, wrap ErrSourceChanged.
 type bundleWalk struct {
@@ -62,28 +67,83 @@ func (b *bundleWalk) run(start string) error {
 	return b.walk(start, nil, nil)
 }
 
-// skipEntry is the walk's skip decision for one path component with base
-// name base and type mode, as listed (not followed): a directory uses the
-// directory rule; anything else is skipped by the file rule, and a symlink
-// also by the directory rule, so a skip-named link is never followed.
-// counted reports a skip that the walk counts as a skipped file. The watch
-// event filter and the Markdown --entry check use it too, so they decide
-// exactly as the walk does.
-func skipEntry(base string, mode fs.FileMode) (skip, counted bool) {
+// skipEntry decides for a root-relative slash path and its listed type,
+// before following symlinks. Directory, file and symlink handling preserves
+// the editor rule. Secret paths can be opted into independently. Packing,
+// hashing, watch registration/events and Markdown entry selection all use it.
+// counted identifies excluded file entries; secret identifies the warning.
+func skipEntry(name string, mode fs.FileMode, includeSecrets bool) (skip, counted, secret bool) {
+	if !includeSecrets {
+		switch {
+		case mode.IsDir():
+			secret = secretEntryName(name, true)
+		case secretEntryName(name, false):
+			return true, true, true
+		case mode&fs.ModeSymlink != 0:
+			secret = secretEntryName(name, true)
+		}
+		if secret {
+			return true, false, true
+		}
+	}
+	base := path.Base(name)
 	switch {
 	case mode.IsDir():
-		return skipEntryName(base, true), false
+		return skipEntryName(base, true), false, false
 	case skipEntryName(base, false):
-		return true, true
+		return true, true, false
 	case mode&fs.ModeSymlink != 0:
-		return skipEntryName(base, true), false
+		return skipEntryName(base, true), false, false
 	}
-	return false, false
+	return false, false, false
 }
 
-// skip applies skipEntry to name before anything follows it, so a skipped
-// entry is never stat'ed through a symlink, warned about, or reported as
-// changed. Skipped file entries are counted.
+// secretEntryName matches conventional secret names at any depth. Directory
+// names match exactly; file names are case-insensitive, like editor filters.
+// The .docker/.kube rules exclude only their config files, not useful assets.
+func secretEntryName(name string, isDir bool) bool {
+	base := path.Base(name)
+	if isDir {
+		return base == ".ssh" || base == ".aws" || base == ".gnupg"
+	}
+	lower := strings.ToLower(base)
+	switch lower {
+	case ".env.example", ".env.sample", ".env.template":
+		return false
+	case ".env", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519":
+		return true
+	}
+	return strings.HasPrefix(lower, ".env.") || strings.HasSuffix(lower, ".key") ||
+		strings.HasSuffix(lower, ".p12") || strings.HasSuffix(lower, ".pfx") ||
+		path.Base(path.Dir(name)) == ".docker" && lower == "config.json" ||
+		path.Base(path.Dir(name)) == ".kube" && lower == "config"
+}
+
+// secretWarnings remembers the secret warnings already given. Watch keeps
+// one per run, so repeated publishes and events report each path once. It is
+// used by one goroutine at a time.
+type secretWarnings map[string]bool
+
+// first records message and reports whether it is new. A nil set reports
+// every message.
+func (s secretWarnings) first(message string) bool {
+	if s == nil {
+		return true
+	}
+	if s[message] {
+		return false
+	}
+	s[message] = true
+	return true
+}
+
+func secretPathWarning(name string) string {
+	return fmt.Sprintf("bundle path %q: name excluded by the secret rule (use --include-secrets to include)", name)
+}
+
+// skip applies skipEntry before following an entry, so skipped links and
+// vanished temp files are never reported as source changes. Secret exclusions
+// warn with their relative path. Skipped file entries are counted.
 func (b *bundleWalk) skip(name string, entry fs.DirEntry) bool {
 	if name == "." {
 		return false
@@ -98,9 +158,12 @@ func (b *bundleWalk) skip(name string, entry fs.DirEntry) bool {
 		}
 		mode = info.Mode()
 	}
-	skip, counted := skipEntry(path.Base(name), mode)
+	skip, counted, secret := skipEntry(name, mode, b.hooks.includeSecrets)
 	if counted {
 		b.skipped++
+	}
+	if warning := secretPathWarning(name); secret && b.hooks.warned.first(warning) {
+		b.warn(warning)
 	}
 	return skip
 }
@@ -277,10 +340,9 @@ func packFS(fsys fs.FS, w io.Writer, hooks walkHooks, extras ...bundleFile) (*pa
 	return result, nil
 }
 
-// skipEntryName is the single skip rule for publishable content: the
-// bundle walk (packing, the watch content digest, watch registration) and
-// the watch event filter all consult it, so they can never disagree about
-// what counts; skipEntry adds the type-dependent part. Directories: VCS and
+// skipEntryName is the editor/VCS skip rule, retained even when secrets are
+// included. skipEntry adds secret paths and the type-dependent part for all
+// folder consumers. Directories: VCS and
 // dependency caches. Files: a .git file (worktrees and submodules), OS junk
 // and editor temp/swap/backup files (vim swaps .swp down to .swa plus .swx
 // on dot-prefixed names, JetBrains ___jb_tmp___/___jb_old___, gedit

@@ -32,6 +32,10 @@ type Source struct {
 	// Warn receives non-fatal publishing warnings, such as missing local assets.
 	// Nil leaves warnings available only on Prepared.Warnings.
 	Warn func(string)
+	// IncludeSecrets opts directory sources into conventional secret paths.
+	// It does not disable editor/VCS filters. Explicit files always publish,
+	// with a warning if their selected path or name matches a secret rule.
+	IncludeSecrets bool
 	// Entry is the start page inside a bundle (default index.html).
 	// With Render markdown on a directory, it selects the Markdown source.
 	Entry string
@@ -49,6 +53,8 @@ type Source struct {
 	// uploaded as is (between Prepare and UploadFile), to reproduce a tree
 	// that changes mid-read.
 	beforeRead func(rel string)
+	// warned, set by Watch for its run, reports each secret warning once.
+	warned secretWarnings
 }
 
 // Prepared is a source ready to upload: the original file itself, or a
@@ -131,6 +137,8 @@ func Prepare(src *Source) (*Prepared, error) {
 		return nil, usageErrorf("--render markdown conflicts with --as %s; omit --as or use --as bundle", src.Kind)
 	}
 	p := &Prepared{Entry: src.Entry}
+	// Exclusions must also be reported when they leave an empty folder.
+	defer func() { p.reportWarnings(src.Warn) }()
 	var tmpFiles []string
 	p.cleanup = func() {
 		for _, f := range tmpFiles {
@@ -189,13 +197,23 @@ func Prepare(src *Source) (*Prepared, error) {
 			return nil, usageErrorf("%s is not a regular file or directory", src.Path)
 		}
 	}
+	if !isDir {
+		if warning := explicitSecretWarning(src.Path, name); warning != "" && src.warned.first(warning) {
+			p.warn(warning)
+		}
+	} else if !src.IncludeSecrets {
+		if dir := secretDirectory(src.Path, srcPath); dir != "" {
+			return nil, usageErrorf("folder %s is or is inside the secret directory %s; pass --include-secrets to publish it", src.Path, dir)
+		}
+	}
 	shouldRender := mode == RenderMarkdown || (mode == RenderAuto && src.Kind == "" && !isDir && strings.EqualFold(path.Ext(name), ".md"))
 	if shouldRender {
 		rendered, err := prepareMarkdown(src, srcPath, name, isDir)
 		if err != nil {
 			return fail(err)
 		}
-		rendered.reportWarnings(src.Warn)
+		rendered.Warnings = append(p.Warnings, rendered.Warnings...)
+		p.Warnings = rendered.Warnings
 		cleanup := rendered.cleanup
 		rendered.cleanup = func() { cleanup(); p.Close() }
 		return rendered, nil
@@ -224,7 +242,7 @@ func Prepare(src *Source) (*Prepared, error) {
 	}
 	switch {
 	case isDir:
-		p.Digest, p.skipped, err = packDir(srcPath, out, walkHooks{warn: p.warn, beforeRead: src.beforeRead})
+		p.Digest, p.skipped, err = packDir(srcPath, out, walkHooks{includeSecrets: src.IncludeSecrets, warn: p.warn, warned: src.warned, beforeRead: src.beforeRead})
 	case strings.HasSuffix(lower, ".zip"):
 		p.Digest, err = zipToTarGz(srcPath, src.beforeRead, out)
 	case strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm"):
@@ -239,8 +257,50 @@ func Prepare(src *Source) (*Prepared, error) {
 		return fail(err)
 	}
 	p.File = out.Name()
-	p.reportWarnings(src.Warn)
 	return p, nil
+}
+
+// explicitSecretWarning uses the selected path, never a symlink target or
+// spool path. A --name override cannot hide a secret source name. Only the
+// base name is printed, so absolute source paths never enter warnings.
+func explicitSecretWarning(selected, name string) string {
+	selected = filepath.ToSlash(filepath.Clean(selected))
+	if explicitSecretPath(selected) {
+		name = path.Base(selected)
+	} else if !explicitSecretPath(filepath.ToSlash(name)) {
+		return ""
+	}
+	return fmt.Sprintf("explicit file %q matches a conventional secret path; publishing as requested", path.Base(filepath.ToSlash(name)))
+}
+
+// secretDirectory returns the first component of a selected folder, or of
+// its resolved real path, that names a secret directory, or "". The walk
+// filters names below the folder only, so selecting such a folder, or one
+// inside it, would otherwise publish it without a warning.
+func secretDirectory(paths ...string) string {
+	for _, p := range paths {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+			if part != "" && secretEntryName(part, true) {
+				return part
+			}
+		}
+	}
+	return ""
+}
+
+// explicitSecretPath checks parent components too, so explicitly selecting
+// .ssh/identity or .docker/config.json warns without changing file semantics.
+func explicitSecretPath(name string) bool {
+	parts := strings.Split(name, "/")
+	for i := range parts {
+		if secretEntryName(strings.Join(parts[:i+1], "/"), i < len(parts)-1) {
+			return true
+		}
+	}
+	return false
 }
 
 // zipToTarGz converts a zip to a tar.gz bundle and returns the zip's

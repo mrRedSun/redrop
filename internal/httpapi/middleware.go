@@ -2,9 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"mime"
 	"net/http"
+	"path"
 	"strings"
 	"time"
+
+	"github.com/go-fuego/fuego"
 
 	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/apperr"
@@ -131,6 +135,42 @@ func (a *API) csrfOnly(next http.Handler) http.Handler {
 	})
 }
 
+// Request body limits. The unauthenticated sign-in and onboarding routes
+// take a username, password, code and link token, which fit in a few KiB.
+const (
+	maxAuthBody = 4 << 10
+	maxJSONBody = 1 << 20
+)
+
+// authBody admits the JSON body of an unauthenticated sign-in or onboarding
+// route, up to maxAuthBody.
+func (a *API) authBody(next http.Handler) http.Handler { return jsonBody(next, maxAuthBody) }
+
+// jsonIn admits the JSON body of any other route, up to maxJSONBody.
+func (a *API) jsonIn(next http.Handler) http.Handler { return jsonBody(next, maxJSONBody) }
+
+// jsonBody runs before anything decodes the body. A body that is not
+// application/json gets 415; Fuego would otherwise pick a decoder from the
+// Content-Type and panic on text/plain. A declared length over n gets 413,
+// and a body without one is cut off at n (413 from toProblem). A request
+// with neither a body nor a Content-Type passes: Fuego decodes it as empty.
+func jsonBody(next http.Handler, n int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := r.Header.Get("Content-Type"); ct != "" || r.ContentLength != 0 {
+			if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+				writeError(w, r, fuego.HTTPError{Status: http.StatusUnsupportedMediaType, Title: http.StatusText(http.StatusUnsupportedMediaType), Detail: "the request body must be application/json"})
+				return
+			}
+		}
+		if r.ContentLength > n {
+			writeError(w, r, apperr.TooLarge("request body is too large"))
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, n)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // securityHeaders applies dashboard-origin headers.
 func (a *API) securityHeaders(next http.Handler) http.Handler {
 	csp := "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src " + a.cfg.ContentFrameSource() +
@@ -143,7 +183,8 @@ func (a *API) securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Robots-Tag", "noindex, nofollow")
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
-		if !strings.HasPrefix(r.URL.Path, "/api/docs") {
+		// The docs page (REDROP_API_DOCS) loads its script from a CDN.
+		if !a.cfg.APIDocs || !strings.HasPrefix(r.URL.Path, "/api/docs") {
 			h.Set("Content-Security-Policy", csp)
 		}
 		if a.cfg.PublicURL.Scheme == "https" {
@@ -172,14 +213,21 @@ func (w *statusRecorder) Write(b []byte) (int, error) {
 }
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// redactPath hides the one-time secret that follows a SecretPrefixes
+// prefix. It matches the canonical path (empty and dot segments cleaned,
+// the prefix compared case-insensitively), so /api/v1//invites/<t> and
+// /API/v1/invites/<t> are redacted too, and logs a redacted path in that
+// canonical form.
 func redactPath(p string) string {
+	c := path.Clean("/" + p)
 	for _, pre := range dashpaths.SecretPrefixes {
-		if rest, ok := strings.CutPrefix(p, pre); ok {
-			if _, tail, found := strings.Cut(rest, "/"); found {
-				return pre + "…/" + tail
-			}
-			return pre + "…"
+		if len(c) <= len(pre) || !strings.EqualFold(c[:len(pre)], pre) {
+			continue
 		}
+		if _, tail, found := strings.Cut(c[len(pre):], "/"); found {
+			return pre + "…/" + tail
+		}
+		return pre + "…"
 	}
 	return p
 }

@@ -6,13 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
 
-// TestFeedbackMigration: artifacts from before migration 4 have feedback
-// off and no comments; the switch can then be set either way.
+// TestFeedbackMigration: artifacts from before migration 7 have feedback
+// off and no comments; the switch can then be set either way. Main's
+// migrations 4 to 6 ran before it and stay applied.
 func TestFeedbackMigration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "t.db")
@@ -20,7 +22,7 @@ func TestFeedbackMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := old.Exec(schemaV1 + ";" + schemaV2 + ";" + schemaV3 + `; PRAGMA user_version = 3;
+	if _, err := old.Exec(strings.Join([]string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6}, ";\n") + `; PRAGMA user_version = 6;
 		INSERT INTO users (id, username, display_name, password_hash, role, quota_bytes, created_at) VALUES ('u', 'alice', '', '', 'admin', 0, 1);
 		INSERT INTO artifacts (id, slug, user_id, title, current_version, last_version, created_at, updated_at) VALUES ('a', 's', 'u', 'old', 2, 3, 1, 1);
 		INSERT INTO versions (artifact_id, number, kind, size, files, created_at) VALUES ('a', 2, 'html', 3, 1, 42);`); err != nil {
@@ -37,8 +39,12 @@ func TestFeedbackMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Feedback || a.LastVersion != 3 {
-		t.Fatalf("migrated artifact: feedback %v, last version %d", a.Feedback, a.LastVersion)
+	if a.Feedback || a.LastVersion != 3 || a.AdminRevoked {
+		t.Fatalf("migrated artifact: feedback %v, last version %d, admin revoked %v", a.Feedback, a.LastVersion, a.AdminRevoked)
+	}
+	var v int
+	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) || v != 7 {
+		t.Fatalf("user_version %d (%v), want 7", v, err)
 	}
 	if list, err := db.ListComments(ctx, "a", CommentFilter{}); err != nil || len(list) != 0 {
 		t.Fatalf("migrated comments: %v %v", list, err)

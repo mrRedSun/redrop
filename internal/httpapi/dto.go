@@ -17,7 +17,7 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
 		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
-		OldVersions: m.OldVersions, Feedback: m.Feedback,
+		OldVersions: m.OldVersions, Feedback: m.Feedback, RevokedByAdmin: m.RevokedByAdmin,
 	}
 }
 
@@ -71,7 +71,7 @@ func uploadDTO(u *sharing.Upload) api.Upload {
 
 func statsDTO(s sharing.Stats) api.Stats {
 	return api.Stats{Users: s.Users, Artifacts: s.Artifacts, ActiveArtifacts: s.Active, LogicalBytes: s.LogicalBytes,
-		StoredBytes: s.StoredBytes, MaxTotalBytes: s.MaxTotalBytes, MaxVersionBytes: s.MaxVersionBytes}
+		StoredBytes: s.StoredBytes, StagedBytes: s.StagedBytes, ReservedBytes: s.ReservedBytes, MaxTotalBytes: s.MaxTotalBytes, MaxVersionBytes: s.MaxVersionBytes}
 }
 
 func userDTO(u accounts.User) api.User {

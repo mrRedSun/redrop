@@ -22,6 +22,11 @@ const (
 	StatusRevoked   = "revoked"
 )
 
+// CodePublicationBusy is the problem title of the 409 returned while the same
+// account already has a publication running or waiting. The upload stays
+// valid; retry the same request after a short delay.
+const CodePublicationBusy = "publication_in_progress"
+
 // Roles.
 const (
 	RoleAdmin = "admin"
@@ -207,6 +212,8 @@ type Artifact struct {
 	InfoButton    bool       `json:"info_button" description:"Whether pages show the info button and HTML opens in the viewer frame (the artifact's setting or the server default)"`
 	OldVersions   bool       `json:"viewer_old_versions" description:"Whether viewers can open older versions from the info panel"`
 	Feedback      bool       `json:"feedback" description:"Whether viewers can leave comments from the info panel (only while the info button is shown)"`
+	// RevokedByAdmin is set when an administrator revoked the artifact.
+	RevokedByAdmin bool `json:"revoked_by_admin" description:"An administrator revoked it (status revoked); only an administrator can restore it"`
 }
 
 type ArtifactList struct {
@@ -351,7 +358,9 @@ type Stats struct {
 	Artifacts       int   `json:"artifacts"`
 	ActiveArtifacts int   `json:"active_artifacts"`
 	LogicalBytes    int64 `json:"logical_bytes"`
-	StoredBytes     int64 `json:"stored_bytes" description:"Deduplicated bytes on disk"`
+	StoredBytes     int64 `json:"stored_bytes" description:"Deduplicated blob bytes on disk, excluding uploads"`
+	StagedBytes     int64 `json:"staged_bytes" description:"Bytes received in pending uploads"`
+	ReservedBytes   int64 `json:"reserved_bytes" description:"Pending upload and materialization byte reservations"`
 	MaxTotalBytes   int64 `json:"max_total_bytes"`
 	MaxVersionBytes int64 `json:"max_version_bytes"`
 }
@@ -362,5 +371,5 @@ type OK struct {
 
 // AdminArtifactUpdate is the only change admins may make to others' artifacts.
 type AdminArtifactUpdate struct {
-	Revoked bool `json:"revoked"`
+	Revoked bool `json:"revoked" description:"Set or clear the administrator's revocation; the owner's own revocation is unaffected"`
 }

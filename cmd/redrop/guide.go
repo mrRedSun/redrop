@@ -37,6 +37,8 @@ If the CLI is already installed:
 
 Or, without saving anything: export REDROP_URL=https://SERVER REDROP_TOKEN=rdp_...
 Flags --url/--token override the environment, which overrides the saved login.
+login and logout refuse a config file that is a symlink (exit 2); pass
+--config with the real file.
 
 ## Share
 
@@ -72,7 +74,29 @@ Folder uploads skip these entries:
   such as .page.swp and .page.swo.
 - JetBrains files ending in ___jb_tmp___ or ___jb_old___, and gedit files
   starting with .goutputstream-.
+- Conventional secrets: .env and .env.*, except .env.example, .env.sample,
+  and .env.template; .netrc, .npmrc, .pypirc, .git-credentials, and .pgpass.
+- Secret directories .ssh/, .aws/, and .gnupg/; files .docker/config.json
+  and .kube/config. Other files under .docker/ and .kube/ are kept.
+- Private keys id_rsa, id_dsa, id_ecdsa, id_ed25519, *.key, *.p12, and *.pfx.
+  Public keys such as id_ed25519.pub are kept. Rules apply at any depth.
 File-name filters are case-insensitive; directory names match exactly.
+
+Each excluded secret entry prints a stderr warning with its relative path,
+never its contents. Excluded directories are named without reading their
+contents. Watch warns once per path: at startup and for new secret paths.
+--include-secrets on share, update, or watch opts secrets back in, including
+secret Markdown entries. Editor, VCS, and dependency filters stay active.
+Explicitly named single files still publish as requested, but warn when the
+selected path or name matches a secret rule, even with --include-secrets
+or a different --name. Their source bytes are unchanged. A selected folder
+that is .ssh, .aws or .gnupg, or is inside one, exits with 2 unless
+--include-secrets is given. Warnings stay on stderr with --json.
+
+Use a dedicated output folder containing only files intended for recipients.
+These name rules cannot detect every secret. Exclusions do not remove files
+from already published versions.
+
 A symlink with a skipped name is skipped without being followed, even if
 it points to a directory (counted as a skipped file).
 Legitimate names 4913, #, ##, non-hidden x.swp, and hidden files such as
@@ -93,7 +117,7 @@ follow symlinks normally, including absolute links or links into other
 directories. Sources and Markdown entries must resolve to regular files;
 Unix opens use nonblocking mode and re-check the descriptor before reading.
 
-Supplied .zip/.tar.gz bundle entries are not editor-filtered. A .zip is
+Supplied .zip/.tar.gz bundle entries are not editor- or secret-filtered. A .zip is
 converted to tar.gz using the existing archive conventions: strip a common
 top-level folder and omit ._* files, __MACOSX/ entries, and non-regular
 entries. A .tar.gz is passed through. The server still validates archive

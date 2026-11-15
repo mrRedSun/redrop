@@ -71,7 +71,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 		return nil, err
 	}
 	acc := accounts.New(db, cfg, secret, log)
-	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader}
+	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader, TrustedHops: cfg.TrustedHops}
 
 	site := web.New(opts.Dashboard, opts.CLIDir, cfg.PublicOrigin())
 	api := httpapi.New(acc, sh, cfg, clients, log)
@@ -126,6 +126,9 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	} else if url != "" {
 		a.log.Warn("no users exist yet; open this one-time link to create the admin account (valid 24h)", "url", url)
+	}
+	for _, w := range a.cfg.Warnings() {
+		a.log.Warn("insecure configuration", "warning", w)
 	}
 	go a.Accounts.WarmUp(ctx)
 	go a.janitor.Run(ctx)

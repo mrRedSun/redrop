@@ -104,9 +104,32 @@ Use `--render none` for larger sources.
 ### Folder uploads
 
 `share`, `update` and `watch` pack plain and Markdown folders the same way.
-They skip VCS and dependency directories, OS metadata and editor temp files;
-the full skip rule is in `redrop guide` under Share and in
-[`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads). Relative symlinks are
+They skip VCS and dependency directories, OS metadata, editor temp files, and
+conventional secret paths at any depth:
+
+- `.env` and `.env.*`, except `.env.example`, `.env.sample`, and `.env.template`.
+- `.ssh/`, `.aws/`, `.gnupg/`, `.docker/config.json`, and `.kube/config`.
+- `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, and `.pgpass`.
+- `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `*.key`, `*.p12`, and `*.pfx`.
+  Public keys such as `id_ed25519.pub` remain included.
+
+Each excluded secret entry prints a stderr warning with its relative path,
+never its contents. Excluded directories are named without traversing them.
+`--include-secrets` on `share`, `update`, or `watch` opts these paths back in,
+including a secret Markdown `--entry`; editor and VCS filters still apply.
+File-name matching is case-insensitive; directory names match exactly. Other
+useful hidden files remain included. Explicitly named single files still publish
+as requested, with unchanged source bytes and a warning if their path or name
+matches a secret rule. Selecting a secret folder itself, or a folder inside one
+(`redrop share ~/.aws`), is refused unless `--include-secrets` is given. `watch`
+prints each secret warning once per path. Supplied ZIP/tar.gz archives are not
+secret-filtered.
+
+Use a dedicated output folder containing only files intended for recipients.
+Name-based exclusions cannot identify every secret, and they do not remove files
+from versions already published. The full skip rule is in `redrop guide` under
+Share and in [`docs/DESIGN.md`](docs/DESIGN.md#directory-uploads).
+Relative symlinks are
 followed only within the selected folder. Outside-root, absolute, and cyclic
 symlinks fail with usage errors. Broken symlinks and other non-regular entries
 are skipped with stderr warnings. A `PATH` that is itself a symlink is resolved
@@ -189,8 +212,9 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_CONTENT_URL` | `https://usercontent.example` (a separate registrable domain) |
 | `REDROP_DATA_DIR` | `/data` |
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
-| `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
+| `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER`, `REDROP_TRUSTED_HOPS` | client IPs behind a reverse proxy (see [Client addresses](#client-addresses)) |
 | `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
+| `REDROP_API_DOCS` | `false` (default): `/api/docs`, the interactive API page, is off. It loads a third-party script without a pinned version and outside the dashboard's CSP, so enable it only on development servers. `/api/openapi.json` is always served |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 | `REDROP_FEEDBACK_BURST`, `REDROP_FEEDBACK_PER_MINUTE` | `5`, `1`: viewer comments a client may post (burst, then per minute) |
 | `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
@@ -217,9 +241,48 @@ traefik.http.routers.redrop-content.rule: >-
 Update this rule **before** deploying a version that mints word links; a rule
 that only matches the 26-character format sends new links nowhere. The content
 domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
-Set `REDROP_TRUSTED_PROXIES` to the proxy's addresses and
-`REDROP_CLIENT_IP_HEADER` to the header it sets (`X-Forwarded-For` for Traefik,
-`CF-Connecting-IP` behind Cloudflare) so per-client limits see real clients.
+### Client addresses
+
+Sign-in, link lookups, artifact passwords and link misses are limited per
+client. Behind a reverse proxy, redrop reads the client address from
+`REDROP_CLIENT_IP_HEADER` (default `X-Forwarded-For`), but only on requests
+whose socket peer is in `REDROP_TRUSTED_PROXIES`.
+
+- **`REDROP_TRUSTED_HOPS=N`** (default `0`): the client is the
+  `X-Forwarded-For` entry exactly N positions from the right, counting the
+  rightmost as 1. Set N to the number of proxies that append to the header
+  on the way in. Anything a client writes into the header sits further left
+  and is never read. A header with fewer than N entries gives its leftmost
+  entry; an entry that is not an IP address gives the socket peer. Only the
+  socket peer is checked against `REDROP_TRUSTED_PROXIES`, so list just the
+  proxy redrop receives requests from.
+- **Cloudflare in front of Traefik**, origin reachable directly:
+
+  ```sh
+  REDROP_TRUSTED_PROXIES=192.0.2.10/32   # Traefik, as redrop sees it
+  REDROP_TRUSTED_HOPS=2                  # Cloudflare appends, then Traefik
+  ```
+
+  Traefik's entry point must trust Cloudflare's published ranges
+  (`forwardedHeaders.trustedIPs`) and keep `notAppendXForwardedFor` off
+  (the default); Cloudflare's "Remove visitor IP headers" transform must be
+  off. A visitor then resolves to their own address, every Cloudflare Worker
+  to Cloudflare's Worker egress address (one bucket for all Workers), and a
+  request sent to Traefik directly to its real source address, because
+  Traefik replaces the header from untrusted sources.
+- **`REDROP_TRUSTED_HOPS=0`** walks the header from the right and skips
+  every trusted entry, which suits a reverse proxy alone. Never list a
+  whole CDN's ranges for it: a CDN worker sends requests from inside those
+  ranges with any `X-Forwarded-For` it likes, the walk skips the worker and
+  the CDN edge, and every limit sees whatever address the worker chose. In
+  this mode the server logs a warning at startup when
+  `REDROP_TRUSTED_PROXIES` has a range wider than a /24 (IPv4) or a /48
+  (IPv6).
+- **`REDROP_CLIENT_IP_HEADER=CF-Connecting-IP`** is safe only when the
+  origin is reachable through Cloudflare alone (a firewall that admits only
+  Cloudflare's ranges, or Authenticated Origin Pulls); otherwise anyone who
+  reaches the reverse proxy directly can send their own
+  `CF-Connecting-IP`.
 
 Status: in development, not yet released.
 

@@ -9,8 +9,8 @@ import { safeNext } from '@/app/paths'
 import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
 import * as artifactEndpoints from '@/features/artifacts/endpoints'
-import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, toUpdateRequest } from '@/features/artifacts/schemas'
-import { AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
+import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, statusLabel, toUpdateRequest } from '@/features/artifacts/schemas'
+import { Stats, AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import { NewAccountForm, NewPasswordForm } from '@/features/onboarding/schemas'
 import { CreatedToken, TokenList } from '@/features/tokens/schemas'
 import { psQuote, setupCommand, setupOsFromPlatform, shQuote } from '@/features/tokens/setup-command'
@@ -35,6 +35,13 @@ function harness(respond: (path: string) => Response | 'offline') {
   return { run: <A, E>(effect: Effect.Effect<A, E, RedropApi>) => Effect.runPromise(effect.pipe(Effect.provide(layer))), requests, rechecks: () => rechecks }
 }
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
+
+await test('admin statistics retain received staging and reserved bytes separately', () => {
+  const value = { users: 1, artifacts: 2, active_artifacts: 1, logical_bytes: 100, stored_bytes: 80, staged_bytes: 20, reserved_bytes: 50, max_total_bytes: 1000, max_version_bytes: 500 }
+  assert.deepEqual(Schema.decodeUnknownSync(Stats)(value), value)
+  assert(Option.isNone(Schema.decodeUnknownOption(Stats)({ ...value, staged_bytes: '20' })))
+  assert(Option.isNone(Schema.decodeUnknownOption(Stats)({ ...value, reserved_bytes: undefined })))
+})
 
 await test('problem status maps to the expected tagged error', () => {
   const tags = { 400: 'Invalid', 401: 'Unauthorized', 403: 'Forbidden', 404: 'NotFound', 409: 'Conflict', 410: 'Gone', 413: 'TooLarge', 429: 'RateLimited', 500: 'ServerError' }
@@ -97,7 +104,7 @@ await test('viewer settings: defaults from the artifact and both are always sent
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: new Date(), updated_at: new Date(), expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, feedback: false,
+    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false,
   } as const
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.infoButton, true)
@@ -118,7 +125,7 @@ await test('feedback setting: defaults from the artifact, always sent explicitly
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z', expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, feedback: true,
+    info_button: true, viewer_old_versions: false, feedback: true, revoked_by_admin: false,
   })
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.feedback, true)
@@ -169,9 +176,19 @@ await test('feedback endpoints: list by status, resolve with a body, delete', as
   assert.deepEqual(await empty.run(artifactEndpoints.feedback('a1', 'all')), [])
 })
 
+await test('an administrator\'s revocation is named and required on the wire', () => {
+  assert.equal(statusLabel({ status: 'revoked', revoked_by_admin: true }), 'revoked by an administrator')
+  assert.equal(statusLabel({ status: 'revoked', revoked_by_admin: false }), 'revoked')
+  assert.equal(statusLabel({ status: 'active', revoked_by_admin: false }), 'active')
+  const timestamp = '2026-11-13T12:00:00Z'
+  const meta = { id: 'test', title: 'Report', kind: 'html', status: 'revoked', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null }
+  assert(Schema.decodeUnknownSync(AdminArtifact)({ ...meta, revoked_by_admin: true }).revoked_by_admin)
+  assert(Option.isNone(Schema.decodeUnknownOption(AdminArtifact)(meta)), 'the field is required on the wire')
+})
+
 await test('metadata decoding strips links and token lists strip secrets', () => {
   const timestamp = '2026-11-13T12:00:00Z'
-  const decoded = Schema.decodeUnknownSync(AdminArtifact)({ id: 'test', title: 'Report', kind: 'html', status: 'active', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, url: 'must-be-stripped' })
+  const decoded = Schema.decodeUnknownSync(AdminArtifact)({ id: 'test', title: 'Report', kind: 'html', status: 'active', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, revoked_by_admin: false, url: 'must-be-stripped' })
   assert(!('url' in decoded))
   const token = { id: 'test', name: 'fixture', prefix: 'fixture', artifacts: 0, created_at: timestamp, expires_at: null, last_used_at: null, secret: 'test-only-value' }
   assert.equal(Schema.decodeUnknownSync(CreatedToken)(token).secret.toString(), '<redacted>')

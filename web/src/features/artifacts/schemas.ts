@@ -34,8 +34,14 @@ export const Artifact = Schema.Struct({
   viewer_old_versions: Schema.Boolean,
   /** Viewers can leave comments from the info panel (only while the info button is shown). */
   feedback: Schema.Boolean,
+  /** An administrator revoked it (status `revoked`); only an administrator can restore it. */
+  revoked_by_admin: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
+
+/** The status as shown to people: an administrator's revocation is named as such. */
+export const statusLabel = (a: { readonly status: ArtifactStatus; readonly revoked_by_admin: boolean }): string =>
+  a.revoked_by_admin ? 'revoked by an administrator' : a.status
 export const ArtifactList = ListOf(Artifact)
 
 /** PATCH /artifacts/{id}. Absent key = unchanged. */
