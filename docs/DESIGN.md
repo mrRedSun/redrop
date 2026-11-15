@@ -476,7 +476,9 @@ active extraction; waiting requests can cancel.
 
 A publication rejected for its content, settings, a limit or a quota deletes
 its upload once cleanup has succeeded, so a replay does no archive work and the
-upload no longer holds a session. These limits bound per-attempt work, not a
+upload no longer holds a session. A read error inside an entry's body, such as
+a truncated or corrupt compressed stream, is a corrupt archive like a bad
+header, not an internal error. These limits bound per-attempt work, not a
 per-account request rate.
 
 ### Disk budgets and upload expiry
@@ -541,7 +543,9 @@ error and keeps those uploads, while the others are still released. GC keeps
 walking past a blob it cannot remove and reports the failures together.
 
 Migration 6 adds `uploads.materialized`, initialized to zero for existing
-sessions. Stop the old process before upgrading. Do not run multiple server
+sessions. Open uploads from before the upgrade count against quotas from then
+on: one that no longer fits its owner's quota is refused when published, and
+deleted like any other quota rejection. Stop the old process before upgrading. Do not run multiple server
 processes against the same data directory. Restore a whole-data-directory backup
 for rollback; older binaries do not enforce pending-byte reservations.
 
