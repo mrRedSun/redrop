@@ -87,12 +87,18 @@ type Service struct {
 	providers map[string]*provider
 }
 
+// maxLimiterKeys bounds each rate limiter's table. A key costs at most about
+// 150 bytes (keys over 64 bytes are hashed), so a full limiter holds a few
+// MiB. When a table is full of live windows, new clients get 429 until a
+// window expires.
+const maxLimiterKeys = 50_000
+
 func New(db *store.Store, cfg *config.Config, secret []byte, log *slog.Logger) *Service {
 	s := &Service{
 		db: db, cfg: cfg, log: log,
-		loginLimiter:   security.NewLimiter(5, 5*time.Minute),
-		loginIPLimiter: security.NewLimiter(30, 15*time.Minute),
-		linkLimiter:    security.NewLimiter(60, 10*time.Minute),
+		loginLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys),
+		loginIPLimiter: security.NewLimiter(30, 15*time.Minute, maxLimiterKeys),
+		linkLimiter:    security.NewLimiter(60, 10*time.Minute, maxLimiterKeys),
 		stateSigner:    security.NewSigner(secret, "oidc-state"),
 	}
 	s.initProviders()
@@ -161,12 +167,21 @@ func (s *Service) newSession(ctx context.Context, u *store.User, method string) 
 	return &Session{Secret: secret, ExpiresAt: time.Now().Add(SessionTTL), Principal: &Principal{user: u, method: method, sessionHash: ids.Hash(secret)}}, nil
 }
 
+// wrongLogin is the one answer for an unknown user, a malformed name, a
+// disabled account, and a wrong password.
+func wrongLogin() error { return apperr.Unauthorized("wrong username or password") }
+
 // Login verifies a password (and TOTP when enabled) and opens a session.
 func (s *Service) Login(ctx context.Context, ip, username, password, totpCode string) (*Session, error) {
 	if !s.cfg.PasswordLogin {
 		return nil, apperr.Forbidden("password login is disabled; use single sign-on")
 	}
-	username = strings.ToLower(strings.TrimSpace(username))
+	// An invalid name can never sign in. Rejecting it before any limiter or
+	// database call keeps attacker-sized input out of the limiter tables.
+	username, err := normalizeUsername(username)
+	if err != nil {
+		return nil, wrongLogin()
+	}
 	if !s.loginIPLimiter.Allow(ip) || !s.loginLimiter.Allow(ip+"|"+username) {
 		return nil, apperr.RateLimited("too many sign-in attempts; wait a few minutes")
 	}
@@ -177,7 +192,7 @@ func (s *Service) Login(ctx context.Context, ip, username, password, totpCode st
 	}
 	// CheckPassword runs even for unknown users to equalize timing.
 	if !security.CheckPassword(hash, password) || u == nil || u.Disabled {
-		return nil, apperr.Unauthorized("wrong username or password")
+		return nil, wrongLogin()
 	}
 	if u.TOTPEnabled {
 		if totpCode == "" {

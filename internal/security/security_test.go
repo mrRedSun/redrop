@@ -55,9 +55,17 @@ func TestSigner(t *testing.T) {
 	}
 }
 
-func TestLimiter(t *testing.T) {
-	l := NewLimiter(2, time.Minute)
+func newTestLimiter(t *testing.T, limit int, window time.Duration, maxKeys int) (*Limiter, *fakeClock) {
+	t.Helper()
+	c := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+	l := NewLimiter(limit, window, maxKeys)
+	l.now = c.now
 	t.Cleanup(l.Close)
+	return l, c
+}
+
+func TestLimiter(t *testing.T) {
+	l, _ := newTestLimiter(t, 2, time.Minute, 10)
 	if !l.Allow("k") || !l.Allow("k") || l.Allow("k") {
 		t.Error("limiter did not cap at 2")
 	}
@@ -70,7 +78,7 @@ func TestLimiter(t *testing.T) {
 // already closed when it returns. A long window keeps the ticker from
 // firing during the test.
 func TestLimiterCloseStopsSweeper(t *testing.T) {
-	l := NewLimiter(1, time.Hour)
+	l := NewLimiter(1, time.Hour, 10)
 	select {
 	case <-l.done:
 		t.Fatal("sweeper exited before Close")
@@ -85,5 +93,52 @@ func TestLimiterCloseStopsSweeper(t *testing.T) {
 	l.Close() // idempotent
 	if !l.Allow("k") || l.Allow("k") || !l.Blocked("k") {
 		t.Error("a closed limiter must still limit")
+	}
+}
+
+// A full table refuses new keys and keeps limiting known ones; a slot frees
+// up once its window has expired.
+func TestLimiterKeyCap(t *testing.T) {
+	l, clock := newTestLimiter(t, 3, time.Minute, 2)
+	if !l.Allow("a") || !l.Allow("b") {
+		t.Fatal("keys within the cap refused")
+	}
+	if l.Allow("c") {
+		t.Fatal("a third key was admitted to a table of two")
+	}
+	if l.Len() != 2 {
+		t.Fatalf("table holds %d keys, want 2", l.Len())
+	}
+	if !l.Allow("a") || !l.Allow("a") || l.Allow("a") {
+		t.Fatal("a known key is not limited normally while the table is full")
+	}
+	clock.add(30 * time.Second)
+	if l.Allow("c") {
+		t.Fatal("new key admitted while every window is live")
+	}
+	clock.add(31 * time.Second)
+	if !l.Allow("c") {
+		t.Fatal("new key refused after the other windows expired")
+	}
+	if l.Len() != 1 {
+		t.Fatalf("expired windows kept: %d keys", l.Len())
+	}
+}
+
+// Keys longer than maxKeyLen are stored as a fixed-size hash, so a caller
+// passing attacker-sized input cannot grow memory per key.
+func TestLimiterHashesLongKeys(t *testing.T) {
+	l, _ := newTestLimiter(t, 1, time.Minute, 10)
+	long := strings.Repeat("x", 1_000_000)
+	if !l.Allow(long) || l.Allow(long) {
+		t.Fatal("a long key is not limited like any other")
+	}
+	if !l.Allow(long[:len(long)-1] + "y") {
+		t.Fatal("distinct long keys share a window")
+	}
+	for k := range l.hits {
+		if len(k) > maxKeyLen {
+			t.Fatalf("stored a %d-byte key", len(k))
+		}
 	}
 }

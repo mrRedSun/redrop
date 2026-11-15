@@ -131,6 +131,28 @@ func (a *API) csrfOnly(next http.Handler) http.Handler {
 	})
 }
 
+// maxAuthBody bounds the JSON bodies of the unauthenticated sign-in and
+// onboarding routes. A username, password, code and link token fit many
+// times over.
+const maxAuthBody = 4 << 10
+
+// authBody limits the bodies of the unauthenticated sign-in and onboarding
+// routes to maxAuthBody.
+func (a *API) authBody(next http.Handler) http.Handler { return limitBody(next, maxAuthBody) }
+
+// limitBody refuses a request body over n bytes with 413 before anything
+// reads it; a body without a declared length is cut off at n.
+func limitBody(next http.Handler, n int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > n {
+			writeError(w, r, apperr.TooLarge("request body is too large"))
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, n)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // securityHeaders applies dashboard-origin headers.
 func (a *API) securityHeaders(next http.Handler) http.Handler {
 	csp := "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-src " + a.cfg.ContentFrameSource() +

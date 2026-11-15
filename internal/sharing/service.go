@@ -41,6 +41,11 @@ type Service struct {
 	unlockIPLimiter *security.Limiter // per IP across artifacts
 }
 
+// maxLimiterKeys bounds each unlock limiter's table (a few MiB when full).
+// When a table is full of live windows, new clients get 429 until a window
+// expires.
+const maxLimiterKeys = 50_000
+
 func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, log *slog.Logger) (*Service, error) {
 	s := &Service{
 		db: db, blobs: blobs, cfg: cfg, log: log,
@@ -49,8 +54,8 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		previewSigner:   security.NewSigner(secret, "preview"),
 		seenSigner:      security.NewSigner(secret, "seen"),
 		directSigner:    security.NewSigner(secret, "direct-view"),
-		unlockLimiter:   security.NewLimiter(5, 5*time.Minute),
-		unlockIPLimiter: security.NewLimiter(60, time.Hour),
+		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys),
+		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys),
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
 		s.Close()

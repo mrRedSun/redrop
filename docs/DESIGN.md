@@ -541,6 +541,20 @@ inside their containers on narrow screens. The document is readable without JS.
   explicitly from the account page or by accepting an invite through OIDC.
   Accounts are never auto-linked by email address.
 
+### Rate limits
+
+* **Bounded tables.** Every fixed-window limiter (`security.Limiter`) tracks
+  at most 50,000 keys and stores keys over 64 bytes as their SHA-256, so a
+  full table costs a few MiB. When a table is full of live windows, a new
+  client gets `429` until a window expires (fail closed); clients already in
+  the table keep their own count. The content miss limiter
+  (`security.TokenBucket`) keeps at most 100,000 clients.
+* **Sign-in input.** A username that fails the account name rule (2–32
+  characters) gets the wrong-login answer before any limiter or database
+  call. The unauthenticated sign-in and onboarding routes (`/auth/login`,
+  `/setup`, `/invites/{token}/accept`, `/reset/{token}`) accept at most
+  4 KiB of body; larger bodies get `413`.
+
 ## CLI
 
 `redrop` is a single static Go binary for Linux, macOS, and Windows (amd64 and

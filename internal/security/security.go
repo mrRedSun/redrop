@@ -131,13 +131,24 @@ func (s *Signer) Verify(v string) (string, bool) {
 
 // --- rate limiting (fixed window per key) ---
 
-// Limiter is a fixed-window counter per key. A background goroutine drops
+// maxKeyLen bounds the bytes a Limiter stores per key. Longer keys are
+// replaced by their SHA-256, so a caller that passes attacker-sized input
+// still costs a fixed amount of memory per key.
+const maxKeyLen = 64
+
+// Limiter is a fixed-window counter per key. It tracks at most maxKeys keys:
+// when every slot holds a live window, a new key is refused (Allow returns
+// false) until a window expires, so a flood of distinct keys cannot grow
+// memory. Known keys keep their own count. A background goroutine drops
 // expired windows once per window; Close stops it.
 type Limiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	hits   map[string]*bucket
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	maxKeys   int
+	now       func() time.Time
+	lastSweep time.Time
+	hits      map[string]bucket
 
 	stop      chan struct{} // closed by Close
 	done      chan struct{} // closed when the sweeper has returned
@@ -149,16 +160,18 @@ type bucket struct {
 	n     int
 }
 
-func NewLimiter(limit int, window time.Duration) *Limiter {
+// NewLimiter allows limit hits per key per window, for at most maxKeys keys
+// at a time.
+func NewLimiter(limit int, window time.Duration, maxKeys int) *Limiter {
 	l := &Limiter{
-		limit: limit, window: window, hits: map[string]*bucket{},
+		limit: limit, window: window, maxKeys: maxKeys, now: time.Now, hits: map[string]bucket{},
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
-	go l.sweep()
+	go l.sweeper()
 	return l
 }
 
-func (l *Limiter) sweep() {
+func (l *Limiter) sweeper() {
 	defer close(l.done)
 	t := time.NewTicker(l.window)
 	defer t.Stop()
@@ -168,14 +181,32 @@ func (l *Limiter) sweep() {
 			return
 		case <-t.C:
 			l.mu.Lock()
-			for k, b := range l.hits {
-				if time.Since(b.start) > l.window {
-					delete(l.hits, k)
-				}
-			}
+			l.dropExpired(l.now())
 			l.mu.Unlock()
 		}
 	}
+}
+
+func (l *Limiter) dropExpired(now time.Time) {
+	l.lastSweep = now
+	for k, b := range l.hits {
+		if now.Sub(b.start) > l.window {
+			delete(l.hits, k)
+		}
+	}
+}
+
+// room reports whether a new key fits, dropping expired windows first. The
+// scan runs at most once per sweepInterval, so a flood of new keys against a
+// full table cannot turn every request into an O(maxKeys) scan.
+func (l *Limiter) room(now time.Time) bool {
+	if len(l.hits) < l.maxKeys {
+		return true
+	}
+	if now.Sub(l.lastSweep) >= sweepInterval {
+		l.dropExpired(now)
+	}
+	return len(l.hits) < l.maxKeys
 }
 
 // Close stops the sweeper and returns once it has exited. It is safe to
@@ -187,23 +218,45 @@ func (l *Limiter) Close() {
 	<-l.done
 }
 
-// Allow records a hit and reports whether the key is within its limit.
+func limiterKey(key string) string {
+	if len(key) <= maxKeyLen {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return string(sum[:])
+}
+
+// Allow records a hit and reports whether the key is within its limit. A
+// new key is refused while the table is full.
 func (l *Limiter) Allow(key string) bool {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.hits[key]
-	if b == nil || time.Since(b.start) > l.window {
-		b = &bucket{start: time.Now()}
-		l.hits[key] = b
+	now := l.now()
+	b, ok := l.hits[key]
+	if !ok && !l.room(now) {
+		return false
+	}
+	if !ok || now.Sub(b.start) > l.window {
+		b = bucket{start: now}
 	}
 	b.n++
+	l.hits[key] = b
 	return b.n <= l.limit
 }
 
 // Blocked reports whether the key is over the limit without recording.
 func (l *Limiter) Blocked(key string) bool {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b := l.hits[key]
-	return b != nil && time.Since(b.start) <= l.window && b.n >= l.limit
+	b, ok := l.hits[key]
+	return ok && l.now().Sub(b.start) <= l.window && b.n >= l.limit
+}
+
+// Len is the number of keys currently tracked.
+func (l *Limiter) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.hits)
 }

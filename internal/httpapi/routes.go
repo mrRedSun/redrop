@@ -26,7 +26,7 @@ func (a *API) routes() {
 	anyAuthOpts := routeOpts{option.Middleware(a.requireAuth(anyAuth)), option.Security(bearerOrSession...)}
 	sessionOpts := routeOpts{option.Middleware(a.requireAuth(sessionOnly)), option.Security(sessionSec)}
 	adminOpts := routeOpts{option.Middleware(a.requireAuth(adminOnly)), option.Security(sessionSec)}
-	publicWrite := routeOpts{option.Middleware(a.csrfOnly)}
+	publicWrite := routeOpts{option.Middleware(a.csrfOnly), option.Middleware(a.authBody)}
 
 	v1 := fuego.Group(s, "/api/v1")
 
