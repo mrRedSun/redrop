@@ -540,6 +540,16 @@ inside their containers on narrow screens. The document is readable without JS.
 * OIDC providers are configured by environment; identities are linked
   explicitly from the account page or by accepting an invite through OIDC.
   Accounts are never auto-linked by email address.
+* Linking keeps the current session and its sign-in method. Only a normal
+  single sign-on login creates an SSO session, so linking cannot satisfy
+  `REDROP_ADMIN_REQUIRE_OIDC`.
+* While `REDROP_ADMIN_REQUIRE_OIDC=true`, an admin account can link another
+  identity only from an SSO session; the start and the callback both check
+  it. A new identity linked from a password session would otherwise open
+  admin sessions without the identity provider's checks ever applying to
+  the account. An admin who has only a password gets SSO by accepting an
+  admin invite (`redrop-server invite --admin`) through single sign-on, or
+  by linking before the setting is turned on.
 
 ### Rate limits
 

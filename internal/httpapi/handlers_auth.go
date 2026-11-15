@@ -136,6 +136,8 @@ func (a *API) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		redirectWithError(w, r, failPath, err)
 		return
 	}
-	a.cookies.setSession(w, res.Session)
+	if res.Session != nil {
+		a.cookies.setSession(w, res.Session)
+	}
 	http.Redirect(w, r, res.Redirect, http.StatusSeeOther)
 }
