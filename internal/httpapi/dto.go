@@ -63,7 +63,7 @@ func uploadDTO(u *sharing.Upload) api.Upload {
 
 func statsDTO(s sharing.Stats) api.Stats {
 	return api.Stats{Users: s.Users, Artifacts: s.Artifacts, ActiveArtifacts: s.Active, LogicalBytes: s.LogicalBytes,
-		StoredBytes: s.StoredBytes, MaxTotalBytes: s.MaxTotalBytes, MaxVersionBytes: s.MaxVersionBytes}
+		StoredBytes: s.StoredBytes, StagedBytes: s.StagedBytes, ReservedBytes: s.ReservedBytes, MaxTotalBytes: s.MaxTotalBytes, MaxVersionBytes: s.MaxVersionBytes}
 }
 
 func userDTO(u accounts.User) api.User {

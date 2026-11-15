@@ -22,6 +22,11 @@ const (
 	StatusRevoked   = "revoked"
 )
 
+// CodePublicationBusy is the problem title of the 409 returned while the same
+// account already has a publication running or waiting. The upload stays
+// valid; retry the same request after a short delay.
+const CodePublicationBusy = "publication_in_progress"
+
 // Roles.
 const (
 	RoleAdmin = "admin"
@@ -320,7 +325,9 @@ type Stats struct {
 	Artifacts       int   `json:"artifacts"`
 	ActiveArtifacts int   `json:"active_artifacts"`
 	LogicalBytes    int64 `json:"logical_bytes"`
-	StoredBytes     int64 `json:"stored_bytes" description:"Deduplicated bytes on disk"`
+	StoredBytes     int64 `json:"stored_bytes" description:"Deduplicated blob bytes on disk, excluding uploads"`
+	StagedBytes     int64 `json:"staged_bytes" description:"Bytes received in pending uploads"`
+	ReservedBytes   int64 `json:"reserved_bytes" description:"Pending upload and materialization byte reservations"`
 	MaxTotalBytes   int64 `json:"max_total_bytes"`
 	MaxVersionBytes int64 `json:"max_version_bytes"`
 }

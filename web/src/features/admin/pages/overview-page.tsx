@@ -18,7 +18,7 @@ export function Component() {
             hint={s.max_total_bytes > 0 ? `of ${formatBytes(s.max_total_bytes)} server limit` : 'no server limit'}
             progress={s.max_total_bytes > 0 ? (s.logical_bytes / s.max_total_bytes) * 100 : undefined}
           />
-          <StatCard label="On disk" value={formatBytes(s.stored_bytes)} hint={`deduplicated · ${formatBytes(s.max_version_bytes)} max per version`} />
+          <StatCard label="Blob storage" value={formatBytes(s.stored_bytes)} hint={`${formatBytes(s.staged_bytes)} received in uploads, ${formatBytes(s.reserved_bytes)} reserved`} />
         </div>
       )}
     </AsyncResultView>

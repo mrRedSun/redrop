@@ -38,7 +38,11 @@ const schemaV4 = `ALTER TABLE artifacts ADD COLUMN admin_revoked INTEGER NOT NUL
 // code cannot be used twice.
 const schemaV5 = `ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0;`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5}
+// schemaV6 accounts for decompressed publication bytes while an upload is open.
+const schemaV6 = `ALTER TABLE uploads ADD COLUMN materialized INTEGER NOT NULL DEFAULT 0;
+UPDATE uploads SET expires_at = min(expires_at, unixepoch() + 3600);`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6}
 
 var ErrNotFound = errors.New("not found")
 

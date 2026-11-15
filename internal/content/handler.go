@@ -166,7 +166,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case strings.HasPrefix(rest, versionPrefix):
 			h.serveOldVersion(w, r, a, strings.TrimPrefix(rest, versionPrefix))
 		default:
-			h.pages.notFound(w)
+			h.miss(w, r)
 		}
 		return
 	}
@@ -472,7 +472,7 @@ func (h *Handler) sendFile(w http.ResponseWriter, r *http.Request, f *store.File
 func (h *Handler) preview(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
 	g, ok := h.sharing.RedeemPreview(a, r.URL.Query().Get("t"))
 	if !ok {
-		h.pages.message(w, http.StatusForbidden, "Preview link expired", "Open the preview again from the dashboard.")
+		h.miss(w, r)
 		return
 	}
 	h.setCookie(w, cookiePreview, g, true)
@@ -480,6 +480,12 @@ func (h *Handler) preview(w http.ResponseWriter, r *http.Request, a *store.Artif
 }
 
 func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
+	// Open creates a new visit, so existing grants cannot revive an unavailable
+	// link. Apply service policy before redirects, origin checks or form errors.
+	if h.sharing.Decide(a, sharing.Grants{}, time.Now()) == sharing.ShowGone {
+		h.miss(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		redirect(w, r, "/", http.StatusSeeOther)
 		return

@@ -66,5 +66,5 @@ func (m *Moderation) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, apperr.Internal(err)
 	}
 	return Stats{Users: st.Users, Artifacts: st.Artifacts, Active: st.Active, LogicalBytes: st.LogicalBytes,
-		StoredBytes: stored, MaxTotalBytes: m.s.cfg.MaxTotalBytes, MaxVersionBytes: m.s.cfg.MaxVersionBytes}, nil
+		StoredBytes: stored, StagedBytes: st.StagedBytes, ReservedBytes: st.ReservedBytes, MaxTotalBytes: m.s.cfg.MaxTotalBytes, MaxVersionBytes: m.s.cfg.MaxVersionBytes}, nil
 }

@@ -60,6 +60,14 @@ worker script, not even redrop's own `/__redrop/` scripts (requests with `Sec-Fe
 link is revoked or expires, and could take over the viewer page's own
 navigations.
 
+On a content domain that is not on the Public Suffix List, an artifact can set
+ordinary parent-domain cookies sent to sibling artifact hosts. Host-only
+`__Host-` access cookies cannot be forged this way, but cookie flooding can
+make a visitor's requests to other artifacts too large. The owner accepts this
+per-browser availability limitation because publishing is invite-only. Keep
+invitations restricted to trusted accounts. Separate origins do not make an
+unlisted content domain a cookie suffix boundary.
+
 The slug is the access secret. "Rotate link" replaces the slug; the artifact ID
 used by the API/CLI is stable. Artifact slugs appear in TLS SNI and DNS
 lookups; that is accepted.
@@ -432,6 +440,115 @@ Bundles are uploaded as `tar.gz`. Extraction rejects absolute paths, `..`,
 links, devices, reserved paths, and enforces file-count and decompressed-size
 limits.
 
+### Archive work limits
+
+Duplicate normalized file paths are errors, not skipped bodies. A file path
+that is also the parent directory of another file is an error too. Directory
+entries carry no content: as before, their names are neither validated nor
+kept in memory, and repeated directories (`tar -C dist . -C static .` with a
+shared `css/`) are accepted. Only regular-file paths are retained, at most
+`REDROP_MAX_FILES` of them.
+
+A separate entry cap is `max(128, 4 * REDROP_MAX_FILES)` non-metadata
+entries: every regular file, directory, link or special entry, including those
+archive/tar would return. PAX, global and GNU long-name headers are not
+counted as entries, so PAX-format archives get the same cap as others, but
+more than 16 of them in a row are refused.
+
+The decompressed stream has one byte budget covering content, discarded bodies,
+headers, padding and metadata. Its limit is the per-version content limit plus
+an overhead allowance of 4 KiB per permitted entry and 1 MiB of slack.
+A raw-block counting reader runs before the tar parser so metadata hidden by
+Go's tar reader is counted too. It re-implements only tar framing, so after
+every header the tar reader returns, extraction checks that both agree on where
+that entry's body starts and ends (`inSync`): a regular file must have exactly
+its padded size left, a directory nothing, and a global header only padding.
+Any disagreement, such as a name precedence or prefix the counter does not
+model, rejects the archive as malformed before the next header is read. A
+differential test and fuzz target check the counter against archive/tar.
+PAX size overrides and sparse-file extensions are rejected because they can
+change physical framing; normal PAX path and GNU long-name metadata remain
+supported. Paths, checksums, entry types and tar semantics still pass through
+the existing archive validator. Both compressed input and decompressed output
+check the publishing request context on every read. Checksum verification and
+blob copies check cancellation too. Publication's single admission slot bounds
+active extraction; waiting requests can cancel.
+
+A publication rejected for its content, settings, a limit or a quota deletes
+its upload once cleanup has succeeded, so a replay does no archive work and the
+upload no longer holds a session. A read error inside an entry's body, such as
+a truncated or corrupt compressed stream, is a corrupt archive like a bad
+header, not an internal error. These limits bound per-attempt work, not a
+per-account request rate.
+
+### Disk budgets and upload expiry
+
+SQLite reserves each upload's declared bytes atomically with committed version
+usage against both the owner's quota and `REDROP_MAX_TOTAL_SIZE`. Open sessions
+also have a per-user cap, `REDROP_MAX_OPEN_UPLOADS`, default 8 and a positive
+integer. Zero-byte sessions count. Expired sessions retain their reservation
+until maintenance removes their disk bytes, then releases the row.
+
+Uploads expire after one idle hour. Each completed nonempty chunk renews the
+hour, so a slow upload can resume across many chunks without a 24-hour abandoned
+session. The minute maintenance sweep reclaims expired sessions. Reading status,
+empty chunks and failed publication attempts do not extend expiry. An active
+chunk keeps its file and reservation until that request finishes; maintenance
+never unlinks a file a slow writer still holds open. Simultaneous chunks or
+publication for one upload return a conflict instead of modifying the same
+file concurrently. Expiry is rechecked after claiming an idle session, since a
+chunk may have just renewed it. Admin stats
+show `staged_bytes`, the successfully received upload bytes, and
+`reserved_bytes`, pending declared bytes plus unpacked publication reservations,
+separately from committed logical bytes and deduplicated blob storage.
+
+Before writing any materialized file, publication reserves its declared
+unpacked size in the same quota transaction. The version limit applies to the
+sum of unpacked file sizes. The staged upload and its unpacked content are the
+same content to the owner, so the user quota counts each open upload once, as
+the larger of its staged and unpacked bytes: a user with 6 MB of headroom can
+publish a 6 MB file. `REDROP_MAX_TOTAL_SIZE` guards the disk and counts both,
+so the server total needs temporary headroom for the staged and unpacked
+copies. The commit converts the unpacked reservation to committed logical usage
+atomically; staging is released only after its file has been removed.
+
+Publication and blob garbage collection share one cancellable service admission
+slot. Each account has at most one publication running or waiting for it; a
+second one gets an immediate `409` with the problem title
+`publication_in_progress`, and the CLI retries the same upload for up to five
+minutes. Another account's publication therefore waits for at most one attempt
+per other active account. Each attempt tracks only the hashes it newly
+installed. On extraction, entry-validation or database failure, it looks up
+only those hashes and removes the ones no file record references, before
+releasing its unpacked reservation. Existing blobs are never deleted by
+rollback, including deduplicated content shared with other artifacts. The slot
+covers commit and rollback, so a concurrent publisher cannot be about to
+reference a hash removed by another attempt. Failed cleanup keeps its
+reservation and logs an operational error rather than releasing unreclaimed
+capacity. Replays cannot clear a failed-cleanup reservation; they return a
+conflict until expiry safely reclaims the bytes.
+
+After a successful cleanup, a publication rejected for a deterministic client
+error (invalid content, archive, entry or settings, a limit or quota, or an
+unknown artifact) also deletes its upload, releasing its reservation and
+session. The CLI never resumes a rejected upload. Cancellation, conflicts (an
+incomplete or busy upload) and internal errors keep the upload until its idle
+expiry. This design favors a small, bounded materialization path over parallel
+extraction. Uploaded chunks remain independently resumable.
+
+Expired uploads without unpacked bytes are released without blob GC. Only an
+expired upload with unpacked bytes, left by a crash or a failed rollback, waits
+for a full GC that removes unreferenced blobs. If that GC fails, it logs the
+error and keeps those uploads, while the others are still released. GC keeps
+walking past a blob it cannot remove and reports the failures together.
+
+Migration 6 adds `uploads.materialized`, initialized to zero for existing
+sessions. Open uploads from before the upgrade count against quotas from then
+on: one that no longer fits its owner's quota is refused when published, and
+deleted like any other quota rejection. Stop the old process before upgrading. Do not run multiple server
+processes against the same data directory. Restore a whole-data-directory backup
+for rollback; older binaries do not enforce pending-byte reservations.
+
 ## Markdown documents
 
 Markdown is rendered **in the CLI's publishing client, before upload**, not by
@@ -708,10 +825,14 @@ arm64). The server embeds all builds and serves `install.sh`/`install.ps1`, so
 `curl -fsSL https://<app>/install.sh | sh` installs a version matching the
 server and verifies SHA-256 checksums. Configuration is
 `redrop login --url … --token …` or the `REDROP_URL`/`REDROP_TOKEN`
-environment variables. Setting `REDROP_TOKEN` for the installer
-(`curl … | REDROP_TOKEN=… sh`) also logs in; the dashboard shows that one-line
-command when a token is created. Every command supports `--json`; exit codes are stable
-(see `redrop guide`). The Go package `pkg/client` is the same client as a library.
+environment variables. `login` and `logout` replace the config file atomically
+through a fresh private (0600) temporary file in the same directory, never
+writing through a symlink. A config path that is itself a symlink is refused
+before anything changes ("pass `--config` with the real file"), so a linked
+target never keeps an old token while the command reports success. Setting
+`REDROP_TOKEN` for the installer (`curl … | REDROP_TOKEN=… sh`) also logs in;
+the dashboard shows that one-line command when a token is created. Every command
+supports `--json`; exit codes are stable (see `redrop guide`). The Go package `pkg/client` is the same client as a library.
 
 ### Directory uploads
 
@@ -751,6 +872,40 @@ When `share`, `update`, or `watch` packs a directory, it skips:
   such as `.page.swp` and `.page.swo`.
 - JetBrains suffixes `*___jb_tmp___` and `*___jb_old___`, and gedit
   `.goutputstream-*` files.
+- Conventional secret files `.env` and `.env.*`, except `.env.example`,
+  `.env.sample`, and `.env.template`; `.netrc`, `.npmrc`, `.pypirc`,
+  `.git-credentials`, and `.pgpass`; private-key names `id_rsa`, `id_dsa`,
+  `id_ecdsa`, and `id_ed25519`, plus `*.key`, `*.p12`, and `*.pfx`.
+  The corresponding `.pub` files remain included.
+- Secret directories `.ssh`, `.aws`, and `.gnupg`, including their contents;
+  `.docker/config.json` and `.kube/config` files, without excluding other
+  files under `.docker` or `.kube`. These rules apply at any depth.
+
+`--include-secrets` on `share`, `update`, and `watch` opts conventional secret
+paths back in; library callers set `Source.IncludeSecrets`. The editor, VCS,
+and dependency filters remain active. A Markdown `--entry` that matches a
+secret rule is a usage error unless secrets are included; opting in does not
+allow an editor-filtered entry. Packing, hashing, directory registration, and
+the event filter all use the same source option.
+
+Every excluded secret entry emits a stderr warning containing only its relative
+path, never its contents, and saying that its name is excluded by the secret
+rule: a differently named symlink to the same file is not a secret name. An
+excluded secret directory is named once per walk, without reading or listing
+its contents. Watch reports each secret warning once per path per run, whether
+it comes from registration, an event or a publish; a secret path created later
+warns once too, and repeated hash scans stay quiet. An explicitly selected
+single file still publishes as requested, and warns if its selected path or
+name matches a secret rule, even with `--include-secrets` or a different
+`--name`. Its source bytes are unchanged. A selected folder that is a secret
+directory, or is inside one, by its absolute or resolved path (`share ~/.aws`,
+`share .` inside `.ssh`), is a usage error unless `--include-secrets` is given,
+because the walk filters names only below the selected root. Warnings stay on
+stderr even with `--json`.
+
+Use a dedicated output directory containing only files intended for recipients.
+These are name-based exclusions, not secret-content detection. They do not
+remove secrets from already published versions.
 
 File-name filters are case-insensitive; directory names match exactly. The
 walk applies the rule before it follows an entry: a listed directory's own
@@ -759,9 +914,10 @@ followed when either rule matches its name. An Emacs lock (`.#x`, a dangling
 symlink) is therefore skipped and counted rather than warned about, a
 `node_modules` link out of the folder does not fail the upload, and a skipped
 temp file that vanishes mid-walk is not a source change. One function,
-`skipEntry`, makes this decision for the walk, the watch event filter (for
-the last path component) and the Markdown `--entry` check (for every
-component, typed through the folder's `os.Root`). For an event on a name
+`skipEntry`, makes this decision from a root-relative path and listed type for
+the walk, the watch event filter, and the Markdown `--entry` check. The event
+filter and entry check apply it to every component; the entry check obtains
+types through the folder's `os.Root`. For an event on a name
 that is already gone, the filter uses the file rule unless the name was a
 registered directory, so editor temp-file churn neither rehashes the folder
 nor resets the watch's retry budget.
@@ -790,12 +946,12 @@ rejects any blob that differs from the declared hash. Each failed chunk costs
 one local re-read of that prefix. A
 mismatch means the file changed during the upload: `share` and `update` start
 over once and then fail, and `watch` waits for the next settled change. A
-retried upload abandons the first upload session; the server removes it when
-it expires (24h). Directories, single files forced to
+retried upload abandons the first upload session; the server expires idle
+sessions after 1h and reclaims their staging bytes. Directories, single files forced to
 a bundle, and `.zip` input are packed into a temporary tar.gz first; stdin is
 spooled to a temporary file.
 
-Archive entries supplied with `--as bundle` are not editor-filtered. ZIP input
+Archive entries supplied with `--as bundle` are not editor- or secret-filtered. ZIP input
 is converted to tar.gz using the existing archive conventions: strip a common
 top-level folder and omit `._*` files, `__MACOSX/` entries, and non-regular
 entries. tar.gz input is passed through. The server still validates archive

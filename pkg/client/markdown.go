@@ -46,7 +46,7 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 			return nil, filePathError(srcPath, err, os.Lstat)
 		}
 		defer root.Close()
-		if err := checkEntryNotSkipped(root, sourceName); err != nil {
+		if err := checkEntryNotSkipped(root, sourceName, src.IncludeSecrets); err != nil {
 			return nil, err
 		}
 		if _, err := root.Lstat("index.html"); err == nil {
@@ -59,7 +59,7 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 			return nil, fmt.Errorf("--entry %s: %w", sourceName, err)
 		}
 		defer f.Close()
-		return packMarkdown(sourceName, base, f, root, src.beforeRead)
+		return packMarkdown(sourceName, base, f, root, walkHooks{includeSecrets: src.IncludeSecrets, beforeRead: src.beforeRead})
 	}
 	if src.beforeRead != nil {
 		src.beforeRead(sourceName)
@@ -69,7 +69,7 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 		return nil, err
 	}
 	defer f.Close()
-	return packMarkdown(sourceName, base, f, nil, nil)
+	return packMarkdown(sourceName, base, f, nil, walkHooks{})
 }
 
 // checkEntryNotSkipped rejects an --entry that the walk would skip, through
@@ -77,17 +77,18 @@ func prepareMarkdown(src *Source, srcPath, name string, isDir bool) (*Prepared, 
 // then never see it. Each component is decided by skipEntry with its type as
 // listed inside root; a component that cannot be listed is left to the open
 // that follows.
-func checkEntryNotSkipped(root *os.Root, entry string) error {
+func checkEntryNotSkipped(root *os.Root, entry string, includeSecrets bool) error {
 	parts := strings.Split(entry, "/")
 	for i, part := range parts {
+		name := strings.Join(parts[:i+1], "/")
 		mode := fs.ModeDir
 		if i == len(parts)-1 {
 			mode = 0
 		}
-		if info, err := root.Lstat(filepath.FromSlash(strings.Join(parts[:i+1], "/"))); err == nil {
+		if info, err := root.Lstat(filepath.FromSlash(name)); err == nil {
 			mode = info.Mode()
 		}
-		if skip, _ := skipEntry(part, mode); skip {
+		if skip, _, _ := skipEntry(name, mode, includeSecrets); skip {
 			return usageErrorf("--entry %s is excluded from folder uploads (%s matches the skip rule; see redrop guide)", entry, part)
 		}
 	}
@@ -98,7 +99,7 @@ func checkEntryNotSkipped(root *os.Root, entry string) error {
 // for a directory, the rest of root. Prepared.Digest is in the hashTree
 // domain: the tree digest of root with the snapshot standing in for the
 // source file, or the snapshot's hash for a single file.
-func packMarkdown(name, base string, source io.Reader, root *os.Root, beforeRead func(string)) (*Prepared, error) {
+func packMarkdown(name, base string, source io.Reader, root *os.Root, hooks walkHooks) (*Prepared, error) {
 	original, err := io.ReadAll(io.LimitReader(source, markdown.MaxSourceBytes+1))
 	if err != nil {
 		return nil, err
@@ -119,7 +120,8 @@ func packMarkdown(name, base string, source io.Reader, root *os.Root, beforeRead
 	if root != nil {
 		fsys = root.FS()
 	}
-	result, err := packFS(fsys, f, walkHooks{warn: p.warn, beforeRead: beforeRead},
+	hooks.warn = p.warn
+	result, err := packFS(fsys, f, hooks,
 		bundleFile{Name: "index.html", Content: bytes.NewReader(rendered.HTML), Size: int64(len(rendered.HTML))},
 		bundleFile{Name: name, Content: bytes.NewReader(original), Size: int64(len(original)), Replace: true},
 	)

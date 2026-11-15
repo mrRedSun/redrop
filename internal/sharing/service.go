@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
@@ -37,6 +38,13 @@ type Service struct {
 	seenSigner    *security.Signer // de-duplicates ungated views
 	directSigner  *security.Signer // a visitor's choice of the direct, frameless view
 
+	// publication serializes materialization, commit/rollback, and GC. Waiting
+	// requests do no decompression and can leave through their context.
+	publication      chan struct{}
+	uploadMu         sync.Mutex
+	activeUploads    map[string]bool // chunks/publication/expiry never overlap for one upload
+	activePublishers map[string]bool // user IDs with a publication running or waiting
+
 	unlockLimiter   *security.Limiter // per client network + artifact
 	unlockIPLimiter *security.Limiter // per client network across artifacts
 	unlockBudget    *security.Limiter // wrong passwords per artifact, from any network
@@ -54,6 +62,7 @@ const maxLimiterKeys = 50_000
 func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, log *slog.Logger) (*Service, error) {
 	s := &Service{
 		db: db, blobs: blobs, cfg: cfg, log: log,
+		publication:     make(chan struct{}, 1),
 		uploadDir:       filepath.Join(cfg.DataDir, "uploads"),
 		accessSigner:    security.NewSigner(secret, "access"),
 		previewSigner:   security.NewSigner(secret, "preview"),
@@ -85,6 +94,8 @@ func mapStore(err error) error {
 		return nil
 	case errors.Is(err, store.ErrNotFound):
 		return apperr.NotFound("not found")
+	case errors.Is(err, store.ErrUploadLimit):
+		return apperr.TooLarge("too many open upload sessions; finish an upload or wait for expiry")
 	case errors.Is(err, store.ErrQuota):
 		return apperr.TooLarge("storage quota exceeded (your quota or the server total); delete or let old artifacts expire")
 	}

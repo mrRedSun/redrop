@@ -5,6 +5,26 @@ import (
 	"testing"
 )
 
+func TestOpenUploadLimit(t *testing.T) {
+	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
+	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")
+	c, err := Load()
+	if err != nil || c.MaxOpenUploads != 8 {
+		t.Fatalf("default: %+v, %v", c, err)
+	}
+	t.Setenv("REDROP_MAX_OPEN_UPLOADS", "3")
+	c, err = Load()
+	if err != nil || c.MaxOpenUploads != 3 {
+		t.Fatalf("override: %+v, %v", c, err)
+	}
+	for _, value := range []string{"0", "-1", "many", "1.5"} {
+		t.Setenv("REDROP_MAX_OPEN_UPLOADS", value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REDROP_MAX_OPEN_UPLOADS") {
+			t.Fatalf("%q: %v", value, err)
+		}
+	}
+}
+
 func TestContentMissLimits(t *testing.T) {
 	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
 	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")

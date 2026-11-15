@@ -41,6 +41,7 @@ type Config struct {
 	MaxTotalBytes     int64
 	DefaultQuotaBytes int64
 	MaxFiles          int
+	MaxOpenUploads    int // per user, including expired sessions awaiting cleanup
 	ChunkSize         int64
 	KeepVersions      int // 0 = unlimited
 
@@ -228,6 +229,9 @@ func Load() (*Config, error) {
 	}
 	if c.MaxFiles, err = strconv.Atoi(env("REDROP_MAX_FILES", "20000")); err != nil {
 		return nil, fmt.Errorf("REDROP_MAX_FILES: %w", err)
+	}
+	if c.MaxOpenUploads, err = envPositiveInt("REDROP_MAX_OPEN_UPLOADS", "8"); err != nil {
+		return nil, err
 	}
 	if c.KeepVersions, err = strconv.Atoi(env("REDROP_KEEP_VERSIONS", "0")); err != nil {
 		return nil, fmt.Errorf("REDROP_KEEP_VERSIONS: %w", err)

@@ -79,13 +79,54 @@ func loadConfig() fileConfig {
 	return c
 }
 
-func saveConfig(c fileConfig) error {
+// refuseConfigSymlink stops login and logout before they change anything when
+// the config file is a symlink. saveConfig replaces the file atomically and
+// never writes through a link, so the link's target would keep the old token
+// while the command reported success.
+func refuseConfigSymlink() error {
 	p := configPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return withCode(exitUsage, "the config file %s is a symlink; pass --config with the real file", p)
+	}
+	return nil
+}
+
+func saveConfig(c fileConfig) error {
+	if err := refuseConfigSymlink(); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(c, "", "  ")
-	return os.WriteFile(p, append(b, '\n'), 0o600)
+	p := configPath()
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	// A fresh private inode avoids retaining permissive modes or following
+	// destination symlinks. Keep it beside the destination for atomic rename.
+	f, err := os.CreateTemp(dir, "."+filepath.Base(p)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		f.Close()
+		os.Remove(f.Name())
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), p)
 }
 
 func normalizeURL(raw string) (string, error) {

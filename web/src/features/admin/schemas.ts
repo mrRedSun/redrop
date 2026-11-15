@@ -12,6 +12,8 @@ export const Stats = Schema.Struct({
   active_artifacts: Schema.Number,
   logical_bytes: Schema.Number,
   stored_bytes: Schema.Number,
+  staged_bytes: Schema.Number,
+  reserved_bytes: Schema.Number,
   max_total_bytes: Schema.Number,
   max_version_bytes: Schema.Number,
 })
