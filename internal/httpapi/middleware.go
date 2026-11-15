@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/go-fuego/fuego"
 
 	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/apperr"
@@ -131,19 +134,33 @@ func (a *API) csrfOnly(next http.Handler) http.Handler {
 	})
 }
 
-// maxAuthBody bounds the JSON bodies of the unauthenticated sign-in and
-// onboarding routes. A username, password, code and link token fit many
-// times over.
-const maxAuthBody = 4 << 10
+// Request body limits. The unauthenticated sign-in and onboarding routes
+// take a username, password, code and link token, which fit in a few KiB.
+const (
+	maxAuthBody = 4 << 10
+	maxJSONBody = 1 << 20
+)
 
-// authBody limits the bodies of the unauthenticated sign-in and onboarding
-// routes to maxAuthBody.
-func (a *API) authBody(next http.Handler) http.Handler { return limitBody(next, maxAuthBody) }
+// authBody admits the JSON body of an unauthenticated sign-in or onboarding
+// route, up to maxAuthBody.
+func (a *API) authBody(next http.Handler) http.Handler { return jsonBody(next, maxAuthBody) }
 
-// limitBody refuses a request body over n bytes with 413 before anything
-// reads it; a body without a declared length is cut off at n.
-func limitBody(next http.Handler, n int64) http.Handler {
+// jsonIn admits the JSON body of any other route, up to maxJSONBody.
+func (a *API) jsonIn(next http.Handler) http.Handler { return jsonBody(next, maxJSONBody) }
+
+// jsonBody runs before anything decodes the body. A body that is not
+// application/json gets 415; Fuego would otherwise pick a decoder from the
+// Content-Type and panic on text/plain. A declared length over n gets 413,
+// and a body without one is cut off at n (413 from toProblem). A request
+// with neither a body nor a Content-Type passes: Fuego decodes it as empty.
+func jsonBody(next http.Handler, n int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := r.Header.Get("Content-Type"); ct != "" || r.ContentLength != 0 {
+			if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+				writeError(w, r, fuego.HTTPError{Status: http.StatusUnsupportedMediaType, Title: http.StatusText(http.StatusUnsupportedMediaType), Detail: "the request body must be application/json"})
+				return
+			}
+		}
 		if r.ContentLength > n {
 			writeError(w, r, apperr.TooLarge("request body is too large"))
 			return

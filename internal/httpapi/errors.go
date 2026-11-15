@@ -32,8 +32,18 @@ func StatusOf(k apperr.Kind) int { return statusByKind[k] }
 // errors (validation, decoding) pass through; internal causes are logged and
 // never exposed.
 func toProblem(ctx context.Context, err error) fuego.HTTPError {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return fuego.HTTPError{Status: http.StatusRequestEntityTooLarge, Title: http.StatusText(http.StatusRequestEntityTooLarge), Detail: "request body is too large"}
+	}
 	var he fuego.HTTPError
 	if errors.As(err, &he) {
+		// Fuego's decoding errors wrap an HTTPError without a status; the
+		// wrapper (BadRequestError) carries it.
+		var ws fuego.ErrorWithStatus
+		if he.Status == 0 && errors.As(err, &ws) {
+			he.Status = ws.StatusCode()
+		}
 		return he
 	}
 	var ws fuego.ErrorWithStatus

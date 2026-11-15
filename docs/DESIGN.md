@@ -619,6 +619,11 @@ token or password appears.
   call. The unauthenticated sign-in and onboarding routes (`/auth/login`,
   `/setup`, `/invites/{token}/accept`, `/reset/{token}`) accept at most
   4 KiB of body; larger bodies get `413`.
+* **Request bodies.** Every route that takes a JSON body checks it before
+  decoding: another `Content-Type` (or a body without one) gets `415`, and
+  a body over its limit (4 KiB above, 1 MiB elsewhere) gets `413`, with or
+  without a declared length. Malformed JSON gets `400`. Upload chunks
+  (`PUT /uploads/{id}`) are raw bytes and keep their own limits.
 
 ## CLI
 
