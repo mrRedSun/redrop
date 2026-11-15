@@ -1,10 +1,14 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/mrRedSun/redrop/pkg/client"
 )
 
 // raw sends a request with an explicit body and content type to the app
@@ -41,4 +45,55 @@ func TestAuthRoutesRefuseLargeBodies(t *testing.T) {
 	}
 	r := h.raw("POST", "/api/v1/auth/login", "application/json", strings.NewReader(`{"username":"admin","password":"long-enough-password"}`))
 	expectStatus(t, r, 200, "normal login")
+}
+
+// Every per-client limiter treats one IPv6 /64 as one client (security
+// review A3): rotating through the addresses of a /64 does not reset them.
+// The test client connects from 127.0.0.1, a trusted proxy by default, so
+// X-Forwarded-For chooses the client address.
+func TestPerClientLimitersGroupIPv6(t *testing.T) {
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	addr := func(i int) string { return fmt.Sprintf("2001:db8:77::%x", i+1) }
+
+	// Sign-in: 5 per network and username per 5 minutes. The sixth guess
+	// meets the network's limit, before the account's own backoff.
+	login := `{"username":"admin","password":"wrong-password"}`
+	for i := range 5 {
+		expectStatus(t, h.raw("POST", "/api/v1/auth/login", "application/json", strings.NewReader(login), "X-Forwarded-For", addr(i)), 401, "guess "+addr(i))
+	}
+	r := h.raw("POST", "/api/v1/auth/login", "application/json", strings.NewReader(login), "X-Forwarded-For", addr(5))
+	expectStatus(t, r, 429, "sixth guess from the same /64")
+	if b := body(r); !strings.Contains(b, "too many sign-in attempts; wait") {
+		t.Errorf("sixth guess was not stopped by the network limit: %s", b)
+	}
+
+	// One-time link lookups: 60 per network per 10 minutes.
+	for i := range 60 {
+		expectStatus(t, h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", addr(100+i)), 200, "invite lookup")
+	}
+	expectStatus(t, h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", addr(200)), 429, "61st lookup from the same /64")
+	expectStatus(t, h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", "2001:db8:78::1"), 200, "lookup from another /64")
+
+	// Artifact passwords: 5 per network and artifact per 5 minutes.
+	a := h.share(c, "gated", client.PublishOptions{Password: "right-password"})
+	unlock := func(ip string) *http.Response {
+		u, _ := url.Parse(a.URL)
+		req, _ := http.NewRequest("POST", h.srv.URL+"/__redrop/open", strings.NewReader(url.Values{"password": {"wrong"}, "next": {"/"}}.Encode()))
+		req.Host = u.Host
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("X-Forwarded-For", ip)
+		resp, err := h.srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	for i := range 5 {
+		expectStatus(t, unlock(addr(300+i)), 401, "wrong artifact password")
+	}
+	expectStatus(t, unlock(addr(400)), 429, "sixth artifact password from the same /64")
+	expectStatus(t, unlock("2001:db8:79::1"), 401, "artifact password from another /64")
 }

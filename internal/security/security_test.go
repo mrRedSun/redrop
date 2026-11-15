@@ -58,8 +58,7 @@ func TestSigner(t *testing.T) {
 func newTestLimiter(t *testing.T, limit int, window time.Duration, maxKeys int) (*Limiter, *fakeClock) {
 	t.Helper()
 	c := &fakeClock{t: time.Unix(1_800_000_000, 0)}
-	l := NewLimiter(limit, window, maxKeys)
-	l.now = c.now
+	l := NewLimiter(limit, window, maxKeys, c.now)
 	t.Cleanup(l.Close)
 	return l, c
 }
@@ -78,7 +77,7 @@ func TestLimiter(t *testing.T) {
 // already closed when it returns. A long window keeps the ticker from
 // firing during the test.
 func TestLimiterCloseStopsSweeper(t *testing.T) {
-	l := NewLimiter(1, time.Hour, 10)
+	l := NewLimiter(1, time.Hour, 10, time.Now)
 	select {
 	case <-l.done:
 		t.Fatal("sweeper exited before Close")

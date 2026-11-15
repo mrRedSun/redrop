@@ -133,8 +133,8 @@ func FailurePath(mode string) string {
 
 // BeginSSO validates the request and builds the provider redirect.
 // current is required for SSOLink.
-func (s *Service) BeginSSO(ctx context.Context, ip, providerID, mode string, current *Principal, inviteToken string) (*SSOStart, error) {
-	if !s.loginIPLimiter.Allow(ip) {
+func (s *Service) BeginSSO(ctx context.Context, network, providerID, mode string, current *Principal, inviteToken string) (*SSOStart, error) {
+	if !s.loginIPLimiter.Allow(network) {
 		return nil, apperr.RateLimited("too many sign-in attempts; wait a few minutes")
 	}
 	p, err := s.discover(ctx, providerID)

@@ -59,6 +59,26 @@ func (c *ClientResolver) IP(r *http.Request) string {
 	return host
 }
 
+// Network returns the client's rate-limit key: Network(c.IP(r)). Every
+// per-client limiter uses it, so they all group clients the same way.
+func (c *ClientResolver) Network(r *http.Request) string { return Network(c.IP(r)) }
+
+// Network maps a client address to the network it is limited as: an IPv4
+// address as is, an IPv6 address widened to its /64 (written "prefix/64"),
+// because one subscriber usually holds a whole /64 and could otherwise
+// rotate through 2^64 addresses. An IPv4-mapped IPv6 address counts as IPv4.
+// Anything that is not an IP address is returned unchanged.
+func Network(addr string) string {
+	ip := net.ParseIP(addr)
+	switch {
+	case ip == nil:
+		return addr
+	case ip.To4() != nil:
+		return ip.To4().String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 // Country returns an ISO country code supplied by a trusted CDN, or "".
 func (c *ClientResolver) Country(r *http.Request) string {
 	if c.CountryHeader == "" {

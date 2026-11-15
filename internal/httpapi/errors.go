@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/go-fuego/fuego"
 
@@ -48,6 +50,14 @@ func toProblem(ctx context.Context, err error) fuego.HTTPError {
 		title = http.StatusText(status)
 	}
 	return fuego.HTTPError{Status: status, Title: title, Detail: e.Msg}
+}
+
+// setRetryAfter sets Retry-After (whole seconds, rounded up) for a
+// rate-limited error that knows its wait.
+func setRetryAfter(w http.ResponseWriter, err error) {
+	if e := apperr.As(err); e.Kind == apperr.KindRateLimited && e.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(e.RetryAfter.Seconds()))))
+	}
 }
 
 // writeError renders an error from a plain net/http handler.

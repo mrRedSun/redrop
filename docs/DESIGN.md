@@ -559,6 +559,24 @@ inside their containers on narrow screens. The document is readable without JS.
   client gets `429` until a window expires (fail closed); clients already in
   the table keep their own count. The content miss limiter
   (`security.TokenBucket`) keeps at most 100,000 clients.
+* **Clients.** Every per-client limiter (sign-in, single sign-on starts,
+  one-time link lookups, artifact passwords, content misses) keys on
+  `netutil.Network`: the trusted-proxy-resolved address, with IPv6 grouped
+  by /64, so one host cannot rotate through its /64 to reset them.
+* **Accounts.** Sign-in attempts are also slowed per account, from any
+  network: five in a row, then each attempt waits twice as long as the one
+  before, from 1 second up to 15 minutes (`429` with `Retry-After`). There
+  is no lockout: once an attacker stops, the right password works again
+  within 15 minutes. A successful sign-in, or a day without attempts,
+  starts over. Unknown usernames back off exactly like real ones, so the
+  backoff reveals nothing about which accounts exist. Each attempt is
+  charged before the password is checked, so concurrent guesses queue
+  instead of all reading the old count. The table is a fixed 65,536 slots
+  hashed with a per-process random seed: it is never full, and an attacker
+  cannot choose which accounts share a slot.
+* **Authenticator codes.** An account takes at most 5 wrong codes per
+  hour, at sign-in and when turning the authenticator off, from any
+  network.
 * **Sign-in input.** A username that fails the account name rule (2–32
   characters) gets the wrong-login answer before any limiter or database
   call. The unauthenticated sign-in and onboarding routes (`/auth/login`,

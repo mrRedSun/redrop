@@ -10,11 +10,27 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/security"
+	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 func validateTOTP(code, secret string) bool {
 	return totp.Validate(strings.ReplaceAll(strings.TrimSpace(code), " ", ""), secret)
+}
+
+// checkTOTP verifies an authenticator code of u's enabled authenticator
+// within the account's ceiling on wrong codes. The attempt is charged before
+// the check, so concurrent guesses cannot all see the old count, and a
+// valid code is refunded. err is set when the ceiling is reached.
+func (s *Service) checkTOTP(u *store.User, code string) (valid bool, err error) {
+	if !s.totpLimiter.Allow(u.ID) {
+		return false, apperr.RateLimited("too many wrong authenticator codes for this account; try again in an hour")
+	}
+	if !validateTOTP(code, u.TOTPSecret) {
+		return false, nil
+	}
+	s.totpLimiter.Refund(u.ID)
+	return true, nil
 }
 
 // UpdateDisplayName changes the caller's display name.
@@ -83,7 +99,11 @@ func (s *Service) DisableTOTP(ctx context.Context, p *Principal, code string) er
 	if !p.user.TOTPEnabled {
 		return nil
 	}
-	if !validateTOTP(code, p.user.TOTPSecret) {
+	valid, err := s.checkTOTP(p.user, code)
+	if err != nil {
+		return err
+	}
+	if !valid {
 		return apperr.Invalid("wrong code")
 	}
 	return mapStore(s.db.SetTOTP(ctx, p.user.ID, "", false))

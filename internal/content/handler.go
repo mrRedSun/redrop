@@ -92,25 +92,10 @@ func (h *Handler) singleLabel(r *http.Request) bool {
 	return ok && label != ""
 }
 
-// missKey is the client a miss is charged to: the trusted-proxy-resolved
-// address, widened to its /64 for IPv6 because one subscriber usually holds
-// a whole /64.
-func (h *Handler) missKey(r *http.Request) string {
-	addr := h.clients.IP(r)
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return addr
-	}
-	if ip.To4() == nil {
-		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
-	}
-	return ip.String()
-}
-
 // miss answers a request for a slug that does not resolve to an available
 // artifact. All misses look the same, whatever the reason.
 func (h *Handler) miss(w http.ResponseWriter, r *http.Request) {
-	if !h.misses.Take(h.missKey(r)) {
+	if !h.misses.Take(h.clients.Network(r)) {
 		h.tooManyMisses(w)
 		return
 	}
@@ -157,7 +142,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case fallbackIcons[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.favicon(w, r, slug)
 		return
-	case h.misses.Exhausted(h.missKey(r)):
+	case h.misses.Exhausted(h.clients.Network(r)):
 		h.tooManyMisses(w)
 		return
 	}
@@ -229,7 +214,7 @@ func (h *Handler) setHeaders(w http.ResponseWriter) {
 }
 
 func (h *Handler) visitor(r *http.Request) sharing.Visitor {
-	return sharing.Visitor{IP: h.clients.IP(r), Country: h.clients.Country(r), UserAgent: r.UserAgent()}
+	return sharing.Visitor{Network: h.clients.Network(r), Country: h.clients.Country(r), UserAgent: r.UserAgent()}
 }
 
 // isDocument reports whether the request is a page navigation.

@@ -6,7 +6,9 @@ package accounts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -78,9 +80,13 @@ type Service struct {
 	cfg *config.Config
 	log *slog.Logger
 
-	loginLimiter   *security.Limiter // per IP+username
-	loginIPLimiter *security.Limiter // per IP
-	linkLimiter    *security.Limiter // per IP, unauthenticated link lookups
+	now func() time.Time // the clock; tests replace it
+
+	loginLimiter   *security.Limiter // per client network + username
+	loginIPLimiter *security.Limiter // per client network
+	linkLimiter    *security.Limiter // per client network, unauthenticated link lookups
+	accountBackoff *security.Backoff // per username, from any network
+	totpLimiter    *security.Limiter // wrong authenticator codes per user
 	stateSigner    *security.Signer  // SSO state
 
 	ssoMu     sync.Mutex
@@ -93,14 +99,36 @@ type Service struct {
 // window expires.
 const maxLimiterKeys = 50_000
 
+// Sign-in attempts per account, whatever network they come from: five in a
+// row, then each one waits twice as long as the one before, from one second
+// up to 15 minutes. A successful sign-in starts over, and so does a day
+// without attempts. The table is fixed (65,536 slots, about 1.5 MiB).
+const (
+	accountFreeAttempts = 5
+	accountBaseDelay    = time.Second
+	accountMaxDelay     = 15 * time.Minute
+	accountForget       = 24 * time.Hour
+	accountSlots        = 1 << 16
+)
+
+// totpFailuresPerHour is how many wrong authenticator codes an account takes
+// per hour, at sign-in and when turning the authenticator off.
+const totpFailuresPerHour = 5
+
 func New(db *store.Store, cfg *config.Config, secret []byte, log *slog.Logger) *Service {
+	return newService(db, cfg, secret, log, time.Now)
+}
+
+func newService(db *store.Store, cfg *config.Config, secret []byte, log *slog.Logger, now func() time.Time) *Service {
 	s := &Service{
-		db: db, cfg: cfg, log: log,
-		loginLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys),
-		loginIPLimiter: security.NewLimiter(30, 15*time.Minute, maxLimiterKeys),
-		linkLimiter:    security.NewLimiter(60, 10*time.Minute, maxLimiterKeys),
-		stateSigner:    security.NewSigner(secret, "oidc-state"),
+		db: db, cfg: cfg, log: log, now: now,
+		stateSigner: security.NewSigner(secret, "oidc-state"),
 	}
+	s.loginLimiter = security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, now)
+	s.loginIPLimiter = security.NewLimiter(30, 15*time.Minute, maxLimiterKeys, now)
+	s.linkLimiter = security.NewLimiter(60, 10*time.Minute, maxLimiterKeys, now)
+	s.accountBackoff = security.NewBackoff(accountSlots, accountFreeAttempts, accountBaseDelay, accountMaxDelay, accountForget, now)
+	s.totpLimiter = security.NewLimiter(totpFailuresPerHour, time.Hour, maxLimiterKeys, now)
 	s.initProviders()
 	return s
 }
@@ -111,6 +139,7 @@ func (s *Service) Close() {
 	s.loginLimiter.Close()
 	s.loginIPLimiter.Close()
 	s.linkLimiter.Close()
+	s.totpLimiter.Close()
 }
 
 // --- authentication ---
@@ -172,7 +201,7 @@ func (s *Service) newSession(ctx context.Context, u *store.User, method string) 
 func wrongLogin() error { return apperr.Unauthorized("wrong username or password") }
 
 // Login verifies a password (and TOTP when enabled) and opens a session.
-func (s *Service) Login(ctx context.Context, ip, username, password, totpCode string) (*Session, error) {
+func (s *Service) Login(ctx context.Context, network, username, password, totpCode string) (*Session, error) {
 	if !s.cfg.PasswordLogin {
 		return nil, apperr.Forbidden("password login is disabled; use single sign-on")
 	}
@@ -182,8 +211,14 @@ func (s *Service) Login(ctx context.Context, ip, username, password, totpCode st
 	if err != nil {
 		return nil, wrongLogin()
 	}
-	if !s.loginIPLimiter.Allow(ip) || !s.loginLimiter.Allow(ip+"|"+username) {
+	if !s.loginIPLimiter.Allow(network) || !s.loginLimiter.Allow(network+"|"+username) {
 		return nil, apperr.RateLimited("too many sign-in attempts; wait a few minutes")
+	}
+	// The account's backoff applies whether or not the name exists, so it
+	// reveals nothing about which accounts do. Every attempt is charged
+	// before the password check; only a successful sign-in clears it.
+	if ok, wait := s.accountBackoff.Begin(username); !ok {
+		return nil, apperr.RateLimited("too many failed sign-in attempts for this account; try again in %s", waitText(wait)).WithRetryAfter(wait)
 	}
 	u, err := s.db.UserByUsername(ctx, username)
 	hash := ""
@@ -198,11 +233,31 @@ func (s *Service) Login(ctx context.Context, ip, username, password, totpCode st
 		if totpCode == "" {
 			return nil, apperr.Unauthorized("enter the code from your authenticator app").WithCode("totp_required")
 		}
-		if !validateTOTP(totpCode, u.TOTPSecret) {
+		valid, err := s.checkTOTP(u, totpCode)
+		if err != nil {
+			return nil, err
+		}
+		if !valid {
 			return nil, apperr.Unauthorized("wrong authenticator code")
 		}
 	}
-	return s.newSession(ctx, u, MethodPassword)
+	sess, err := s.newSession(ctx, u, MethodPassword)
+	if err == nil {
+		s.accountBackoff.Reset(username)
+	}
+	return sess, err
+}
+
+// waitText renders a backoff wait for a message, rounded up.
+func waitText(d time.Duration) string {
+	n, unit := int(math.Ceil(d.Seconds())), "second"
+	if d > time.Minute {
+		n, unit = int(math.Ceil(d.Minutes())), "minute"
+	}
+	if n != 1 {
+		unit += "s"
+	}
+	return fmt.Sprintf("%d %s", n, unit)
 }
 
 // Logout ends a session (unknown secrets are ignored).

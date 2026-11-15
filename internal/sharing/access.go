@@ -27,7 +27,7 @@ const (
 
 // Visitor is an anonymous client of a shared link.
 type Visitor struct {
-	IP        string
+	Network   string // rate-limit key: the address, IPv6 grouped by /64 (netutil.Network)
 	Country   string
 	UserAgent string
 }
@@ -192,7 +192,7 @@ func (s *Service) Open(ctx context.Context, a *store.Artifact, v Visitor, passwo
 		if fails, _ := s.db.RecentFailures(ctx, a.ID, time.Now().Add(-time.Hour)); fails >= lockThreshold {
 			return nil, apperr.RateLimited("Too many wrong passwords. This link is temporarily locked; try again later.")
 		}
-		if !s.unlockIPLimiter.Allow(v.IP) || !s.unlockLimiter.Allow(v.IP+"|"+a.ID) {
+		if !s.unlockIPLimiter.Allow(v.Network) || !s.unlockLimiter.Allow(v.Network+"|"+a.ID) {
 			return nil, apperr.RateLimited("Too many attempts. Wait a few minutes and try again.")
 		}
 		if !security.CheckPassword(a.PasswordHash, password) {

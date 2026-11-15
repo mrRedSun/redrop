@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/config"
@@ -146,5 +147,24 @@ func TestAdminHandlersHoldOnlyAdminPorts(t *testing.T) {
 	want := []string{"*accounts.Administration", "*sharing.Moderation"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("adminAPI fields = %v, want %v", got, want)
+	}
+}
+
+func TestSetRetryAfter(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{apperr.RateLimited("slow down").WithRetryAfter(1500 * time.Millisecond), "2"},
+		{apperr.RateLimited("slow down").WithRetryAfter(15 * time.Minute), "900"},
+		{apperr.RateLimited("slow down"), ""},
+		{apperr.Unauthorized("no").WithRetryAfter(time.Minute), ""},
+	}
+	for _, c := range cases {
+		w := httptest.NewRecorder()
+		setRetryAfter(w, c.err)
+		if got := w.Header().Get("Retry-After"); got != c.want {
+			t.Errorf("%v: Retry-After %q, want %q", c.err, got, c.want)
+		}
 	}
 }

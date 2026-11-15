@@ -54,8 +54,8 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		previewSigner:   security.NewSigner(secret, "preview"),
 		seenSigner:      security.NewSigner(secret, "seen"),
 		directSigner:    security.NewSigner(secret, "direct-view"),
-		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys),
-		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys),
+		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, time.Now),
+		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys, time.Now),
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
 		s.Close()

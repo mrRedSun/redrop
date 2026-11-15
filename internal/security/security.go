@@ -161,10 +161,10 @@ type bucket struct {
 }
 
 // NewLimiter allows limit hits per key per window, for at most maxKeys keys
-// at a time.
-func NewLimiter(limit int, window time.Duration, maxKeys int) *Limiter {
+// at a time. now is the clock (time.Now, or a test's).
+func NewLimiter(limit int, window time.Duration, maxKeys int, now func() time.Time) *Limiter {
 	l := &Limiter{
-		limit: limit, window: window, maxKeys: maxKeys, now: time.Now, hits: map[string]bucket{},
+		limit: limit, window: window, maxKeys: maxKeys, now: now, hits: map[string]bucket{},
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	go l.sweeper()
@@ -243,6 +243,19 @@ func (l *Limiter) Allow(key string) bool {
 	b.n++
 	l.hits[key] = b
 	return b.n <= l.limit
+}
+
+// Refund takes back one hit recorded for key in its current window. Callers
+// that charge an attempt before checking it refund the ones that succeed,
+// so only failures use up the limit.
+func (l *Limiter) Refund(key string) {
+	key = limiterKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok := l.hits[key]; ok && b.n > 0 {
+		b.n--
+		l.hits[key] = b
+	}
 }
 
 // Blocked reports whether the key is over the limit without recording.

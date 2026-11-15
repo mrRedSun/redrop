@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,9 +17,28 @@ import (
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
+// testClock is a goroutine-safe fake clock.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
 // newTestService returns a service over a fresh database with password
-// login on and no identity providers.
-func newTestService(t *testing.T) *Service {
+// login on and no identity providers. Its limiters run on the returned
+// fake clock.
+func newTestService(t *testing.T) (*Service, *testClock) {
 	t.Helper()
 	db, err := store.Open(filepath.Join(t.TempDir(), "redrop.db"))
 	if err != nil {
@@ -27,9 +47,10 @@ func newTestService(t *testing.T) *Service {
 	t.Cleanup(func() { db.Close() })
 	u, _ := url.Parse("https://redrop.example.com")
 	cfg := &config.Config{PublicURL: u, PasswordLogin: true, DefaultQuotaBytes: 1 << 30}
-	s := New(db, cfg, []byte("test-secret-test-secret-test-secret!"), slog.New(slog.DiscardHandler))
+	clock := &testClock{t: time.Unix(1_800_000_000, 0)}
+	s := newService(db, cfg, []byte("test-secret-test-secret-test-secret!"), slog.New(slog.DiscardHandler), clock.now)
 	t.Cleanup(s.Close)
-	return s
+	return s, clock
 }
 
 // addUser creates a password account directly in the store.
@@ -54,7 +75,7 @@ func addUser(t *testing.T, s *Service, username, password, role string) *store.U
 // A name that can never be valid is refused before any limiter or database
 // call, so oversized input never becomes a limiter key.
 func TestLoginRejectsInvalidUsernamesBeforeLimiting(t *testing.T) {
-	s := newTestService(t)
+	s, _ := newTestService(t)
 	addUser(t, s, "bob", "bob-password-123", api.RoleUser)
 	huge := "u" + strings.Repeat("a", 1_000_000)
 	for _, name := range []string{huge, "a", "has space", strings.Repeat("b", 33), "bob@example.com", ""} {
