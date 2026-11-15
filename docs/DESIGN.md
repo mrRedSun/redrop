@@ -613,7 +613,10 @@ token or password appears.
   cannot choose which accounts share a slot.
 * **Authenticator codes.** An account takes at most 5 wrong codes per
   hour, at sign-in and when turning the authenticator off, from any
-  network.
+  network. Each code works once: the last accepted 30-second step is
+  stored per user, and a code from that step or an earlier one is refused
+  ("already used"), including when two requests race with one code. A new
+  secret starts its own record.
 * **Sign-in input.** A username that fails the account name rule (2–32
   characters) gets the wrong-login answer before any limiter or database
   call. The unauthenticated sign-in and onboarding routes (`/auth/login`,

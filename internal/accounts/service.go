@@ -233,11 +233,12 @@ func (s *Service) Login(ctx context.Context, network, username, password, totpCo
 		if totpCode == "" {
 			return nil, apperr.Unauthorized("enter the code from your authenticator app").WithCode("totp_required")
 		}
-		valid, err := s.checkTOTP(u, totpCode)
-		if err != nil {
+		switch res, err := s.checkTOTP(ctx, u, totpCode); {
+		case err != nil:
 			return nil, err
-		}
-		if !valid {
+		case res == totpReused:
+			return nil, apperr.Unauthorized("that authenticator code was already used; wait for the next one")
+		case res != totpValid:
 			return nil, apperr.Unauthorized("wrong authenticator code")
 		}
 	}

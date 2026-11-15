@@ -2,9 +2,11 @@ package accounts
 
 import (
 	"context"
+	"crypto/subtle"
 	"strings"
 	"time"
 
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
@@ -14,23 +16,69 @@ import (
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
-func validateTOTP(code, secret string) bool {
-	return totp.Validate(strings.ReplaceAll(strings.TrimSpace(code), " ", ""), secret)
+// totpPeriod and totpSkew are the authenticator parameters: 30-second
+// steps, and a code from one step before or after now is accepted.
+const (
+	totpPeriod = 30
+	totpSkew   = 1
+)
+
+// totpStep returns the time step whose code matches, within totpSkew steps
+// of now.
+func totpStep(code, secret string, now time.Time) (int64, bool) {
+	code = strings.ReplaceAll(strings.TrimSpace(code), " ", "")
+	if len(code) != 6 {
+		return 0, false
+	}
+	opts := totp.ValidateOpts{Period: totpPeriod, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1}
+	cur := now.Unix() / totpPeriod
+	for step := cur - totpSkew; step <= cur+totpSkew; step++ {
+		want, err := totp.GenerateCodeCustom(secret, time.Unix(step*totpPeriod, 0).UTC(), opts)
+		if err == nil && subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
+			return step, true
+		}
+	}
+	return 0, false
+}
+
+type totpResult int
+
+const (
+	totpValid  totpResult = iota
+	totpWrong             // not a current code
+	totpReused            // a current code, but its step was already used
+)
+
+// useTOTP accepts a code once: the step it belongs to must be later than the
+// last step this user's authenticator was accepted at, which it becomes.
+func (s *Service) useTOTP(ctx context.Context, userID, secret, code string) (totpResult, error) {
+	step, ok := totpStep(code, secret, s.now())
+	if !ok {
+		return totpWrong, nil
+	}
+	fresh, err := s.db.UseTOTPStep(ctx, userID, step)
+	if err != nil {
+		return totpWrong, apperr.Internal(err)
+	}
+	if !fresh {
+		return totpReused, nil
+	}
+	return totpValid, nil
 }
 
 // checkTOTP verifies an authenticator code of u's enabled authenticator
 // within the account's ceiling on wrong codes. The attempt is charged before
 // the check, so concurrent guesses cannot all see the old count, and a
-// valid code is refunded. err is set when the ceiling is reached.
-func (s *Service) checkTOTP(u *store.User, code string) (valid bool, err error) {
+// valid code is refunded. A reused code counts as wrong.
+func (s *Service) checkTOTP(ctx context.Context, u *store.User, code string) (totpResult, error) {
 	if !s.totpLimiter.Allow(u.ID) {
-		return false, apperr.RateLimited("too many wrong authenticator codes for this account; try again in an hour")
+		return totpWrong, apperr.RateLimited("too many wrong authenticator codes for this account; try again in an hour")
 	}
-	if !validateTOTP(code, u.TOTPSecret) {
-		return false, nil
+	res, err := s.useTOTP(ctx, u.ID, u.TOTPSecret, code)
+	if err == nil && res == totpValid {
+		s.totpLimiter.Refund(u.ID)
 	}
-	s.totpLimiter.Refund(u.ID)
-	return true, nil
+	return res, err
 }
 
 // UpdateDisplayName changes the caller's display name.
@@ -89,7 +137,9 @@ func (s *Service) EnableTOTP(ctx context.Context, p *Principal, code string) err
 	if p.user.TOTPEnabled || p.user.TOTPSecret == "" {
 		return apperr.Conflict("start enrollment first")
 	}
-	if !validateTOTP(code, p.user.TOTPSecret) {
+	if res, err := s.useTOTP(ctx, p.user.ID, p.user.TOTPSecret, code); err != nil {
+		return err
+	} else if res != totpValid {
 		return apperr.Invalid("wrong code; check your device clock")
 	}
 	return mapStore(s.db.SetTOTP(ctx, p.user.ID, p.user.TOTPSecret, true))
@@ -99,11 +149,12 @@ func (s *Service) DisableTOTP(ctx context.Context, p *Principal, code string) er
 	if !p.user.TOTPEnabled {
 		return nil
 	}
-	valid, err := s.checkTOTP(p.user, code)
-	if err != nil {
+	switch res, err := s.checkTOTP(ctx, p.user, code); {
+	case err != nil:
 		return err
-	}
-	if !valid {
+	case res == totpReused:
+		return apperr.Invalid("that code was already used; wait for the next one")
+	case res != totpValid:
 		return apperr.Invalid("wrong code")
 	}
 	return mapStore(s.db.SetTOTP(ctx, p.user.ID, "", false))

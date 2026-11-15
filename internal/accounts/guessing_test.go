@@ -114,12 +114,12 @@ func TestTOTPFailureCeiling(t *testing.T) {
 			t.Fatalf("wrong code %d: %s %v", i+1, kind, err)
 		}
 	}
-	valid, _ := totp.GenerateCode(key.Secret(), time.Now())
+	valid, _ := totp.GenerateCode(key.Secret(), clock.now())
 	if kind, err := try(valid); kind != "429" || !strings.Contains(err.Error(), "authenticator codes") {
 		t.Fatalf("code after %d wrong ones: %s %v, want the ceiling", totpFailuresPerHour, kind, err)
 	}
 	clock.add(time.Hour + time.Second)
-	valid, _ = totp.GenerateCode(key.Secret(), time.Now())
+	valid, _ = totp.GenerateCode(key.Secret(), clock.now())
 	if kind, err := try(valid); kind != "ok" {
 		t.Fatalf("valid code an hour later: %s %v", kind, err)
 	}
@@ -132,7 +132,7 @@ func TestTOTPFailureCeiling(t *testing.T) {
 			t.Fatalf("wrong code %d to disable: %v", i+1, err)
 		}
 	}
-	valid, _ = totp.GenerateCode(key.Secret(), time.Now())
+	valid, _ = totp.GenerateCode(key.Secret(), clock.now())
 	if err := s.DisableTOTP(context.Background(), p, valid); !apperr.Is(err, apperr.KindRateLimited) {
 		t.Fatalf("disable after %d wrong codes: %v, want the ceiling", totpFailuresPerHour, err)
 	}

@@ -34,7 +34,11 @@ UPDATE artifacts SET last_version = max(current_version, coalesce((SELECT max(nu
 // an owner cannot undo it. Revocations made before it stay owner-revocable.
 const schemaV4 = `ALTER TABLE artifacts ADD COLUMN admin_revoked INTEGER NOT NULL DEFAULT 0;`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4}
+// schemaV5 records the last authenticator time step accepted per user, so a
+// code cannot be used twice.
+const schemaV5 = `ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0;`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5}
 
 var ErrNotFound = errors.New("not found")
 
