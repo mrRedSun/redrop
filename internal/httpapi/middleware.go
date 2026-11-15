@@ -165,7 +165,8 @@ func (a *API) securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Robots-Tag", "noindex, nofollow")
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
-		if !strings.HasPrefix(r.URL.Path, "/api/docs") {
+		// The docs page (REDROP_API_DOCS) loads its script from a CDN.
+		if !a.cfg.APIDocs || !strings.HasPrefix(r.URL.Path, "/api/docs") {
 			h.Set("Content-Security-Policy", csp)
 		}
 		if a.cfg.PublicURL.Scheme == "https" {

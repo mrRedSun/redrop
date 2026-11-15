@@ -152,6 +152,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_OIDC_PROVIDERS`, `REDROP_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET_FILE` | optional single sign-on |
 | `REDROP_TRUSTED_PROXIES`, `REDROP_CLIENT_IP_HEADER` | client IPs behind a reverse proxy |
 | `REDROP_INFO_BUTTON_DEFAULT` | `true` (default): show the info button (and the viewer frame for HTML) on artifacts without their own setting |
+| `REDROP_API_DOCS` | `false` (default): `/api/docs`, the interactive API page, is off. It loads a third-party script without a pinned version and outside the dashboard's CSP, so enable it only on development servers. `/api/openapi.json` is always served |
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 
 ## Reverse proxy

@@ -56,6 +56,7 @@ func New(acc *accounts.Service, sh *sharing.Service, cfg *config.Config, clients
 				PrettyFormatJSON:     true,
 				SpecURL:              "/api/openapi.json",
 				SwaggerURL:           "/api/docs",
+				DisableSwaggerUI:     !cfg.APIDocs,
 				Info: &openapi3.Info{
 					Title:       "redrop API",
 					Description: "Share agent artifacts through expiring, optionally protected links.",

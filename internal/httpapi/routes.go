@@ -104,7 +104,9 @@ func (a *API) routes() {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("ok\n"))
 	}, option.Hide())
-	fuego.GetStd(v1, "/{path...}", func(w http.ResponseWriter, r *http.Request) {
+	// Unknown /api/ paths, including /api/docs while the docs page is off,
+	// are JSON 404s rather than the dashboard.
+	fuego.GetStd(s, "/api/{path...}", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errNoRoute)
 	}, option.Hide())
 }

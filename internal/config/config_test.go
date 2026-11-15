@@ -73,3 +73,19 @@ func TestWideTrustedProxyWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestAPIDocsSetting(t *testing.T) {
+	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
+	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")
+	if c, err := Load(); err != nil || c.APIDocs {
+		t.Fatalf("default: docs=%v err=%v, want off", c != nil && c.APIDocs, err)
+	}
+	t.Setenv("REDROP_API_DOCS", "true")
+	if c, err := Load(); err != nil || !c.APIDocs {
+		t.Fatalf("REDROP_API_DOCS=true: %v", err)
+	}
+	t.Setenv("REDROP_API_DOCS", "sometimes")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REDROP_API_DOCS") {
+		t.Fatalf("invalid value: %v", err)
+	}
+}

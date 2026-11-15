@@ -65,6 +65,12 @@ type Config struct {
 	PasswordLogin    bool
 	AdminRequiresSSO bool
 
+	// APIDocs serves the interactive API docs page at /api/docs. It loads a
+	// third-party script without a pinned version and without the
+	// dashboard's CSP, so it is off unless REDROP_API_DOCS=true.
+	// /api/openapi.json is always served.
+	APIDocs bool
+
 	SecretFile string
 }
 
@@ -277,6 +283,9 @@ func Load() (*Config, error) {
 	}
 	if !c.PasswordLogin && len(c.OIDC) == 0 {
 		return nil, fmt.Errorf("REDROP_PASSWORD_LOGIN=false needs at least one OIDC provider")
+	}
+	if c.APIDocs, err = envBool("REDROP_API_DOCS", false); err != nil {
+		return nil, err
 	}
 	return c, nil
 }
