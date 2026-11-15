@@ -580,10 +580,28 @@ token or password appears.
 
 * **Bounded tables.** Every fixed-window limiter (`security.Limiter`) tracks
   at most 50,000 keys and stores keys over 64 bytes as their SHA-256, so a
-  full table costs a few MiB. When a table is full of live windows, a new
-  client gets `429` until a window expires (fail closed); clients already in
-  the table keep their own count. The content miss limiter
-  (`security.TokenBucket`) keeps at most 100,000 clients.
+  full table costs about 10 MiB. Clients already in a table keep their own
+  count. What a full table does with a new key depends on whether anything
+  else bounds what it counts:
+  * **Evict the oldest entry** (`security.EvictOldest`) in the per-network
+    tables: sign-in and single sign-on starts, one-time link lookups, and
+    artifact passwords per network. The account backoff, the per-artifact
+    budget and the 256-bit link tokens bound guessing on their own, so a
+    newcomer is never refused, and an attacker who floods the table to push
+    others out gains nothing that rotating networks did not already give.
+  * **Refuse the new key** (`security.RefuseNew`: `429` until a window
+    expires) where the table is the only bound: the authenticator-code
+    ceiling (per account) and the artifact password budget (per artifact).
+    Their keys exist only for an account whose password was right, or for
+    a link the client knows, so an attacker cannot fill them with junk.
+  * The content miss limiter (`security.TokenBucket`, at most 100,000
+    clients) drops clients whose budget has refilled and refuses new ones
+    while every bucket is still refilling. It is the only bound on guessing
+    links, and a refused newcomer loses only misses: hits are still served.
+* **Retry-After.** Every limiter `429`, on the API and on the artifact
+  password gate, carries `Retry-After`: the end of the refused key's window
+  (or of the oldest window, for a full table that refuses), or the account
+  backoff's wait.
 * **Clients.** Every per-client limiter (sign-in, single sign-on starts,
   one-time link lookups, artifact passwords, content misses) keys on
   `netutil.Network`: the trusted-proxy-resolved address, with IPv6 grouped

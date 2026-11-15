@@ -30,7 +30,7 @@ func (s *Service) createLink(ctx context.Context, o *store.OneTime) (string, err
 // lookupLink finds an unused, unexpired one-time link (rate limited per IP).
 func (s *Service) lookupLink(ctx context.Context, network, purpose, token string) (*store.OneTime, error) {
 	if !s.linkLimiter.Allow(network) {
-		return nil, apperr.RateLimited("too many requests")
+		return nil, apperr.RateLimited("too many requests").WithRetryAfter(s.linkLimiter.Wait(network))
 	}
 	o, err := s.db.OneTimeByHash(ctx, purpose, ids.Hash(token))
 	if err != nil {

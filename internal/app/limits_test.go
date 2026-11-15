@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -47,6 +48,16 @@ func TestAuthRoutesRefuseLargeBodies(t *testing.T) {
 	expectStatus(t, r, 200, "normal login")
 }
 
+// retryAfter checks a 429's Retry-After: whole seconds, within the window.
+// Review 26 n-B: every limiter refusal says when to try again.
+func retryAfter(t *testing.T, r *http.Response, maxSeconds int, what string) {
+	t.Helper()
+	n, err := strconv.Atoi(r.Header.Get("Retry-After"))
+	if err != nil || n < 1 || n > maxSeconds+1 {
+		t.Errorf("%s: Retry-After %q, want 1..%d seconds", what, r.Header.Get("Retry-After"), maxSeconds+1)
+	}
+}
+
 // Every per-client limiter treats one IPv6 /64 as one client (security
 // review A3): rotating through the addresses of a /64 does not reset them.
 // The test client connects from 127.0.0.1, a trusted proxy by default, so
@@ -67,12 +78,15 @@ func TestPerClientLimitersGroupIPv6(t *testing.T) {
 	if b := body(r); !strings.Contains(b, "too many sign-in attempts; wait") {
 		t.Errorf("sixth guess was not stopped by the network limit: %s", b)
 	}
+	retryAfter(t, r, 5*60, "sign-in limit")
 
 	// One-time link lookups: 60 per network per 10 minutes.
 	for i := range 60 {
 		expectStatus(t, h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", addr(100+i)), 200, "invite lookup")
 	}
-	expectStatus(t, h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", addr(200)), 429, "61st lookup from the same /64")
+	r = h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", addr(200))
+	expectStatus(t, r, 429, "61st lookup from the same /64")
+	retryAfter(t, r, 10*60, "link lookup limit")
 	expectStatus(t, h.raw("GET", "/api/v1/invites/no-such-invite", "", nil, "X-Forwarded-For", "2001:db8:78::1"), 200, "lookup from another /64")
 
 	// Artifact passwords: 5 per network and artifact per 5 minutes.
@@ -94,7 +108,9 @@ func TestPerClientLimitersGroupIPv6(t *testing.T) {
 	for i := range 5 {
 		expectStatus(t, unlock(addr(300+i)), 401, "wrong artifact password")
 	}
-	expectStatus(t, unlock(addr(400)), 429, "sixth artifact password from the same /64")
+	r = unlock(addr(400))
+	expectStatus(t, r, 429, "sixth artifact password from the same /64")
+	retryAfter(t, r, 5*60, "artifact password limit")
 	expectStatus(t, unlock("2001:db8:79::1"), 401, "artifact password from another /64")
 }
 

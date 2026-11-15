@@ -72,7 +72,7 @@ func (s *Service) useTOTP(ctx context.Context, userID, secret, code string) (tot
 // valid code is refunded. A reused code counts as wrong.
 func (s *Service) checkTOTP(ctx context.Context, u *store.User, code string) (totpResult, error) {
 	if !s.totpLimiter.Allow(u.ID) {
-		return totpWrong, apperr.RateLimited("too many wrong authenticator codes for this account; try again in an hour")
+		return totpWrong, apperr.RateLimited("too many wrong authenticator codes for this account; try again in an hour").WithRetryAfter(s.totpLimiter.Wait(u.ID))
 	}
 	res, err := s.useTOTP(ctx, u.ID, u.TOTPSecret, code)
 	if err == nil && res == totpValid {

@@ -102,8 +102,8 @@ func TestTOTPFailureCeiling(t *testing.T) {
 		for {
 			network++
 			kind, err := guess(s, network, "bob", "bob-password-123", code)
-			if wait := apperr.As(err).RetryAfter; kind == "429" && wait > 0 {
-				clock.add(wait)
+			if e := apperr.As(err); kind == "429" && strings.Contains(e.Msg, "failed sign-in attempts") {
+				clock.add(e.RetryAfter)
 				continue
 			}
 			return kind, err
@@ -115,8 +115,12 @@ func TestTOTPFailureCeiling(t *testing.T) {
 		}
 	}
 	valid, _ := totp.GenerateCode(key.Secret(), clock.now())
-	if kind, err := try(valid); kind != "429" || !strings.Contains(err.Error(), "authenticator codes") {
+	kind, err := try(valid)
+	if kind != "429" || !strings.Contains(err.Error(), "authenticator codes") {
 		t.Fatalf("code after %d wrong ones: %s %v, want the ceiling", totpFailuresPerHour, kind, err)
+	}
+	if wait := apperr.As(err).RetryAfter; wait <= 0 || wait > time.Hour+time.Second {
+		t.Fatalf("ceiling Retry-After %v, want up to an hour", wait)
 	}
 	clock.add(time.Hour + time.Second)
 	valid, _ = totp.GenerateCode(key.Secret(), clock.now())

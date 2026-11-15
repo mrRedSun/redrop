@@ -44,9 +44,11 @@ type Service struct {
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
 }
 
-// maxLimiterKeys bounds each unlock limiter's table (a few MiB when full).
-// When a table is full of live windows, new clients get 429 until a window
-// expires.
+// maxLimiterKeys bounds each unlock limiter's table (about 10 MiB when
+// full). The per-network tables evict their oldest entry when full: the
+// per-artifact budget bounds guessing on its own. The budget refuses
+// instead: it is that bound, and only a client that knows a link creates
+// its key.
 const maxLimiterKeys = 50_000
 
 func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, log *slog.Logger) (*Service, error) {
@@ -57,9 +59,9 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		previewSigner:   security.NewSigner(secret, "preview"),
 		seenSigner:      security.NewSigner(secret, "seen"),
 		directSigner:    security.NewSigner(secret, "direct-view"),
-		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, time.Now),
-		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys, time.Now),
-		unlockBudget:    security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, time.Now),
+		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, security.EvictOldest, time.Now),
+		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
+		unlockBudget:    security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, security.RefuseNew, time.Now),
 		checkPassword:   security.CheckPassword,
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {

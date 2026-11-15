@@ -87,7 +87,7 @@ func TestBackoffConcurrentAttempts(t *testing.T) {
 }
 
 func TestLimiterRefund(t *testing.T) {
-	l, _ := newTestLimiter(t, 2, time.Minute, 10)
+	l, _ := newTestLimiter(t, 2, time.Minute, 10, EvictOldest)
 	for range 5 {
 		if !l.Allow("k") {
 			t.Fatal("refunded attempts used up the limit")

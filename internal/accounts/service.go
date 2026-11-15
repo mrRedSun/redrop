@@ -94,9 +94,11 @@ type Service struct {
 }
 
 // maxLimiterKeys bounds each rate limiter's table. A key costs at most about
-// 150 bytes (keys over 64 bytes are hashed), so a full limiter holds a few
-// MiB. When a table is full of live windows, new clients get 429 until a
-// window expires.
+// 200 bytes (keys over 64 bytes are hashed), so a full limiter holds about
+// 10 MiB. The per-network tables evict their oldest entry when full: the
+// account backoff bounds guessing on its own. The authenticator-code
+// ceiling refuses instead: it is the only bound on code guesses, and only an
+// account's correct password creates its key.
 const maxLimiterKeys = 50_000
 
 // Sign-in attempts per account, whatever network they come from: five in a
@@ -124,11 +126,11 @@ func newService(db *store.Store, cfg *config.Config, secret []byte, log *slog.Lo
 		db: db, cfg: cfg, log: log, now: now,
 		stateSigner: security.NewSigner(secret, "oidc-state"),
 	}
-	s.loginLimiter = security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, now)
-	s.loginIPLimiter = security.NewLimiter(30, 15*time.Minute, maxLimiterKeys, now)
-	s.linkLimiter = security.NewLimiter(60, 10*time.Minute, maxLimiterKeys, now)
+	s.loginLimiter = security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, security.EvictOldest, now)
+	s.loginIPLimiter = security.NewLimiter(30, 15*time.Minute, maxLimiterKeys, security.EvictOldest, now)
+	s.linkLimiter = security.NewLimiter(60, 10*time.Minute, maxLimiterKeys, security.EvictOldest, now)
 	s.accountBackoff = security.NewBackoff(accountSlots, accountFreeAttempts, accountBaseDelay, accountMaxDelay, accountForget, now)
-	s.totpLimiter = security.NewLimiter(totpFailuresPerHour, time.Hour, maxLimiterKeys, now)
+	s.totpLimiter = security.NewLimiter(totpFailuresPerHour, time.Hour, maxLimiterKeys, security.RefuseNew, now)
 	s.initProviders()
 	return s
 }
@@ -211,8 +213,11 @@ func (s *Service) Login(ctx context.Context, network, username, password, totpCo
 	if err != nil {
 		return nil, wrongLogin()
 	}
-	if !s.loginIPLimiter.Allow(network) || !s.loginLimiter.Allow(network+"|"+username) {
-		return nil, apperr.RateLimited("too many sign-in attempts; wait a few minutes")
+	if !s.loginIPLimiter.Allow(network) {
+		return nil, tooManySignIns(s.loginIPLimiter, network)
+	}
+	if key := network + "|" + username; !s.loginLimiter.Allow(key) {
+		return nil, tooManySignIns(s.loginLimiter, key)
 	}
 	// The account's backoff applies whether or not the name exists, so it
 	// reveals nothing about which accounts do. Every attempt is charged
@@ -247,6 +252,11 @@ func (s *Service) Login(ctx context.Context, network, username, password, totpCo
 		s.accountBackoff.Reset(username)
 	}
 	return sess, err
+}
+
+// tooManySignIns is a per-network sign-in limit's refusal.
+func tooManySignIns(l *security.Limiter, key string) error {
+	return apperr.RateLimited("too many sign-in attempts; wait a few minutes").WithRetryAfter(l.Wait(key))
 }
 
 // waitText renders a backoff wait for a message, rounded up.

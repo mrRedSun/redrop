@@ -135,7 +135,7 @@ func FailurePath(mode string) string {
 // current is required for SSOLink.
 func (s *Service) BeginSSO(ctx context.Context, network, providerID, mode string, current *Principal, inviteToken string) (*SSOStart, error) {
 	if !s.loginIPLimiter.Allow(network) {
-		return nil, apperr.RateLimited("too many sign-in attempts; wait a few minutes")
+		return nil, tooManySignIns(s.loginIPLimiter, network)
 	}
 	p, err := s.discover(ctx, providerID)
 	if err != nil {

@@ -41,6 +41,7 @@ func New(acc *accounts.Service, sh *sharing.Service, cfg *config.Config, clients
 		fuego.WithLoggingMiddleware(fuego.LoggingConfig{DisableRequest: true, DisableResponse: true}),
 		fuego.WithLogHandler(levelFloor{Handler: log.Handler(), min: slog.LevelInfo}),
 		fuego.WithMaxBodySize(1<<20),
+		fuego.WithErrorSerializer(sendProblem),
 		fuego.WithSecurity(openapi3.SecuritySchemes{
 			"bearer": &openapi3.SecuritySchemeRef{Value: openapi3.NewSecurityScheme().
 				WithType("http").WithScheme("bearer").WithDescription("API token (rdp_…)")},

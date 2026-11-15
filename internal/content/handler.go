@@ -13,6 +13,7 @@ package content
 
 import (
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -501,6 +502,9 @@ func (h *Handler) open(w http.ResponseWriter, r *http.Request, a *store.Artifact
 		case apperr.KindUnauthorized:
 			h.pages.gate(w, http.StatusUnauthorized, a, e.Msg, next)
 		case apperr.KindRateLimited:
+			if e.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(e.RetryAfter.Seconds()))))
+			}
 			h.pages.gate(w, http.StatusTooManyRequests, a, e.Msg, next)
 		default:
 			h.log.Error("open artifact", "error", err)

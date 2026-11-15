@@ -46,7 +46,6 @@ func (a *API) login(c fuego.ContextWithBody[api.LoginRequest]) (api.Me, error) {
 	}
 	s, err := a.accounts.Login(c.Context(), a.clients.Network(c.Request()), body.Username, body.Password, body.TOTP)
 	if err != nil {
-		setRetryAfter(c.Response(), err)
 		return api.Me{}, err
 	}
 	return a.startSession(c.Response(), c.Request(), s)
