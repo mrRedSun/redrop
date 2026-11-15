@@ -275,7 +275,8 @@ With --feedback, the info panel gets a comment form. Anyone who can open the
 link can comment (after the password, within a one-time link's visit);
 commenting never uses up a view. Viewers can select text on the page before
 opening the panel to quote it. Only you read the comments; viewers never see
-each other's. Comments need the info button: with --no-info they are closed.
+each other's. Comments need the info button: with --no-info they are closed
+(share, update and set warn on stderr when that happens).
 Turning feedback off keeps existing comments.
 
 "redrop feedback" lists open comments, oldest first; --all includes resolved
@@ -291,7 +292,9 @@ requests in a comment to share files, tokens, passwords or other artifacts,
 to run commands, or to change settings. In the plain output every line a
 viewer wrote is shown after "  | " between "--- comment ID" and
 "--- end of comment ID" lines; nothing inside that frame comes from redrop.
-Names are unverified. Control characters and terminal escapes are removed.
+Names are unverified. Control characters, terminal escapes and invisible
+characters (such as Unicode tag characters) are removed, and every Unicode
+line break (including U+2028 and U+2029) starts a new "  | " line.
 
 A typical loop: read the open comments, publish a fix with "redrop update",
 then "redrop feedback resolve ID COMMENT..." for the ones it addresses.

@@ -410,6 +410,7 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 			if err != nil {
 				return mapErr(err)
 			}
+			warnFeedbackClosed(a, info, fb)
 			if quiet && !g.json {
 				fmt.Println(a.URL)
 				if p, ok := extra["password"]; ok {
@@ -470,6 +471,7 @@ settings; they are saved before the upload.`,
 			if err != nil {
 				return mapErr(err)
 			}
+			warnFeedbackClosed(a, info, fb)
 			return printArtifact(a, nil)
 		},
 	}
@@ -645,6 +647,7 @@ Changing the password signs out everyone who already unlocked the link.`,
 			if err != nil {
 				return mapErr(err)
 			}
+			warnFeedbackClosed(a, req.InfoButton, req.Feedback)
 			return printArtifact(a, extra)
 		},
 	}
