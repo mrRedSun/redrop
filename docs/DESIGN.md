@@ -557,6 +557,18 @@ inside their containers on narrow screens. The document is readable without JS.
   admin invite (`redrop-server invite --admin`) through single sign-on, or
   by linking before the setting is turned on.
 
+### Logging
+
+The app origin's requests are logged once, by `httpapi.logRequests`: API
+calls and failures, with method, status, size and duration, never query
+strings. A path segment that follows one of `dashpaths.SecretPrefixes`
+(invite, reset and setup tokens) is written as `…`. Fuego's own access log
+is off, and Fuego's other messages go to redrop's handler at `Info` or
+above only: its debug output includes decoded request bodies, with
+passwords and tokens. A test captures every log line, at debug level,
+while it opens and redeems each kind of one-time link, and checks that no
+token or password appears.
+
 ### Rate limits
 
 * **Bounded tables.** Every fixed-window limiter (`security.Limiter`) tracks
