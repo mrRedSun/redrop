@@ -2,7 +2,7 @@ import { createJiti } from 'jiti'
 import { fileURLToPath } from 'node:url'
 
 const entries = {
-  test: ['./unit.test.ts', './viewer-js.test.ts'],
+  test: ['./unit.test.ts', './viewer-js.test.ts', './viewer-feedback.test.ts'],
   contract: ['./contract-check.ts'],
 }[process.argv[2]]
 if (!entries) throw new Error('Choose test or contract')
