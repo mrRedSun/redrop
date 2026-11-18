@@ -1218,3 +1218,35 @@ version stays live until the rebuilt content publishes as a normal change.
 Authentication and not-found errors use the normal CLI exit codes. Cancellation
 returns success. The command creates immutable versions; it does not squash
 history or inject live-reload code into uploaded artifacts.
+
+## Releases and versions
+
+Versions are stamped at build time with `-ldflags` into both binaries: the
+version (`vX.Y.Z` for a tag, `0.0.0-main+<short sha>` for a `main` build,
+`dev` for a local `go build`), the abbreviated commit, and the build date.
+The server reports them at `GET /api/v1/version`, which is public and also
+carries `min_cli_version`, the oldest CLI the server still supports;
+`/api/v1/auth/config` keeps its existing `version` field, and `/healthz`
+keeps its plain `ok` body.
+
+`redrop version` prints both sides and warns on stderr when the CLI is older
+than the server's minimum. Versions compare by numeric triple only; `dev`
+and preview builds never warn, and an unparseable minimum never warns.
+
+A `v*` tag push triggers two workflows (see `docs/RELEASING.md`): the image
+workflow publishes `vX.Y.Z`/`sha-<commit>` image tags as before, and the
+release workflow builds the six CLI binaries, `SHA256SUMS`, and GitHub
+build-provenance attestations, and publishes a GitHub Release with generated
+notes. Nothing release-related is built locally.
+
+`redrop self-update [--check] [--version vX.Y.Z]` downloads the release
+binary for the current OS/architecture from the project's GitHub releases,
+verifies it against the release's `SHA256SUMS`, and replaces the running
+binary with a rename in the same directory (atomic; on Windows the running
+binary is renamed aside first and removed after). It refuses a binary inside
+a package-manager directory (`/usr/bin`, `/bin`, Homebrew, ...) or a
+directory it cannot write to, directing the user to the package manager or
+the installer script instead. A download whose checksum does not match is
+discarded; the old binary is never touched before verification succeeds.
+`CHANGELOG.md` is kept in Keep-a-Changelog format with an Unreleased section;
+release notes are generated from pull-request titles.
