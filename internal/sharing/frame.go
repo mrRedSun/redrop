@@ -21,11 +21,17 @@ const (
 	ModeDirect   Mode = iota + 1 // stored bytes, as without the info button
 	ModeFramed                   // top-level page loads get the viewer page
 	ModeFilePage                 // redrop's own file page, with the info panel when it is on
+	// ModeEncrypted: end-to-end encrypted content. Top-level page loads get
+	// the decrypting viewer page, whatever the kind and the info button;
+	// everything else is ciphertext (DESIGN.md "End-to-end encrypted links").
+	ModeEncrypted
 )
 
 // modeFor is the only place that decides which kinds get the frame.
-func modeFor(kind string, infoOn bool) Mode {
+func modeFor(kind string, infoOn, encrypted bool) Mode {
 	switch {
+	case encrypted:
+		return ModeEncrypted
 	case kind == api.KindFile:
 		return ModeFilePage
 	case infoOn:
@@ -36,7 +42,7 @@ func modeFor(kind string, infoOn bool) Mode {
 
 // Mode returns how snap, a version of a, is presented.
 func (s *Service) Mode(a *store.Artifact, snap Snapshot) Mode {
-	return modeFor(snap.Kind, s.infoButton(a))
+	return modeFor(snap.Kind, s.infoButton(a), snap.E2E)
 }
 
 // directWindow is how long a visitor's ?redrop-info=0 choice lasts.

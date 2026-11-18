@@ -95,7 +95,7 @@ func TestArchiveCancellation(t *testing.T) {
 		} else {
 			cancel()
 		}
-		_, err := s.extractBundle(r, &publication{s: s, ctx: ctx, actor: a, created: make(map[string]struct{})})
+		_, err := s.extractBundle(r, &publication{s: s, ctx: ctx, actor: a, created: make(map[string]struct{})}, false)
 		cancel()
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("midstream=%v: cancellation lost: %v", mid, err)

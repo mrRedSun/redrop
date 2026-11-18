@@ -37,6 +37,8 @@ type Service struct {
 	previewSigner *security.Signer // owner preview links and cookies
 	seenSigner    *security.Signer // de-duplicates ungated views
 	directSigner  *security.Signer // a visitor's choice of the direct, frameless view
+	// reservationSigner signs artifact IDs reserved for end-to-end shares.
+	reservationSigner *security.Signer
 
 	// publication serializes materialization, commit/rollback, and GC. Waiting
 	// requests do no decompression and can leave through their context.
@@ -62,16 +64,17 @@ const maxLimiterKeys = 50_000
 func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, log *slog.Logger) (*Service, error) {
 	s := &Service{
 		db: db, blobs: blobs, cfg: cfg, log: log,
-		publication:     make(chan struct{}, 1),
-		uploadDir:       filepath.Join(cfg.DataDir, "uploads"),
-		accessSigner:    security.NewSigner(secret, "access"),
-		previewSigner:   security.NewSigner(secret, "preview"),
-		seenSigner:      security.NewSigner(secret, "seen"),
-		directSigner:    security.NewSigner(secret, "direct-view"),
-		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, security.EvictOldest, time.Now),
-		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
-		unlockBudget:    security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, security.RefuseNew, time.Now),
-		checkPassword:   security.CheckPassword,
+		publication:       make(chan struct{}, 1),
+		uploadDir:         filepath.Join(cfg.DataDir, "uploads"),
+		accessSigner:      security.NewSigner(secret, "access"),
+		previewSigner:     security.NewSigner(secret, "preview"),
+		seenSigner:        security.NewSigner(secret, "seen"),
+		directSigner:      security.NewSigner(secret, "direct-view"),
+		reservationSigner: security.NewSigner(secret, "artifact-reservation"),
+		unlockLimiter:     security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, security.EvictOldest, time.Now),
+		unlockIPLimiter:   security.NewLimiter(60, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
+		unlockBudget:      security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, security.RefuseNew, time.Now),
+		checkPassword:     security.CheckPassword,
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
 		s.Close()
@@ -98,6 +101,10 @@ func mapStore(err error) error {
 		return apperr.TooLarge("too many open upload sessions; finish an upload or wait for expiry")
 	case errors.Is(err, store.ErrQuota):
 		return apperr.TooLarge("storage quota exceeded (your quota or the server total); delete or let old artifacts expire")
+	case errors.Is(err, store.ErrIDTaken):
+		return apperr.Conflict("the reserved artifact ID is already in use; publish again")
+	case errors.Is(err, store.ErrVersionTaken):
+		return apperr.Conflict("another version took this version number first; encrypt for the next number and publish again").WithCode(codeVersionConflict)
 	}
 	return apperr.Internal(err)
 }

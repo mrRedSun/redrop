@@ -40,12 +40,19 @@ type ArtifactMeta struct {
 	InfoButton     bool   // effective: the artifact's setting or the server default
 	OldVersions    bool   // viewers may open older versions
 	Feedback       bool   // viewers may leave comments (the owner's setting)
+	E2E            bool   // end-to-end encrypted: the server stores only ciphertext
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
 type Artifact struct {
 	ArtifactMeta
 	URL string
+	// E2EKeyCheck identifies the end-to-end key ("" for plaintext); the
+	// owner's client checks its key against it.
+	E2EKeyCheck string
+	// NextVersion is the number the next published version gets, which
+	// end-to-end content is encrypted for.
+	NextVersion int
 }
 
 // AdminArtifact is the moderation view. Admins see metadata only (DESIGN.md:
@@ -68,6 +75,7 @@ type Version struct {
 	TokenName  string
 	CreatedAt  time.Time
 	Current    bool
+	E2E        bool // end-to-end encrypted
 }
 
 // FileEntry is one file of a version.
@@ -121,7 +129,7 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
 		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a), OldVersions: a.OldVersions, Feedback: a.Feedback,
-		RevokedByAdmin: a.AdminRevoked,
+		RevokedByAdmin: a.AdminRevoked, E2E: a.E2E,
 	}
 }
 
@@ -173,6 +181,9 @@ func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snaps
 	if a.MaxViews > 0 {
 		info.MaxViews, info.ViewsLeft = a.MaxViews, max(a.MaxViews-a.Views, 0)
 	}
+	if shown.E2E && info.Files > 1 {
+		info.Files-- // the manifest is not one of the visitor's files
+	}
 	rows, err := s.db.ListVersions(ctx, a.ID)
 	if err != nil {
 		s.log.Error("list versions for viewer", "error", err)
@@ -189,7 +200,7 @@ func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snaps
 }
 
 func (s *Service) ownerView(a *store.Artifact) Artifact {
-	return Artifact{ArtifactMeta: s.meta(a, time.Now()), URL: s.cfg.ArtifactURL(a.Slug)}
+	return Artifact{ArtifactMeta: s.meta(a, time.Now()), URL: s.cfg.ArtifactURL(a.Slug), E2EKeyCheck: a.E2EKeyCheck, NextVersion: a.LastVersion + 1}
 }
 
 func (s *Service) adminView(a *store.Artifact) AdminArtifact {
@@ -214,7 +225,7 @@ func versionsView(current int, rows []store.VersionRow) []Version {
 	out := make([]Version, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Version{Number: v.Number, Kind: v.Kind, Size: v.Size, Files: v.Files, Entry: v.Entry, SPA: v.SPA,
-			Note: v.Note, NotePublic: v.NotePublic, TokenName: v.TokenName, CreatedAt: v.CreatedAt, Current: v.Number == current})
+			Note: v.Note, NotePublic: v.NotePublic, TokenName: v.TokenName, CreatedAt: v.CreatedAt, Current: v.Number == current, E2E: v.E2E})
 	}
 	return out
 }

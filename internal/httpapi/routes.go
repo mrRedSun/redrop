@@ -80,6 +80,7 @@ func (a *API) routes() {
 	fuego.Get(art, "", a.listArtifacts, with(anyAuthOpts, append(op("listArtifacts", "List your artifacts"),
 		option.Query("q", "Search title, id, or token name"), option.Query("status", "active, expired, exhausted, revoked, or all"))...)...)
 	fuego.Post(art, "", a.createArtifact, with(anyAuthJSON, append(op("createArtifact", "Publish an upload as a new artifact"), option.DefaultStatusCode(http.StatusCreated))...)...)
+	fuego.Post(art, "/reservations", a.reserveArtifact, with(anyAuthOpts, append(op("reserveArtifact", "Reserve an artifact ID for an end-to-end encrypted share"), option.DefaultStatusCode(http.StatusCreated))...)...)
 	fuego.Get(art, "/{id}", a.getArtifact, with(anyAuthOpts, op("getArtifact", "Get an artifact")...)...)
 	fuego.Patch(art, "/{id}", a.updateArtifact, with(anyAuthJSON, op("updateArtifact", "Change title, expiry, password, view limit, or revoke")...)...)
 	fuego.Delete(art, "/{id}", a.deleteArtifact, with(anyAuthOpts, op("deleteArtifact", "Delete an artifact and all versions")...)...)
