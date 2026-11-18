@@ -29,6 +29,10 @@ type Client struct {
 	UserAgent string
 }
 
+// DefaultGitHubAPI is the public GitHub REST API root, overridable in tests
+// and by future configuration.
+const DefaultGitHubAPI = "https://api.github.com"
+
 func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:   strings.TrimRight(baseURL, "/"),
@@ -155,6 +159,13 @@ func esc(s string) string { return url.PathEscape(s) }
 func (c *Client) AuthConfig(ctx context.Context) (*api.AuthConfig, error) {
 	var out api.AuthConfig
 	return &out, c.do(ctx, http.MethodGet, "/api/v1/auth/config", nil, &out)
+}
+
+// ServerVersion fetches GET /api/v1/version. It needs no token, so it also
+// works on a client constructed with an empty one.
+func (c *Client) ServerVersion(ctx context.Context) (*api.ServerVersion, error) {
+	var out api.ServerVersion
+	return &out, c.do(ctx, http.MethodGet, "/api/v1/version", nil, &out)
 }
 
 func (c *Client) Me(ctx context.Context) (*api.Me, error) {

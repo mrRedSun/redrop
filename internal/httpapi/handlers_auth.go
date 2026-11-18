@@ -39,6 +39,12 @@ func (a *API) getAuthConfig(c fuego.ContextNoBody) (api.AuthConfig, error) {
 	}, nil
 }
 
+// getVersion reports the server build without requiring login, so the CLI
+// can compare versions before it has a token.
+func (a *API) getVersion(fuego.ContextNoBody) (api.ServerVersion, error) {
+	return api.ServerVersion{Version: Version, Commit: Commit, Date: Date, MinCLIVersion: MinCLIVersion}, nil
+}
+
 func (a *API) login(c fuego.ContextWithBody[api.LoginRequest]) (api.Me, error) {
 	body, err := c.Body()
 	if err != nil {
