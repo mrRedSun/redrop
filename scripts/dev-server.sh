@@ -13,12 +13,16 @@ mkdir -p "$DATA" "$CLI" /root/redrop-dev/bin
 # Build before embedding, retaining dist/.gitkeep (Vite empties only its assets).
 (cd web && npm run build)
 
-VERSION="dev-$(git rev-parse --short HEAD 2>/dev/null || echo local)"
-LDFLAGS="-s -w -X github.com/mrRedSun/redrop/internal/httpapi.Version=$VERSION"
+# CI stamps tags as vX.Y.Z and main builds as 0.0.0-main+<short sha>;
+# local dev builds say the same so `redrop version` output is parseable.
+SHA=$(git rev-parse --short HEAD 2>/dev/null || echo local)
+VERSION="0.0.0-main+$SHA"
+DATE=$(git log -1 --format=%cI 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS="-s -w -X github.com/mrRedSun/redrop/internal/httpapi.Version=$VERSION -X github.com/mrRedSun/redrop/internal/httpapi.Commit=$SHA -X github.com/mrRedSun/redrop/internal/httpapi.Date=$DATE"
 go build -trimpath -ldflags "$LDFLAGS" -o /root/redrop-dev/bin/redrop-server ./cmd/redrop-server
 
 # Cross-compile CLI builds served by /install.sh
-CLILDFLAGS="-s -w -X main.version=$VERSION"
+CLILDFLAGS="-s -w -X main.version=$VERSION -X main.commit=$SHA -X main.date=$DATE"
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
   os=${target%/*}; arch=${target#*/}; ext=""; [ "$os" = windows ] && ext=.exe
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$CLILDFLAGS" -o "$CLI/redrop-$os-$arch$ext" ./cmd/redrop
