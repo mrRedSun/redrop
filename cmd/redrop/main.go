@@ -282,7 +282,7 @@ machine-readable output, and check exit codes (listed in the guide).`,
 	})
 
 	root.AddGroup(&cobra.Group{ID: "share", Title: "Sharing:"}, &cobra.Group{ID: "manage", Title: "Managing artifacts:"}, &cobra.Group{ID: "setup", Title: "Setup:"})
-	for _, c := range []*cobra.Command{shareCmd(), updateCmd(), watchCmd()} {
+	for _, c := range []*cobra.Command{shareCmd(), updateCmd(), watchCmd(), tunnelCmd()} {
 		c.GroupID = "share"
 		root.AddCommand(c)
 	}
