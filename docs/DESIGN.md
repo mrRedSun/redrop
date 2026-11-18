@@ -1218,3 +1218,283 @@ version stays live until the rebuilt content publishes as a normal change.
 Authentication and not-found errors use the normal CLI exit codes. Cancellation
 returns success. The command creates immutable versions; it does not squash
 history or inject live-reload code into uploaded artifacts.
+
+## Abuse handling
+
+The content domain serves arbitrary HTML from invited users. One phishing
+page or piece of malware can get the whole domain flagged by Safe Browsing
+or blocked by ISPs, which breaks every artifact. This section answers issue
+#12: visitors can report a link, an operator gets a queue and a
+notification, and publishing flags two obvious patterns. Nothing is added to
+an artifact's bytes or DOM (see "Principles").
+
+### Decisions
+
+* **Report links live on redrop's own pages only.** The gate page (both the
+  password and the view-limited form), the info panel (viewer page and file
+  page) and the content apex link to the report form. The uniform miss page
+  is not changed: expired, revoked and unknown links must keep answering
+  byte for byte the same (see "Enumeration hardening"), and there is no
+  separate offline or expired page.
+* **The form is on the app origin**, `/report`, a public dashboard route.
+  The content domain is a different registrable domain and the dashboard
+  sends `frame-ancestors 'none'`, so an artifact can neither script the form
+  nor frame it. The link carries the page's URL in the fragment,
+  `/report#url=<page>`. The fragment never reaches a server or a proxy log;
+  the form reads it and fills in the URL field.
+* **No automatic action.** A report never revokes, hides or changes
+  anything by itself. An administrator decides. Otherwise anyone could get
+  any link taken down by reporting it.
+* **Upload checks only flag.** They never block, change or delay a
+  publication, and a failing or slow check is logged and ignored.
+* **Notifications are optional and carry no free text.**
+
+### Reporting
+
+`POST /api/v1/reports`, no account, JSON only:
+
+```json
+{"url": "https://amber-otter-quilt-river.usercontent.example/page.html",
+ "category": "phishing", "details": "Asks for a bank password", "contact": "sam@example.org"}
+```
+
+| Field | Rule |
+|---|---|
+| `url` | required; an `http(s)` URL whose host is `<slug>.<content domain>` with a well-formed slug; at most 2048 bytes. Stored without its fragment |
+| `category` | `phishing`, `malware`, `illegal`, `spam` or `other` |
+| `details` | optional, at most 2000 characters (code points), cleaned like a feedback comment (line breaks, controls and invisible characters) |
+| `contact` | optional, at most 200 characters, one line; unverified and never turned into a link |
+
+The checks, in order:
+
+1. **Same origin.** The `X-Redrop-Request: 1` header, `Sec-Fetch-Site`
+   (when present) `same-origin`, and an `Origin` that equals
+   `REDROP_PUBLIC_URL` exactly. `Origin` is required: a report has no
+   cookie to protect, but without the check any website could make its
+   visitors' browsers file reports, from as many networks as it has
+   visitors, past the per-network limit. Otherwise `403`.
+2. A JSON body of at most 8 KiB (`415`, `413`, `400`).
+3. **Rate limit**: `REDROP_REPORTS_PER_HOUR` (default 5) per client network
+   (`netutil.Network`, IPv6 by /64), a fixed one-hour window in a
+   `security.Limiter` of at most 50,000 networks that evicts the oldest.
+   Otherwise `429` with `Retry-After`.
+4. Valid fields (`400`). The URL check is syntax only; it says nothing
+   about whether the link exists.
+5. **Global cap**: fewer than `REDROP_REPORTS_MAX_OPEN` (default 1000)
+   open visitor reports. Otherwise `429` "not accepting reports right
+   now", with the abuse contact when one is configured. This does not
+   depend on the URL.
+6. The slug is looked up (one indexed query, as for a visit). The report is
+   stored only when it names an existing artifact (in any state: active,
+   expired within retention, revoked, used up), the artifact has fewer than
+   `REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT` (default 20) open visitor
+   reports, and the same network has no open report on it.
+
+Steps 1 to 5 answer the same whatever the URL names. Step 6 always answers
+`202 {"ok": true}`: unknown links, full artifacts and duplicates are
+dropped silently. So the form is not a way to find out which links exist,
+and a reporter can't tell a dropped report from a stored one.
+
+**Network key.** For the duplicate check, a report stores
+`HMAC-SHA256(server secret, "report-network" ‖ network)`, never the address.
+The key is cleared when the report is closed. The rate limiter keeps the
+network in memory only, as every limiter does.
+
+### Upload checks
+
+After a publication commits (new artifact or new version), the service
+scans the new version's files and stores a **system report** for each
+finding. Findings:
+
+* **Credential form**: an HTML file (`text/html`, `.html`, `.htm`) with a
+  `<form>` that contains `<input type=password>` and whose `action` (or a
+  `formaction` on one of its buttons) is an absolute or protocol-relative
+  URL on another host. Category `phishing`.
+* **Executable**: a file whose first bytes are a PE (`MZ` with a `PE\0\0`
+  header), ELF, Mach-O or universal Mach-O image, or whose name ends in a
+  Windows, Android, macOS or Linux installer or script extension (`.exe`,
+  `.msi`, `.scr`, `.apk`, `.dmg`, `.deb`, `.bat`, `.ps1`, … see
+  `sharing/scan.go`). Category `malware`. It applies to bundles and to
+  single-file artifacts.
+
+The detail names the file and, for a form, the host it posts to, for
+example `login.html: a password form posts to evil.example`. That is all
+an administrator learns of the content; it is cleaned and shown as text.
+
+**Bounds.** The scan runs after the publication has released its slot and
+its upload, so it never holds up other publishers, and its result is never
+returned to the publisher. It reads at most 4 KiB of each file for magic
+numbers, at most 1 MiB of each HTML file, at most 32 MiB in all, and stops
+after 5 seconds; it stops early at the first finding of each kind. A
+version that is cut short is logged (`upload check incomplete`). At most one
+open system report per artifact and finding kind exists: a later version
+with the same finding adds nothing until the first is closed.
+
+**Known limits.** Forms built by scripts, `fetch()` posts and password
+fields associated with a form through `form=` from outside it are not
+seen. Executables inside nested archives are not opened. These checks
+catch the careless case and give an operator a lead, not a guarantee.
+
+### Admin queue
+
+Admins see a **Reports** tab: open reports by default, with resolved and
+dismissed as filters, newest first, at most 500.
+
+Each report shows its source (visitor or system), category, time, the
+reporter's text and contact (as text), the artifact (title, kind, owner,
+current status, or "deleted"), and its history. Actions:
+
+| Action | Effect |
+|---|---|
+| Resolve / Dismiss / Reopen | sets the report's status |
+| Revoke artifact | the administrator's revocation (migration 4, "Lifecycle"): the owner can't undo it. Every open report on the artifact is resolved |
+| Suspend owner | disables the account and revokes all of its artifacts as an administrator. Every open report on those artifacts is resolved |
+
+**The reported link.** A visitor report keeps the URL the reporter
+submitted, and the queue links to it ("Open reported link"), so an
+administrator can judge the page before acting. This is the one place an
+administrator sees an artifact link, and only one that a third party has
+handed over, the same as an email to the abuse address would. Admin
+results otherwise stay metadata only: `AdminArtifact` is unchanged, and a
+reflection test pins `AdminReport`'s fields. System reports have no link.
+Opening the link is an ordinary visit: it counts a view, a password still
+applies, and the page may be hostile. The dashboard says so.
+
+**Suspension** is the existing "disabled" account state plus revocation:
+
+* the account's sessions end, password and single sign-on sign-in are
+  refused, and its API tokens get `401`, so it can't publish;
+* every artifact it owns gets the administrator's revocation (its links
+  stop at once: the access generation changes). A publication that was
+  already running when the account was suspended commits an artifact that
+  is revoked from the start (`CreateArtifact` copies the owner's disabled
+  flag into `admin_revoked`);
+* an administrator account can't be suspended from the queue. Change its
+  role first; this also rules out suspending yourself or the last admin.
+
+Lifting a suspension is the Users page's "disabled" switch. It brings the
+account and its tokens back, but not its artifacts: an administrator
+restores each one from the Artifacts tab after reviewing it.
+
+**Audit.** Every queue action writes one `audit` row in the same
+transaction as its effect: time, administrator, action, report, artifact,
+user, and a short detail (for example `revoked 3 artifacts, resolved 2
+reports`). The report shows its rows as its history, and the server logs
+each action too. Rows are never edited or deleted by redrop.
+
+### Notifications
+
+When `REDROP_NOTIFY_URL` is set, redrop POSTs JSON to it for every stored
+report, visitor or system:
+
+```json
+{"level": "warning", "title": "redrop: abuse report",
+ "message": "Category phishing, artifact 01J…, owner alice.", "key": "redrop-report-01J…"}
+```
+
+The title is `redrop: upload flagged` for a system report. With
+`REDROP_NOTIFY_TOKEN_FILE`, the file's content is sent as
+`Authorization: Bearer …`. The message holds only the category, the
+artifact ID and the owner's username, never the reporter's text, contact or
+URL, nor a flagged file name: those are untrusted and would reach whatever
+renders the notification (a chat client, a phone). `key` lets the receiver
+deduplicate.
+
+Delivery never blocks a request. Messages go into a queue of 64; when it
+is full the message is dropped and logged. One worker sends them, each
+attempt with a 10-second timeout, retrying a network error, `408`, `429` or
+`5xx` up to 4 times in all with waits of 1, 4 and 16 seconds. Other answers
+are logged and dropped. At shutdown the worker stops: an in-flight attempt
+is cancelled and queued messages are logged as dropped. The URL and token
+are never logged.
+
+### security.txt
+
+With `REDROP_ABUSE_CONTACT` set (an email address, a `mailto:` URI, or an
+`https://` URL), `/.well-known/security.txt` (RFC 9116) is served on the
+app origin and on the content apex:
+
+```text
+# Security and abuse contact for this redrop server.
+Contact: mailto:abuse@example.com
+# Report a shared link that is abusive: phishing, malware, illegal content, spam.
+Contact: https://redrop.example.com/report
+Expires: <one year from the request, in UTC>
+Preferred-Languages: en
+Canonical: https://redrop.example.com/.well-known/security.txt
+```
+
+`Canonical` names the host it was served on. Without the setting the path
+is a `404` on both hosts. Artifact hosts never serve it; an artifact may
+contain its own file at that path on its own subdomain. The value is
+checked at startup: anything else, `http://`, or a value with spaces or
+line breaks, is a configuration error.
+
+### Storage (migration 8)
+
+```sql
+CREATE TABLE reports (
+    id          TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,              -- visitor | system
+    artifact_id TEXT NOT NULL,              -- no foreign key: a report outlives its artifact
+    owner_id    TEXT NOT NULL,              -- the owner when reported
+    version     INTEGER NOT NULL DEFAULT 0, -- system reports: the flagged version
+    kind        TEXT NOT NULL DEFAULT '',   -- system reports: form | executable
+    url         TEXT NOT NULL DEFAULT '',   -- visitor reports: as submitted
+    category    TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT '',
+    contact     TEXT NOT NULL DEFAULT '',
+    network     TEXT NOT NULL DEFAULT '',   -- keyed hash, cleared on close
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  INTEGER NOT NULL,
+    closed_at   INTEGER,
+    closed_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at, actor, action,
+    report_id, artifact_id, user_id, detail);
+```
+
+Indexes cover the queue (`status, created_at`), the per-artifact checks
+(`artifact_id, status`) and a report's history (`audit.report_id`). An older
+server ignores both tables, so rolling back the binary alone just hides the
+queue; artifacts revoked and accounts disabled from it stay so.
+
+### Threat model
+
+* **Report spam.** The per-network limit, the global and per-artifact caps,
+  the per-network duplicate check, the 8 KiB body and the field limits bound
+  rows to about 1,000 open reports of at most about 10 KB. A full queue
+  refuses new reports with a pointer to the abuse contact instead of
+  growing. Webhook messages are bounded by the same limits and by the
+  dropping queue.
+* **Reporting to get content removed.** There is no automatic action, so
+  a flood of reports only fills the queue. The per-artifact cap keeps one
+  link from burying the rest, and duplicates from one network count once.
+* **Enumeration.** The endpoint answers the same for every URL that passes
+  the syntax check, and the limit of 5 an hour per network is far slower
+  than the content host's miss limiter.
+* **Cross-site filing.** Required same-origin `Origin`, the custom header
+  (which forces a CORS preflight that is never approved) and JSON only.
+* **Untrusted text in the admin UI.** Reporter text and contact, and the
+  file names and hosts in system findings, are cleaned on input and shown
+  as React text nodes only. The contact is never a `mailto:` or other link.
+  The reported URL is a link only because it passed the content-domain
+  check on input; it opens with `rel="noopener noreferrer"` in a new tab.
+* **Untrusted text in the webhook.** None is sent: category, artifact ID
+  and owner username only, all of them from server-controlled alphabets.
+* **Hostile artifacts.** An artifact can draw a fake "report" link that
+  goes elsewhere, as it can fake anything inside itself; the real links
+  live outside the frame. It can't reach the form (other site, no framing).
+* **Scanner input.** The HTML tokenizer and magic checks read bounded
+  prefixes of stored blobs under a deadline; they never execute, render or
+  fetch anything.
+* **Privacy.** No IP address is stored; the duplicate key is a keyed hash,
+  removed on close. The reporter's contact is optional.
+
+### Operator notes
+
+* Register the content domain (the apex and its subdomains) in Google
+  Search Console, so Safe Browsing warnings for any artifact reach you
+  before visitors see them. Do the same for the app origin.
+* Set `REDROP_ABUSE_CONTACT` to an address someone reads, and consider
+  `REDROP_NOTIFY_URL` so new reports don't wait for the dashboard.
