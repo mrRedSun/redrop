@@ -53,7 +53,7 @@ func main() {
 	case "healthcheck":
 		err = healthcheck()
 	case "version", "--version", "-v":
-		fmt.Println(httpapi.Version)
+		fmt.Print(serverVersionText())
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	default:
@@ -64,6 +64,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// serverVersionText reports the stamped build on one line: the version
+// always, the commit and build date when the build carried them.
+func serverVersionText() string {
+	s := httpapi.Version
+	if httpapi.Commit != "" {
+		s += " (commit " + httpapi.Commit
+		if httpapi.Date != "" {
+			s += ", built " + httpapi.Date
+		}
+		s += ")"
+	}
+	return s + "\n"
 }
 
 func dashboard() fs.FS {
