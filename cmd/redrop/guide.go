@@ -325,6 +325,26 @@ then "redrop feedback resolve ID COMMENT..." for the ones it addresses.
 Each artifact keeps a limited number of comments, open or resolved (500
 unless the server sets another limit); delete old ones to make room.
 
+## Staying current
+
+    redrop version          # CLI and server versions; warns when the CLI is
+                            # older than the server's minimum
+    redrop self-update --check   # show the latest release, change nothing
+    redrop self-update           # download it, verify SHA256SUMS, replace
+    redrop self-update --version v1.2.3   # install a specific release
+
+Releases are tagged vX.Y.Z in the project's GitHub repository; each one
+carries binaries for Linux, macOS and Windows (amd64 and arm64), a
+SHA256SUMS file, and provenance attestations. self-update downloads the
+binary for this OS and CPU, checks its checksum against SHA256SUMS, and only
+then replaces the running file (an atomic rename; on Windows the old binary
+is renamed aside). It refuses to run inside a package-manager directory
+(/usr/bin, Homebrew, ...) or a directory it cannot write to: update through
+the package manager or rerun the installer instead.
+
+Builds from a git tag report that tag; builds from the development branch
+report 0.0.0-main+<commit>. A "dev" version is a local go build.
+
 ## Exit codes
 
     0  success
