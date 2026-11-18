@@ -1,0 +1,385 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/mrRedSun/redrop/pkg/api"
+	"github.com/mrRedSun/redrop/pkg/client"
+)
+
+// Tunnels end to end in one process (DESIGN.md "Tunnels"): the real server
+// handler, the CLI's agent (client.RunTunnel) over a real WebSocket, and a
+// local httptest app.
+
+// waitFor polls cond until it holds. The bound only catches a real hang.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// noDelay retries at once, so reconnect tests wait on events, not time.
+type noDelay struct{}
+
+func (noDelay) Next(int) time.Duration { return time.Millisecond }
+
+// seenRequest is what the local app received.
+type seenRequest struct {
+	Method, Path, RawQuery, Host, Body string
+	Header                             http.Header
+}
+
+type tunnelFixture struct {
+	t    *testing.T
+	h    *harness
+	c    *client.Client
+	app  *httptest.Server
+	mu   sync.Mutex
+	seen []seenRequest
+}
+
+// newTunnelFixture runs a local app: handler, or one that records each
+// request and answers "hello from the app" with a few headers to clean.
+func newTunnelFixture(t *testing.T, handler http.Handler) *tunnelFixture {
+	t.Helper()
+	h := newHarness(t)
+	f := &tunnelFixture{t: t, h: h, c: client.New(h.srv.URL, h.setupAdmin())}
+	if handler == nil {
+		handler = http.HandlerFunc(f.record)
+	}
+	f.app = httptest.NewServer(handler)
+	t.Cleanup(f.app.Close)
+	return f
+}
+
+func (f *tunnelFixture) record(w http.ResponseWriter, r *http.Request) {
+	b, _ := io.ReadAll(r.Body)
+	f.mu.Lock()
+	f.seen = append(f.seen, seenRequest{Method: r.Method, Path: r.URL.Path, RawQuery: r.URL.RawQuery, Host: r.Host, Body: string(b), Header: r.Header.Clone()})
+	f.mu.Unlock()
+	hd := w.Header()
+	hd.Add("Set-Cookie", "app=1; Domain=content.test; Path=/; HttpOnly")
+	hd.Add("Set-Cookie", "rd_visit=forged; Path=/")
+	hd.Set("Cache-Control", "public, max-age=31536000")
+	hd.Set("Cdn-Cache-Control", "max-age=600")
+	hd.Set("X-Robots-Tag", "all")
+	hd.Set("Content-Security-Policy", "script-src 'self'")
+	hd.Set("Content-Type", "text/plain")
+	io.WriteString(w, "hello from the app "+r.Method+" "+string(b))
+}
+
+func (f *tunnelFixture) last() seenRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.seen) == 0 {
+		f.t.Fatal("the app saw no request")
+	}
+	return f.seen[len(f.seen)-1]
+}
+
+func (f *tunnelFixture) create(req api.CreateTunnelRequest) *api.Artifact {
+	f.t.Helper()
+	a, err := f.c.CreateTunnel(context.Background(), &req)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return a
+}
+
+func (f *tunnelFixture) target() *client.TunnelTarget {
+	f.t.Helper()
+	tg, err := client.ResolveTunnelTarget(context.Background(), strings.TrimPrefix(f.app.URL, "http://"), false, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return tg
+}
+
+// running is a connected redrop tunnel.
+type running struct {
+	stop   context.CancelFunc
+	done   chan error
+	events chan client.TunnelEvent
+}
+
+// connect runs the CLI's agent for a and waits until the server has it.
+func (f *tunnelFixture) connect(c *client.Client, a *api.Artifact) *running {
+	f.t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &running{stop: cancel, done: make(chan error, 1), events: make(chan client.TunnelEvent, 64)}
+	go func() {
+		r.done <- c.RunTunnel(ctx, client.TunnelOptions{ID: a.ID, Target: f.target(), Retrier: noDelay{},
+			OnEvent: func(e client.TunnelEvent) {
+				select {
+				case r.events <- e:
+				default:
+				}
+			}})
+	}()
+	f.t.Cleanup(func() {
+		cancel()
+		<-r.done
+	})
+	waitFor(f.t, "the tunnel to come online", func() bool { return f.h.app.Tunnels.Online(a.ID) })
+	return r
+}
+
+// ended waits for RunTunnel to return and returns its error.
+func (r *running) ended(t *testing.T) error {
+	t.Helper()
+	select {
+	case err := <-r.done:
+		r.done <- err // for the cleanup
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("redrop tunnel did not stop")
+		return nil
+	}
+}
+
+var (
+	frame = map[string]string{"Sec-Fetch-Dest": "iframe", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin"}
+	doc   = map[string]string{"Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"}
+)
+
+func TestTunnelForwardsThroughTheLink(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	a := f.create(api.CreateTunnelRequest{Title: "dev"})
+	if a.Kind != api.KindTunnel || a.Online || !wordLinkRE.MatchString(a.URL) {
+		t.Fatalf("created: %+v", a)
+	}
+	f.connect(f.c, a)
+
+	// The frame's request (and any subresource) reaches the app.
+	r, b := f.h.send("GET", a.URL, "/hello/world?x=1&redrop-info=0&y", nil, with(frame,
+		"X-Forwarded-For", "203.0.113.9, 198.51.100.7", "Forwarded", "for=192.0.2.1", "X-Real-Ip", "192.0.2.2",
+		"Cf-Connecting-Ip", "192.0.2.3", "Authorization", "Basic YXBwOmFwcA==", "Cookie", "rd_visit=secret; app=1; rd_seen=x"))
+	expectStatus(t, r, 200, "through the tunnel")
+	if b != "hello from the app GET " {
+		t.Fatalf("body %q", b)
+	}
+	got := f.last()
+	if got.Path != "/hello/world" || got.RawQuery != "x=1&y" {
+		t.Fatalf("app saw %s?%s", got.Path, got.RawQuery)
+	}
+	if want := strings.TrimPrefix(f.app.URL, "http://"); got.Host != want {
+		t.Fatalf("Host %q, want the target %q", got.Host, want)
+	}
+	// The resolved client (the harness trusts its loopback peer), never the
+	// visitor's own list.
+	for k, want := range map[string]string{
+		"X-Forwarded-For": "198.51.100.7", "X-Forwarded-Host": hostOf(t, a.URL), "X-Forwarded-Proto": "http",
+		"Forwarded": "", "X-Real-Ip": "", "Cf-Connecting-Ip": "", "Authorization": "Basic YXBwOmFwcA==", "Cookie": "app=1",
+	} {
+		if v := strings.Join(got.Header.Values(k), ","); v != want {
+			t.Errorf("app got %s: %q, want %q", k, v, want)
+		}
+	}
+	// What the visitor gets back.
+	if c := r.Header.Values("Set-Cookie"); len(c) != 1 || c[0] != "app=1; Path=/; HttpOnly" {
+		t.Errorf("Set-Cookie %q: want the app's cookie host-only and redrop's name refused", c)
+	}
+	for k, want := range map[string]string{
+		"Cache-Control": "private, no-cache", "Cdn-Cache-Control": "", "X-Robots-Tag": "noindex, nofollow, noarchive, nosnippet, noimageindex",
+		"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "Permissions-Policy": "",
+		"Content-Security-Policy": "frame-ancestors 'self' http://app.test,script-src 'self'",
+	} {
+		if v := strings.Join(r.Header.Values(k), ","); v != want {
+			t.Errorf("visitor got %s: %q, want %q", k, v, want)
+		}
+	}
+
+	// Other methods and their bodies go through too.
+	r, b = f.h.send("PUT", a.URL, "/items/1", "payload", frame)
+	expectStatus(t, r, 200, "PUT")
+	if b != "hello from the app PUT payload" || f.last().Body != "payload" {
+		t.Fatalf("PUT: %q, app saw %q", b, f.last().Body)
+	}
+
+	// A top-level page load gets the viewer, which frames the same path.
+	r, b = f.h.send("GET", a.URL, "/hello?x=1", nil, doc)
+	expectStatus(t, r, 200, "viewer")
+	if !strings.Contains(b, `<iframe id="rd-frame" class="rd-frame" src="/hello?x=1"`) || !strings.Contains(b, "Live app") || strings.Contains(b, "Versions") {
+		t.Fatalf("viewer page: %s", b)
+	}
+	// Only the viewer load counted, once.
+	got2, _ := f.c.GetArtifact(context.Background(), a.ID)
+	if got2.Views != 1 || !got2.Online {
+		t.Fatalf("after one page view: views %d online %v", got2.Views, got2.Online)
+	}
+	// Redrop's reserved paths never reach the app.
+	before := len(f.seen)
+	r, _ = f.h.send("GET", a.URL, "/__redrop/viewer.js", nil, nil)
+	expectStatus(t, r, 200, "viewer script")
+	r, _ = f.h.send("GET", a.URL, "/__redrop/nope", nil, frame)
+	expectStatus(t, r, 404, "unknown reserved path")
+	r, _ = f.h.send("POST", a.URL, "/__redrop/nope", "x", frame)
+	expectStatus(t, r, 405, "POST to a reserved path")
+	f.mu.Lock()
+	if len(f.seen) != before {
+		t.Fatalf("a reserved path reached the app: %+v", f.seen[before:])
+	}
+	f.mu.Unlock()
+}
+
+func TestTunnelOfflineOnlyAfterTheAccessCheck(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	open := f.create(api.CreateTunnelRequest{})
+	locked := f.create(api.CreateTunnelRequest{Password: "tunnel-pw"})
+	unknown := strings.Replace(open.URL, open.URL[len("http://"):strings.Index(open.URL, ".")], "amber-otter-quilt-river", 1)
+	missResp, missBody := f.h.send("GET", unknown, "/", nil, frame)
+	expectStatus(t, missResp, 404, "unknown")
+
+	r, b := f.h.send("GET", open.URL, "/", nil, frame)
+	expectStatus(t, r, 503, "offline open tunnel")
+	if !strings.Contains(b, "This tunnel is offline") {
+		t.Fatalf("offline page: %s", b)
+	}
+	// Without the password: the gate, never the offline state.
+	r, b = f.h.send("GET", locked.URL, "/", nil, frame)
+	expectStatus(t, r, 200, "gate")
+	if !strings.Contains(b, `name="password"`) || strings.Contains(b, "offline") {
+		t.Fatalf("gate page: %s", b)
+	}
+	r, _ = f.h.send("GET", locked.URL, "/api", nil, map[string]string{"Sec-Fetch-Dest": "empty"})
+	expectStatus(t, r, 403, "subresource without access")
+	cookies := f.unlock(locked, "tunnel-pw")
+	r, _ = f.h.send("GET", locked.URL, "/", nil, frame, cookies...)
+	expectStatus(t, r, 503, "offline after the password")
+
+	// Revoked or expired: the identical miss, online or not.
+	yes := true
+	if _, err := f.c.UpdateArtifact(context.Background(), open.ID, &api.UpdateArtifactRequest{Revoked: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	f.h.expire(locked.ID)
+	for name, link := range map[string]string{"revoked": open.URL, "expired": locked.URL} {
+		r, b := f.h.send("GET", link, "/", nil, frame, cookies...)
+		if r.StatusCode != missResp.StatusCode || b != missBody {
+			t.Fatalf("%s tunnel: %d %q, want the miss", name, r.StatusCode, b)
+		}
+	}
+}
+
+// unlock enters a's password and returns the visit cookie.
+func (f *tunnelFixture) unlock(a *api.Artifact, password string) []*http.Cookie {
+	f.t.Helper()
+	r := f.h.content("POST", a.URL, "/__redrop/open", url.Values{"password": {password}, "next": {"/"}}, "")
+	expectStatus(f.t, r, 303, "unlock")
+	return r.Cookies()
+}
+
+func TestTunnelPasswordRevokeAndAdminParity(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	a := f.create(api.CreateTunnelRequest{Password: "tunnel-pw"})
+	run := f.connect(f.c, a)
+
+	r, b := f.h.send("GET", a.URL, "/x", nil, frame)
+	expectStatus(t, r, 200, "gate")
+	if !strings.Contains(b, `name="password"`) {
+		t.Fatal("no gate before the app")
+	}
+	r, _ = f.h.send("POST", a.URL, "/x", "data", map[string]string{"Sec-Fetch-Dest": "empty"})
+	expectStatus(t, r, 403, "POST without access")
+	cookies := f.unlock(a, "tunnel-pw")
+	r, b = f.h.send("GET", a.URL, "/x", nil, frame, cookies...)
+	expectStatus(t, r, 200, "after the password")
+	if !strings.HasPrefix(b, "hello from the app") {
+		t.Fatalf("body %q", b)
+	}
+	// A password change signs everyone out, as for artifacts.
+	pw := "new-password"
+	if _, err := f.c.UpdateArtifact(context.Background(), a.ID, &api.UpdateArtifactRequest{Password: &pw}); err != nil {
+		t.Fatal(err)
+	}
+	r, b = f.h.send("GET", a.URL, "/x", nil, frame, cookies...)
+	if r.StatusCode != 200 || !strings.Contains(b, `name="password"`) {
+		t.Fatalf("old visit after a password change: %d", r.StatusCode)
+	}
+	// Admin revocation ends the connection; the CLI stops for good, and the
+	// owner can't restore it.
+	r = f.h.do("PATCH", "/api/v1/admin/artifacts/"+a.ID, api.AdminArtifactUpdate{Revoked: true}, true)
+	expectStatus(t, r, 200, "admin revoke")
+	var ended *client.TunnelEndedError
+	if err := run.ended(t); !errors.As(err, &ended) || !strings.Contains(ended.Reason, "administrator") {
+		t.Fatalf("RunTunnel after admin revoke: %v", err)
+	}
+	err := f.c.RunTunnel(context.Background(), client.TunnelOptions{ID: a.ID, Target: f.target()})
+	if client.StatusOf(err) != http.StatusGone {
+		t.Fatalf("reconnecting a revoked tunnel: %v", err)
+	}
+	no := false
+	if _, err := f.c.UpdateArtifact(context.Background(), a.ID, &api.UpdateArtifactRequest{Revoked: &no}); client.StatusOf(err) != http.StatusForbidden {
+		t.Fatalf("owner restore after admin revoke: %v", err)
+	}
+}
+
+// TestTunnelWebSocketUpgrade: a visitor's WebSocket (dev-server hot reload)
+// reaches the local app end to end, through the gate's visit cookie.
+func TestTunnelWebSocketUpgrade(t *testing.T) {
+	echo := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		for {
+			typ, msg, err := c.Read(r.Context())
+			if err != nil {
+				return
+			}
+			if err := c.Write(r.Context(), typ, append([]byte("echo: "), msg...)); err != nil {
+				return
+			}
+		}
+	})
+	f := newTunnelFixture(t, echo)
+	a := f.create(api.CreateTunnelRequest{Password: "tunnel-pw"})
+	f.connect(f.c, a)
+	cookies := f.unlock(a, "tunnel-pw")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	hdr := http.Header{}
+	for _, c := range cookies {
+		hdr.Add("Cookie", c.Name+"="+c.Value)
+	}
+	ws, resp, err := websocket.Dial(ctx, strings.Replace(f.h.srv.URL, "http", "ws", 1)+"/hmr?token=1", &websocket.DialOptions{Host: hostOf(t, a.URL), HTTPHeader: hdr})
+	if err != nil {
+		t.Fatalf("dial through the tunnel: %v (%+v)", err, resp)
+	}
+	defer ws.CloseNow()
+	for _, msg := range []string{"first", "second"} {
+		if err := ws.Write(ctx, websocket.MessageText, []byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		_, got, err := ws.Read(ctx)
+		if err != nil || string(got) != "echo: "+msg {
+			t.Fatalf("read %q, %v", got, err)
+		}
+	}
+	// Without the visit cookie the upgrade is refused before the app (a
+	// browser's handshake says it is a WebSocket, so it gets 403, not the
+	// gate page).
+	browser := http.Header{"Sec-Fetch-Dest": {"websocket"}, "Sec-Fetch-Mode": {"websocket"}, "Sec-Fetch-Site": {"same-origin"}}
+	_, resp, err = websocket.Dial(ctx, strings.Replace(f.h.srv.URL, "http", "ws", 1)+"/hmr", &websocket.DialOptions{Host: hostOf(t, a.URL), HTTPHeader: browser})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("WebSocket without access: %v %+v", err, resp)
+	}
+}

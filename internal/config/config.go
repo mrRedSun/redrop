@@ -83,6 +83,9 @@ type Config struct {
 	// /api/openapi.json is always served.
 	APIDocs bool
 
+	// Tunnels are the limits of `redrop tunnel` (tunnel.go).
+	Tunnels Tunnels
+
 	SecretFile string
 }
 
@@ -315,6 +318,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("REDROP_PASSWORD_LOGIN=false needs at least one OIDC provider")
 	}
 	if c.APIDocs, err = envBool("REDROP_API_DOCS", false); err != nil {
+		return nil, err
+	}
+	if c.Tunnels, err = loadTunnels(); err != nil {
 		return nil, err
 	}
 	return c, nil

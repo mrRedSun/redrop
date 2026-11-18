@@ -15,6 +15,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/netutil"
 	"github.com/mrRedSun/redrop/internal/sharing"
+	"github.com/mrRedSun/redrop/internal/tunnel"
 )
 
 // Version is reported by /api/v1/auth/config; set at build time.
@@ -29,6 +30,7 @@ type API struct {
 	log      *slog.Logger
 	cookies  cookies
 	server   *fuego.Server
+	tunnels  *tunnel.Registry // live tunnel connections (SetTunnels)
 }
 
 func New(acc *accounts.Service, sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger) *API {

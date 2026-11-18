@@ -15,6 +15,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/internal/tunnel"
 )
 
 // Actor is who performs an owner operation.
@@ -24,6 +25,9 @@ type Actor struct {
 	Quota     int64
 	TokenID   string // set when acting through an API token
 	TokenName string
+	// TokenExpires is when that token stops working (nil = never); a tunnel
+	// it connects ends then.
+	TokenExpires *time.Time
 }
 
 type Service struct {
@@ -50,6 +54,8 @@ type Service struct {
 	unlockBudget    *security.Limiter // wrong passwords per artifact, from any network
 
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
+
+	tunnels *tunnel.Registry // live tunnel connections (SetTunnels); nil = none
 }
 
 // maxLimiterKeys bounds each unlock limiter's table (about 10 MiB when
