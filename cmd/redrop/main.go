@@ -48,6 +48,7 @@ func withCode(code int, format string, a ...any) error {
 type globalOpts struct {
 	url, token, config string
 	json               bool
+	server             string // the server URL newClient resolved, for the key store
 }
 
 var g globalOpts
@@ -158,6 +159,7 @@ func newClient() (*client.Client, error) {
 	}
 	c := client.New(nu, t)
 	c.UserAgent = "redrop/" + version
+	g.server = nu
 	return c, nil
 }
 

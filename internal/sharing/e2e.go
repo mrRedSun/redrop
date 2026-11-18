@@ -80,7 +80,7 @@ var errE2ESPA = apperr.Invalid("SPA fallback is not available for end-to-end enc
 func checkE2EVersion(a *store.Artifact, c Content) error {
 	switch {
 	case a.E2E && c.E2E == nil:
-		return apperr.Invalid("this artifact is end-to-end encrypted; publish its new version encrypted (redrop update --e2e)")
+		return apperr.Invalid("this artifact is end-to-end encrypted; publish new versions with --e2e (redrop update --e2e, redrop watch --e2e)")
 	case !a.E2E && c.E2E != nil:
 		return apperr.Invalid("this artifact is not end-to-end encrypted; publish its new version without encryption")
 	case c.E2E != nil && c.E2E.KeyCheck != a.E2EKeyCheck:
