@@ -39,6 +39,12 @@ const (
 // origin) set, it also allows the viewer's script and stylesheet, pinned to
 // their paths on that origin.
 func pagePolicy(self, styles string, directives ...string) string {
+	return pagePolicyScripts(self, styles, nil, directives...)
+}
+
+// pagePolicyScripts is pagePolicy that also allows the given reserved
+// scripts on this origin, before the viewer's.
+func pagePolicyScripts(self, styles string, scripts []string, directives ...string) string {
 	parts := []string{"default-src 'none'"}
 	if self != "" {
 		styles = strings.TrimSpace(styles + " " + self + viewerCSS)
@@ -47,7 +53,11 @@ func pagePolicy(self, styles string, directives ...string) string {
 		parts = append(parts, "style-src "+styles)
 	}
 	if self != "" {
-		parts = append(parts, "script-src "+self+viewerJS)
+		src := "script-src"
+		for _, s := range scripts {
+			src += " " + self + s
+		}
+		parts = append(parts, src+" "+self+viewerJS)
 	}
 	return strings.Join(append(parts, directives...), "; ")
 }
