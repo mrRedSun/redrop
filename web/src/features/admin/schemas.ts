@@ -44,9 +44,24 @@ export const AdminArtifact = Schema.Struct({
   last_viewed_at: Schema.NullOr(Timestamp),
   /** Set by an administrator; "Restore" clears only this, never the owner's own revocation. */
   revoked_by_admin: Schema.Boolean,
+  /** Tunnels only: the owner's `redrop tunnel` is connected. */
+  online: Schema.Boolean,
 })
 export type AdminArtifact = typeof AdminArtifact.Type
 export const AdminArtifactList = ListOf(AdminArtifact)
+
+/** A connected tunnel (GET /admin/tunnels): metadata only, never the link. */
+export const AdminTunnel = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  owner_username: Schema.String,
+  token_name: Schema.String,
+  connected_at: Timestamp,
+  streams: Schema.Number,
+  bytes_this_hour: Schema.Number,
+})
+export type AdminTunnel = typeof AdminTunnel.Type
+export const AdminTunnelList = ListOf(AdminTunnel)
 
 export const Invite = Schema.Struct({
   id: Schema.String,
