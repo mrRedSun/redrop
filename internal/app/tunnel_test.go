@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -381,5 +384,269 @@ func TestTunnelWebSocketUpgrade(t *testing.T) {
 	_, resp, err = websocket.Dial(ctx, strings.Replace(f.h.srv.URL, "http", "ws", 1)+"/hmr", &websocket.DialOptions{Host: hostOf(t, a.URL), HTTPHeader: browser})
 	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("WebSocket without access: %v %+v", err, resp)
+	}
+}
+
+// TestTunnelModeration: admins list connected tunnels (metadata only) and
+// end them; disabling the owner and deleting the token end them too.
+func TestTunnelModeration(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	userToken := f.h.secondUser("dev")
+	user := client.New(f.h.srv.URL, userToken)
+	a, err := user.CreateTunnel(context.Background(), &api.CreateTunnelRequest{Title: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := f.connect(user, a)
+
+	r := f.h.do("GET", "/api/v1/admin/tunnels", nil, false)
+	expectStatus(t, r, 200, "admin list")
+	raw := body(r)
+	if strings.Contains(raw, hostOf(t, a.URL)) || strings.Contains(raw, `"url"`) {
+		t.Fatalf("admin list carries the link: %s", raw)
+	}
+	r = f.h.do("GET", "/api/v1/admin/tunnels", nil, false)
+	list := decode[api.TunnelList](t, r)
+	if len(list.Items) != 1 || list.Items[0].ID != a.ID || list.Items[0].OwnerUsername != "dev" || list.Items[0].Title != "demo" {
+		t.Fatalf("admin list: %+v", list.Items)
+	}
+	r = f.h.do("GET", "/api/v1/admin/artifacts", nil, false)
+	if arts := decode[api.ArtifactList](t, r); len(arts.Items) != 1 || !arts.Items[0].Online || arts.Items[0].Kind != api.KindTunnel || arts.Items[0].URL != "" {
+		t.Fatalf("admin artifacts: %+v", arts.Items)
+	}
+	// An API token can't reach admin endpoints.
+	req, _ := http.NewRequest("DELETE", f.h.srv.URL+"/api/v1/admin/tunnels/"+a.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	if resp, err := http.DefaultClient.Do(req); err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("token on the admin end: %v %v", resp, err)
+	}
+
+	r = f.h.do("DELETE", "/api/v1/admin/tunnels/"+a.ID, nil, true)
+	expectStatus(t, r, 200, "admin end")
+	var ended *client.TunnelEndedError
+	if err := run.ended(t); !errors.As(err, &ended) || ended.Reason != "ended by an administrator" {
+		t.Fatalf("after the admin end: %v", err)
+	}
+	r = f.h.do("DELETE", "/api/v1/admin/tunnels/"+a.ID, nil, true)
+	expectStatus(t, r, 404, "ending a tunnel that isn't connected")
+
+	// The owner may start it again; disabling the owner ends it for good.
+	run = f.connect(user, a)
+	users := decode[api.UserList](t, f.h.do("GET", "/api/v1/admin/users", nil, false))
+	var devID string
+	for _, u := range users.Items {
+		if u.Username == "dev" {
+			devID = u.ID
+		}
+	}
+	yes := true
+	expectStatus(t, f.h.do("PATCH", "/api/v1/admin/users/"+devID, api.AdminUpdateUserRequest{Disabled: &yes}, true), 200, "disable")
+	if err := run.ended(t); !errors.As(err, &ended) || ended.Reason != "the account was disabled" {
+		t.Fatalf("after disabling the owner: %v", err)
+	}
+	if err := user.RunTunnel(context.Background(), client.TunnelOptions{ID: a.ID, Target: f.target()}); client.StatusOf(err) != http.StatusUnauthorized {
+		t.Fatalf("a disabled user's token connecting: %v", err)
+	}
+}
+
+func TestTunnelEndsWhenItsTokenIsDeleted(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	r := f.h.do("POST", "/api/v1/tokens", api.CreateTokenRequest{Name: "tunnel-token"}, true)
+	expectStatus(t, r, 201, "token")
+	tok := decode[api.CreatedToken](t, r)
+	c := client.New(f.h.srv.URL, tok.Secret)
+	a, err := c.CreateTunnel(context.Background(), &api.CreateTunnelRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := f.connect(c, a)
+	expectStatus(t, f.h.do("DELETE", "/api/v1/tokens/"+tok.ID, nil, true), 200, "delete token")
+	var ended *client.TunnelEndedError
+	if err := run.ended(t); !errors.As(err, &ended) {
+		t.Fatalf("after deleting the token: %v", err)
+	}
+}
+
+// TestTunnelReconnects: the CLI comes back by itself after its connection
+// drops, and the link works again.
+func TestTunnelReconnects(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	// A front door for the CLI that can cut its WebSocket: httptest stops
+	// tracking a connection once it is hijacked.
+	var mu sync.Mutex
+	var hijacked []net.Conn
+	door := httptest.NewUnstartedServer(f.h.app.Handler())
+	door.Config.ConnState = func(c net.Conn, s http.ConnState) {
+		if s == http.StateHijacked {
+			mu.Lock()
+			hijacked = append(hijacked, c)
+			mu.Unlock()
+		}
+	}
+	door.Start()
+	defer door.Close()
+	a := f.create(api.CreateTunnelRequest{})
+	run := f.connect(client.New(door.URL, f.c.Token), a)
+	if e := within(t, "online", run.events); e.Kind != client.TunnelOnline {
+		t.Fatalf("first event %v", e.Kind)
+	}
+	mu.Lock()
+	for _, c := range hijacked {
+		c.Close()
+	}
+	mu.Unlock()
+	if e := within(t, "offline", run.events); e.Kind != client.TunnelOffline {
+		t.Fatalf("after the drop: %v", e.Kind)
+	}
+	for {
+		e := within(t, "online again", run.events)
+		if e.Kind == client.TunnelOnline {
+			break
+		}
+		// The server may still hold the dead connection for a moment; the
+		// same process replaces it, so retries are rare and short.
+		if e.Kind != client.TunnelRetry {
+			t.Fatalf("while reconnecting: %v %v", e.Kind, e.Err)
+		}
+	}
+	waitFor(t, "the link to answer again", func() bool {
+		r, _ := f.h.send("GET", a.URL, "/again", nil, frame)
+		return r.StatusCode == 200
+	})
+}
+
+// within waits for a channel value. The bound only catches a real hang.
+func within[T any](t *testing.T, what string, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		var zero T
+		return zero
+	}
+}
+
+func TestTunnelRefusals(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	a := f.create(api.CreateTunnelRequest{})
+	ctx := context.Background()
+	views, yes, spa := 1, true, true
+	for name, req := range map[string]*api.UpdateArtifactRequest{
+		"view limit": {MaxViews: &views}, "SPA": {SPA: &spa}, "older versions": {OldVersions: &yes},
+	} {
+		if _, err := f.c.UpdateArtifact(ctx, a.ID, req); client.StatusOf(err) != http.StatusBadRequest {
+			t.Errorf("%s on a tunnel: %v", name, err)
+		}
+	}
+	if _, err := f.c.ActivateVersion(ctx, a.ID, 1); client.StatusOf(err) != http.StatusBadRequest {
+		t.Errorf("activate a tunnel's version: %v", err)
+	}
+	page := filepath.Join(t.TempDir(), "p.html")
+	if err := os.WriteFile(page, []byte("<p>x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.c.Update(ctx, a.ID, &client.Source{Path: page}, nil); client.StatusOf(err) != http.StatusBadRequest {
+		t.Errorf("publish a version to a tunnel: %v", err)
+	}
+	// Settings that do apply still work.
+	title, ttl := "renamed", "2h"
+	if got, err := f.c.UpdateArtifact(ctx, a.ID, &api.UpdateArtifactRequest{Title: &title, TTL: &ttl}); err != nil || got.Title != "renamed" {
+		t.Errorf("title and TTL: %+v %v", got, err)
+	}
+
+	// Connecting: an HTML artifact is not a tunnel; a session cookie is not
+	// an API token; another process can't take a connected tunnel.
+	html := f.h.share(f.c, "page", client.PublishOptions{})
+	if err := f.c.RunTunnel(ctx, client.TunnelOptions{ID: html.ID, Target: f.target()}); client.StatusOf(err) != http.StatusBadRequest {
+		t.Errorf("connect an HTML artifact: %v", err)
+	}
+	r := f.h.do("GET", "/api/v1/tunnels/"+a.ID+"/connect", nil, false)
+	expectStatus(t, r, http.StatusForbidden, "connect with a session")
+	f.connect(f.c, a)
+	other := make(chan client.TunnelEvent, 1)
+	octx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- f.c.RunTunnel(octx, client.TunnelOptions{ID: a.ID, Target: f.target(), Retrier: noDelay{}, OnEvent: func(e client.TunnelEvent) {
+			select {
+			case other <- e:
+			default:
+			}
+		}})
+	}()
+	e := <-other
+	cancel()
+	<-done
+	if e.Kind != client.TunnelRetry || client.StatusOf(e.Err) != http.StatusConflict {
+		t.Fatalf("second process: %v %v", e.Kind, e.Err)
+	}
+	if !f.h.app.Tunnels.Online(a.ID) {
+		t.Fatal("the first process lost the tunnel")
+	}
+}
+
+// TestTunnelSameSiteRequestsRefused: other links on the content domain can
+// navigate to a tunnel but not send it requests with the visitor's cookies.
+func TestTunnelSameSiteRequestsRefused(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	a := f.create(api.CreateTunnelRequest{})
+	f.connect(f.c, a)
+	for _, tc := range []struct {
+		method string
+		hdr    map[string]string
+		want   int
+	}{
+		{"GET", map[string]string{"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}, 403},
+		{"POST", map[string]string{"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}, 403},
+		{"GET", map[string]string{"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "websocket", "Sec-Fetch-Dest": "websocket"}, 403},
+		{"GET", map[string]string{"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "iframe"}, 200},
+		{"POST", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}, 200},
+		{"POST", map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}, 200},
+	} {
+		if r, b := f.h.send(tc.method, a.URL, "/api", "x", tc.hdr); r.StatusCode != tc.want {
+			t.Errorf("%s %v: %d %q, want %d", tc.method, tc.hdr, r.StatusCode, b, tc.want)
+		}
+	}
+}
+
+// TestOtherMethodsOnArtifacts: only tunnels take methods other than GET and
+// HEAD. Artifacts answer 405 as before; links that don't resolve also spend
+// miss budget, as a GET would.
+func TestOtherMethodsOnArtifacts(t *testing.T) {
+	t.Setenv("REDROP_CONTENT_MISS_BURST", "2")
+	t.Setenv("REDROP_CONTENT_MISS_PER_MINUTE", "1")
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	live := h.share(c, "page", client.PublishOptions{})
+	for range 4 {
+		r, _ := h.send("POST", live.URL, "/form", "x", nil)
+		expectStatus(t, r, http.StatusMethodNotAllowed, "POST to a live artifact")
+	}
+	unknown := strings.Replace(live.URL, live.URL[len("http://"):strings.Index(live.URL, ".")], "amber-otter-quilt-river", 1)
+	wantResp, wantBody := h.send("POST", live.URL, "/__redrop/nope", "x", nil)
+	for range 2 {
+		r, b := h.send("DELETE", unknown, "/x", nil, nil)
+		sameResponse(t, "DELETE to an unknown link", r, b, wantResp, wantBody)
+	}
+	r, _ := h.send("GET", live.URL, "/", nil, nil)
+	expectStatus(t, r, http.StatusTooManyRequests, "after spending the miss budget")
+}
+
+// TestTunnelFavicon: a visitor with proof of access gets the app's icon;
+// everyone else the redrop icon, without a lookup.
+func TestTunnelFavicon(t *testing.T) {
+	f := newTunnelFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/x-icon")
+		io.WriteString(w, "app icon")
+	}))
+	a := f.create(api.CreateTunnelRequest{Password: "tunnel-pw"})
+	f.connect(f.c, a)
+	if _, b := f.h.send("GET", a.URL, "/favicon.ico", nil, nil); b == "app icon" {
+		t.Fatal("the app's icon without access")
+	}
+	if _, b := f.h.send("GET", a.URL, "/favicon.ico", nil, nil, f.unlock(a, "tunnel-pw")...); b != "app icon" {
+		t.Fatalf("icon with access: %q", b)
 	}
 }
