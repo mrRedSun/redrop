@@ -1457,11 +1457,11 @@ count.
 | `REDROP_TUNNEL_MAX_REQUEST_SIZE` | 100MB | request body, under Cloudflare's 100 MB limit |
 | `REDROP_TUNNEL_MAX_RESPONSE_SIZE` | 1GB | response body |
 | `REDROP_TUNNEL_BYTES_PER_HOUR` | 2GB | bytes both ways per tunnel, fixed one-hour window |
-| `REDROP_TUNNEL_RESPONSE_TIMEOUT` | 90s | from arrival to the app's response headers, waiting included |
+| `REDROP_TUNNEL_RESPONSE_TIMEOUT` | 90s | a request's wait for a free slot, and then the app's wait to send response headers once the request is sent |
 | `REDROP_TUNNEL_IDLE_TIMEOUT` | 100s | a request or WebSocket with no bytes either way |
 
-* **Streams.** A request waits for a free slot until its response timeout,
-  then gets `503`. At most as many requests wait per tunnel as it has
+* **Streams.** A request waits for a free slot for up to the response
+  timeout, then gets `503`. At most as many requests wait per tunnel as it has
   slots; more get `503` at once. The server-wide total bounds memory:
   each stream holds at most a 256 KiB receive window plus about 40 KiB of
   copy buffers, so 256 streams stay under 80 MB, well inside the
@@ -1472,8 +1472,9 @@ count.
 * **Bandwidth.** Counted as bytes flow, through `security.Limiter` keyed by
   tunnel. When the hour's budget runs out, open streams are cut and new
   requests get `429` with `Retry-After` until the window ends.
-* **Time.** No response headers within the response timeout: `504`.
-  Cloudflare gives up at about 100 seconds, so the default answers first.
+* **Time.** No response headers within the response timeout after the
+  request (body included) reached the app: `504`. Cloudflare gives up at
+  about 100 seconds, so the default answers first.
   Idle streams are closed. Streaming responses and WebSockets may run for
   as long as bytes keep moving; behind Cloudflare, an idle WebSocket is
   closed after about 100 seconds anyway, and hot-reload clients reconnect.

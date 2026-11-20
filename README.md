@@ -264,7 +264,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_TUNNEL_STREAMS`, `REDROP_TUNNEL_STREAMS_TOTAL` | `32`, `256`: open requests and WebSockets per tunnel, and across the server (each holds at most about 300 KB) |
 | `REDROP_TUNNEL_MAX_REQUEST_SIZE`, `REDROP_TUNNEL_MAX_RESPONSE_SIZE` | `100MB`, `1GB`: one request or response body through a tunnel |
 | `REDROP_TUNNEL_BYTES_PER_HOUR` | `2GB`: traffic per tunnel, both ways, per hour |
-| `REDROP_TUNNEL_RESPONSE_TIMEOUT`, `REDROP_TUNNEL_IDLE_TIMEOUT` | `90s`, `100s`: time for the app to start answering; a request or WebSocket that moves no bytes is closed after the idle time |
+| `REDROP_TUNNEL_RESPONSE_TIMEOUT`, `REDROP_TUNNEL_IDLE_TIMEOUT` | `90s`, `100s`: how long a request waits for a free slot, and then for the app to start answering; a request or WebSocket that moves no bytes is closed after the idle time |
 
 ## Reverse proxy
 

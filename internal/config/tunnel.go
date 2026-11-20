@@ -23,8 +23,9 @@ type Tunnels struct {
 	// BytesPerHour is each tunnel's traffic budget, both ways, per fixed
 	// one-hour window.
 	BytesPerHour int64
-	// ResponseTimeout runs from a request's arrival until the app's
-	// response headers, waiting for a slot included.
+	// ResponseTimeout bounds a request's wait for a free stream slot, and
+	// then the app's wait to send response headers once the request
+	// (body included) is sent.
 	ResponseTimeout time.Duration
 	// IdleTimeout closes a request or WebSocket that moved no bytes either
 	// way for this long.
