@@ -41,6 +41,7 @@ export function Component() {
                   <span className="flex items-center gap-1.5">
                     {a.has_password && <Lock className="text-muted-foreground size-3.5" aria-label="Password protected" />}
                     <span className="max-w-64 truncate">{a.title || a.id}</span>
+                    {a.e2e && <Badge variant="outline" title="End-to-end encrypted">e2e</Badge>}
                   </span>
                 ),
               },

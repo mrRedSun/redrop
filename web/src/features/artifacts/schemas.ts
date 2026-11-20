@@ -36,6 +36,8 @@ export const Artifact = Schema.Struct({
   feedback: Schema.Boolean,
   /** An administrator revoked it (status `revoked`); only an administrator can restore it. */
   revoked_by_admin: Schema.Boolean,
+  /** End-to-end encrypted: the server holds only ciphertext, and `url` lacks the key (DESIGN.md). */
+  e2e: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
 

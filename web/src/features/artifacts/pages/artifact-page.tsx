@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { formatBytes, formatDate, relativeTime } from '@/lib/format'
 import * as artifacts from '../atoms'
 import { AccessLogPanel } from '../components/access-log-panel'
+import { E2EBadge, E2EFilesNote, E2ELinkNote, E2EPreviewNote } from '../components/e2e'
 import { FeedbackPanel } from '../components/feedback-panel'
 import { FilesPanel } from '../components/files-panel'
 import { LinkActions } from '../components/link-actions'
@@ -35,7 +36,7 @@ export function Component() {
         <Link to={paths.artifacts}><ArrowLeft className="size-4" /> Artifacts</Link>
       </Button>
       <PageHeader
-        title={<span className="flex items-center gap-3">{artifact.title || artifact.id}<StatusBadge artifact={artifact} /></span>}
+        title={<span className="flex items-center gap-3">{artifact.title || artifact.id}<StatusBadge artifact={artifact} />{artifact.e2e && <E2EBadge />}</span>}
         description={`${artifact.kind} · created ${formatDate(artifact.created_at)}${artifact.token_name ? ` via ${artifact.token_name}` : ''}`}
         actions={<LinkActions artifact={artifact} afterDelete="list" />}
       />
@@ -47,11 +48,14 @@ export function Component() {
       )}
       <Card className="mb-6">
         <CardHeader><CardTitle className="text-base">Share link</CardTitle></CardHeader>
-        <CardContent className="flex items-center gap-2">
-          <div className="flex-1"><CopyField value={artifact.url} label="Link" /></div>
-          <Button asChild variant="outline" size="icon" aria-label="Open link">
-            <a href={artifact.url} target="_blank" rel="noreferrer noopener"><ExternalLink className="size-4" /></a>
-          </Button>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <div className="flex-1"><CopyField value={artifact.url} label="Link" /></div>
+            <Button asChild variant="outline" size="icon" aria-label="Open link">
+              <a href={artifact.url} target="_blank" rel="noreferrer noopener"><ExternalLink className="size-4" /></a>
+            </Button>
+          </div>
+          {artifact.e2e && <E2ELinkNote id={artifact.id} />}
         </CardContent>
       </Card>
       <Stats artifact={artifact} />
@@ -71,10 +75,13 @@ export function Component() {
           </AsyncResultView>
         </TabsContent>
         <TabsContent value="versions" className="pt-4"><VersionsPanel id={id} /></TabsContent>
-        <TabsContent value="files" className="pt-4"><AsyncResultView result={versions}>{(items) => <FilesPanel id={id} versions={items} />}</AsyncResultView></TabsContent>
+        <TabsContent value="files" className="pt-4">
+          {artifact.e2e && <E2EFilesNote />}
+          <AsyncResultView result={versions}>{(items) => <FilesPanel id={id} versions={items} />}</AsyncResultView>
+        </TabsContent>
         <TabsContent value="log" className="pt-4"><AccessLogPanel id={id} /></TabsContent>
         <TabsContent value="feedback" className="pt-4"><FeedbackPanel artifact={artifact} /></TabsContent>
-        <TabsContent value="preview" className="pt-4"><PreviewPanel id={id} /></TabsContent>
+        <TabsContent value="preview" className="pt-4">{artifact.e2e ? <E2EPreviewNote /> : <PreviewPanel id={id} />}</TabsContent>
       </Tabs>
     </>
   )

@@ -13,6 +13,7 @@ import { useDebouncedValue } from '@/hooks/use-debounced-value'
 import { formatBytes, relativeTime } from '@/lib/format'
 import { useKeepPrevious } from '@/runtime/use-keep-previous'
 import * as artifacts from '../atoms'
+import { E2EBadge } from '../components/e2e'
 import { LinkActions } from '../components/link-actions'
 import { StatusBadge } from '../components/status-badge'
 import { defaultFilter, filterFromSearch, type Artifact } from '../schemas'
@@ -87,6 +88,7 @@ function ArtifactTable({ rows, stale, filtered }: { rows: Artifact[] | undefined
             <Link to={paths.artifact(a.id)} className="flex items-center gap-1.5 font-medium hover:underline">
               {a.has_password && <Lock className="text-muted-foreground size-3.5" aria-label="Password protected" />}
               <span className="max-w-72 truncate">{a.title || a.id}</span>
+              {a.e2e && <E2EBadge />}
             </Link>
           ),
         },
