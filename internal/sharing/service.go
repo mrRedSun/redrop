@@ -3,6 +3,8 @@
 package sharing
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
 	"log/slog"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/blob"
 	"github.com/mrRedSun/redrop/internal/config"
+	"github.com/mrRedSun/redrop/internal/notify"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
 )
@@ -48,6 +51,10 @@ type Service struct {
 	unlockLimiter   *security.Limiter // per client network + artifact
 	unlockIPLimiter *security.Limiter // per client network across artifacts
 	unlockBudget    *security.Limiter // wrong passwords per artifact, from any network
+	reportLimiter   *security.Limiter // abuse reports per client network
+
+	reportKey []byte          // keys the hash of a reporter's network
+	notifier  notify.Notifier // announces new reports (SetNotifier)
 
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
 }
@@ -71,6 +78,9 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		unlockLimiter:   security.NewLimiter(5, 5*time.Minute, maxLimiterKeys, security.EvictOldest, time.Now),
 		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
 		unlockBudget:    security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, security.RefuseNew, time.Now),
+		reportLimiter:   security.NewLimiter(cfg.ReportsPerHour, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
+		reportKey:       derivedKey(secret, "report-network"),
+		notifier:        notify.Discard{},
 		checkPassword:   security.CheckPassword,
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
@@ -86,6 +96,14 @@ func (s *Service) Close() {
 	s.unlockLimiter.Close()
 	s.unlockIPLimiter.Close()
 	s.unlockBudget.Close()
+	s.reportLimiter.Close()
+}
+
+// derivedKey is a key for one purpose, derived from the server secret.
+func derivedKey(secret []byte, purpose string) []byte {
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte(purpose))
+	return m.Sum(nil)
 }
 
 func mapStore(err error) error {
