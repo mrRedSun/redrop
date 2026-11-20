@@ -78,6 +78,14 @@ const (
 	// NoticeEmptyTree: the watched folder has no publishable files; the
 	// publish is skipped until files appear.
 	NoticeEmptyTree NoticeKind = "empty_folder"
+	// NoticeLiveOn: live reload is on; the lease is held (again).
+	NoticeLiveOn NoticeKind = "live_on"
+	// NoticeLiveError: renewing the live reload lease failed transiently;
+	// it is retried, and the lease lasts through a few failures.
+	NoticeLiveError NoticeKind = "live_error"
+	// NoticeLiveOff: the server refused live reload (for example, the
+	// info button is off); watching goes on without it.
+	NoticeLiveOff NoticeKind = "live_off"
 )
 
 // Notice is one non-fatal event during watching.

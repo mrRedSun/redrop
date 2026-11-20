@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -32,11 +33,15 @@ var noticeEvents = map[client.NoticeKind]string{
 	client.NoticeRewatchFailed: "rewatch_failed",
 	client.NoticeTreeChanged:   "tree_changed",
 	client.NoticeEmptyTree:     "empty_folder",
+	client.NoticeLiveOn:        "live_on",
+	client.NoticeLiveError:     "live_error",
+	client.NoticeLiveOff:       "live_off",
 }
 
 func watchCmd() *cobra.Command {
 	var cf contentFlags
 	var debounce time.Duration
+	var live, noLive bool
 	cmd := &cobra.Command{
 		Use:   "watch ID|URL PATH",
 		Short: "Republish PATH as a new version whenever it changes",
@@ -52,8 +57,19 @@ that share would reject (such as a bad --entry) exits 2 before watching
 starts. Identical content never publishes a version. Each publish
 prints the version number and time. With --json, each publish or typed
 notice (retry, watch_error, root_vanished, rewatch_failed, tree_changed,
-empty_folder) is one JSON line; retries include the upcoming attempt number
-and the delay before it.
+empty_folder, live_on, live_error, live_off) is one JSON line; retries
+include the upcoming attempt number and the delay before it.
+
+Live reload is on by default (--no-live turns it off): while watch runs,
+people who have the link open in redrop's viewer page see each new version
+without reloading. Nothing is added to the artifact; the viewer page reloads
+its frame and keeps the page and scroll position. It needs the info button
+(not --no-info) and an HTML page or folder; file artifacts and direct views
+(?redrop-info=0) are not reloaded, and viewers of an older version stay on
+it. Reloading never uses a view, so view-limited and --once links work too.
+Live mode lasts while watch runs and ends within a minute after it stops or
+dies. Watch prints "live reload on", or why the server refused it, and goes
+on watching either way.
 
 If files change while a version is being packed or uploaded, or the folder
 is empty (a build tool cleaned it), watch waits for the next change instead
@@ -65,7 +81,8 @@ CLI's usual exit codes.`,
 		Example: `  redrop watch k2j4m9qx7d4a report.html
   redrop watch https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
   redrop watch k2j4m9qx7d4a ./site --debounce 1s --json
-  redrop watch k2j4m9qx7d4a notes.md`,
+  redrop watch k2j4m9qx7d4a notes.md
+  redrop watch k2j4m9qx7d4a report.html --no-live`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if args[1] == "-" {
@@ -75,6 +92,9 @@ CLI's usual exit codes.`,
 			// meaningless here (no stdin), so reject it before any lookup.
 			if cmd.Flags().Changed("name") {
 				return withCode(exitUsage, "--name cannot be combined with watch; watch uploads the file at PATH")
+			}
+			if live && noLive {
+				return withCode(exitUsage, "--live conflicts with --no-live")
 			}
 			if _, err := os.Stat(args[1]); err != nil {
 				return withCode(exitUsage, "cannot watch %s: %v", args[1], err)
@@ -98,7 +118,18 @@ CLI's usual exit codes.`,
 				return err
 			}
 			opts := watchOptions(id, args[1], debounce)
+			// Live reload starts once the watcher is ready and ends,
+			// releasing its lease, before watch returns.
+			var session liveSession
+			if !noLive {
+				ready := opts.OnReady
+				opts.OnReady = func() {
+					ready()
+					session.start(cmd.Context(), c, id, opts.OnNotice)
+				}
+			}
 			err = watchArtifact(cmd.Context(), c, id, src, opts)
+			session.end()
 			if err != nil {
 				return mapErr(err)
 			}
@@ -110,6 +141,8 @@ CLI's usual exit codes.`,
 	}
 	cf.register(cmd)
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
+	cmd.Flags().BoolVar(&live, "live", false, "reload open viewer pages on each new version (the default)")
+	cmd.Flags().BoolVar(&noLive, "no-live", false, "don't reload open viewer pages")
 	return cmd
 }
 
@@ -137,11 +170,16 @@ func checkWatchSource(src *client.Source) error {
 var watchArtifact = client.Watch
 
 // watchOptions keeps streaming output separate from command validation.
+// Live reload notices come from their own goroutine, so output is
+// serialized.
 func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
+	var out sync.Mutex
 	return client.WatchOptions{
 		Debounce: debounce,
 		Progress: progressFn(),
 		OnPublish: func(r client.WatchResult) {
+			out.Lock()
+			defer out.Unlock()
 			if g.json {
 				printJSONLine(watchEvent{
 					Event: "publish", ID: id, Version: r.Version,
@@ -153,6 +191,8 @@ func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
 			fmt.Println(r.Artifact.URL)
 		},
 		OnNotice: func(n client.Notice) {
+			out.Lock()
+			defer out.Unlock()
 			if g.json {
 				event := watchEvent{
 					Event: noticeEvents[n.Kind], ID: id, Attempt: n.Attempt,
@@ -180,6 +220,12 @@ func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
 				fmt.Fprintf(os.Stderr, "redrop: %s changed while publishing; trying again once it settles: %v\n", path, n.Err)
 			case client.NoticeEmptyTree:
 				fmt.Fprintf(os.Stderr, "redrop: %s has no files to publish; waiting for files\n", path)
+			case client.NoticeLiveOn:
+				fmt.Fprintln(os.Stderr, "live reload on: open viewer pages reload on each new version")
+			case client.NoticeLiveError:
+				fmt.Fprintf(os.Stderr, "redrop: live reload: renewing failed, retrying: %v\n", n.Err)
+			case client.NoticeLiveOff:
+				fmt.Fprintf(os.Stderr, "redrop: live reload off: %v\n", n.Err)
 			default:
 				fmt.Fprintf(os.Stderr, "redrop: watch notice %s: %v\n", n.Kind, n.Err)
 			}
@@ -187,6 +233,8 @@ func watchOptions(id, path string, debounce time.Duration) client.WatchOptions {
 		// Announce only once the watches are registered and the initial
 		// digest is seeded, so subsequent changes are guaranteed to be seen.
 		OnReady: func() {
+			out.Lock()
+			defer out.Unlock()
 			if !g.json {
 				fmt.Fprintf(os.Stderr, "watching %s -> %s (Ctrl-C to stop)\n", path, id)
 			}
