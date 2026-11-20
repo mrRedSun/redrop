@@ -373,3 +373,11 @@ type OK struct {
 type AdminArtifactUpdate struct {
 	Revoked bool `json:"revoked" description:"Set or clear the administrator's revocation; the owner's own revocation is unaffected"`
 }
+
+// LiveLease is a watch session's hold on live reload (DESIGN.md "Live
+// reload"): while one is unexpired, viewers of the current version reload
+// when a new version becomes current.
+type LiveLease struct {
+	ExpiresAt         time.Time `json:"expires_at" description:"When the lease lapses unless renewed"`
+	RenewAfterSeconds int       `json:"renew_after_seconds" description:"Renew this often (a third of the lease)"`
+}
