@@ -285,6 +285,10 @@
       note.textContent = text
       note.hidden = false
     }
+    // The viewer never changes the fragment with an event (replaceState
+    // fires none), so a hashchange is the visitor's: a pasted full link or
+    // an edited page. Start over with it.
+    window.addEventListener('hashchange', function () { location.reload() })
     if (keyText) {
       try { sessionStorage.setItem(KEY_ITEM, keyText) } catch (e) { /* storage off: this page still opens */ }
       history.replaceState(history.state, '', location.pathname + location.search + (rest ? '#' + rest : ''))

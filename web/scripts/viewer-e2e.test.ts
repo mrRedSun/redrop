@@ -100,11 +100,18 @@ function page(opts: { start: string; stored?: string; secure?: boolean; manifest
       return new Response((opts.manifest ? opts.manifest(bytes) : bytes) as Uint8Array<ArrayBuffer>, { status: 200 })
     },
   })
-  ;(context as Record<string, unknown>).window = context
+  const reloads: number[] = []
+  const windowListeners: Record<string, Listener[]> = {}
+  Object.assign(context, {
+    window: context,
+    addEventListener(type: string, fn: Listener) { (windowListeners[type] ??= []).push(fn) },
+  })
+  ;(location as Record<string, unknown>).reload = () => reloads.push(1)
   vm.runInContext(lib, context)
   vm.runInContext(viewer, context)
   return {
-    frame, note, doc, replaced, session, posted, registered, fetched,
+    frame, note, doc, replaced, session, posted, registered, fetched, reloads,
+    hashchange() { for (const fn of windowListeners.hashchange ?? []) fn() },
     // settled waits for the boot to frame the page or show a message.
     async settled() {
       for (let i = 0; i < 400 && frame.srcs.length === 0 && note.hidden; i++) await new Promise((r) => setTimeout(r, 5))
@@ -195,4 +202,12 @@ await test('without a key, with another key, or with damaged content, nothing is
     assert.equal(p.posted.length, 0)
   }
   assert.deepEqual(wrong.fetched, [], 'a wrong key is caught by the key check, before any fetch')
+})
+
+await test('a full link pasted into an open viewer starts over with its key', async () => {
+  const p = page({ start: '/' })
+  await p.settled()
+  assert.match(p.note.textContent, /key is missing/)
+  p.hashchange()
+  assert.equal(p.reloads.length, 1)
 })
