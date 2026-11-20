@@ -218,6 +218,37 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 | `REDROP_FEEDBACK_BURST`, `REDROP_FEEDBACK_PER_MINUTE` | `5`, `1`: viewer comments a client may post (burst, then per minute) |
 | `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
+| `REDROP_ABUSE_CONTACT` | unset (default): no `security.txt`. An email address, `mailto:` URI or `https://` URL; serves `/.well-known/security.txt` on the dashboard host and the content apex (see [Abuse handling](#abuse-handling)) |
+| `REDROP_REPORTS_PER_HOUR` | `5`: abuse reports one client network may file per hour |
+| `REDROP_REPORTS_MAX_OPEN`, `REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT` | `1000`, `20`: open visitor reports in all, and on one artifact; past them reports are refused or dropped |
+| `REDROP_NOTIFY_URL`, `REDROP_NOTIFY_TOKEN_FILE` | unset (default): no notifications. A webhook that gets a JSON POST for every new report and upload flag, with the file's token as `Authorization: Bearer` |
+
+## Abuse handling
+
+One phishing page can get the whole content domain flagged by Safe Browsing,
+which breaks every link. redrop gives you the pieces to catch that early;
+[DESIGN.md](docs/DESIGN.md#abuse-handling) has the details and threat model.
+
+- **Register the content domain in [Google Search Console](https://search.google.com/search-console)**
+  (a Domain property covers the apex and every artifact subdomain), and the
+  dashboard's domain too. Safe Browsing then tells you about a flagged page
+  before your visitors see a warning.
+- **Set `REDROP_ABUSE_CONTACT`** to an address someone reads. It appears in
+  `/.well-known/security.txt` on both hosts, next to the report form.
+- **Reports.** Gate pages, the info panel and the content apex link to
+  `/report` on the dashboard host. Anyone can report a link there, without an
+  account. Reports land in **Administration → Reports**, where you can
+  resolve or dismiss them, revoke the artifact (its owner can't undo that), or
+  suspend the owner (the account is disabled and all of its artifacts are
+  revoked). Every action is recorded in the report's history. Nothing happens
+  without an administrator: a report never takes a link down by itself.
+- **Upload checks.** A published page with a password form that posts to
+  another site, and executables in a bundle or shared as a file, are flagged
+  in the same queue. They are only flagged: the content is published and
+  served unchanged.
+- **Notifications.** With `REDROP_NOTIFY_URL`, each new report or flag POSTs
+  `{"level":"warning","title":"…","message":"…","key":"…"}`. The message has
+  the category, artifact ID and owner only, never the reporter's text.
 
 ## Reverse proxy
 

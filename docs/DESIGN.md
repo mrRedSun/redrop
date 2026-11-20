@@ -1313,7 +1313,7 @@ finding. Findings:
 * **Executable**: a file whose first bytes are a PE (`MZ` with a `PE\0\0`
   header), ELF, Mach-O or universal Mach-O image, or whose name ends in a
   Windows, Android, macOS or Linux installer or script extension (`.exe`,
-  `.msi`, `.scr`, `.apk`, `.dmg`, `.deb`, `.bat`, `.ps1`, … see
+  `.msi`, `.scr`, `.apk`, `.dmg`, `.deb`, `.bat`, `.hta`, … see
   `sharing/scan.go`). Category `malware`. It applies to bundles and to
   single-file artifacts.
 
