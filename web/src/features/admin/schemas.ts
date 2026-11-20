@@ -48,6 +48,54 @@ export const AdminArtifact = Schema.Struct({
 export type AdminArtifact = typeof AdminArtifact.Type
 export const AdminArtifactList = ListOf(AdminArtifact)
 
+/** One audited action on a report. */
+export const ReportAction = Schema.Struct({
+  at: Timestamp,
+  actor: Schema.String,
+  action: Schema.String,
+  detail: Schema.String,
+})
+
+/**
+ * An abuse report (DESIGN.md "Abuse handling"). `details`, `contact` and
+ * system findings are untrusted text: render them as text only, never as
+ * HTML or a link. `reported_url` is the one artifact link an admin sees:
+ * the one the reporter submitted.
+ */
+export const Report = Schema.Struct({
+  id: Schema.String,
+  source: Schema.Literals(['visitor', 'system']),
+  category: Schema.String,
+  details: Schema.String,
+  contact: Schema.String,
+  reported_url: Schema.String,
+  version: Schema.Number,
+  status: Schema.Literals(['open', 'resolved', 'dismissed']),
+  created_at: Timestamp,
+  closed_at: Schema.NullOr(Timestamp),
+  closed_by: Schema.String,
+  artifact_id: Schema.String,
+  artifact: Schema.NullOr(AdminArtifact),
+  owner_username: Schema.String,
+  owner_suspended: Schema.Boolean,
+  history: Schema.NullOr(Schema.Array(ReportAction)),
+})
+export type Report = typeof Report.Type
+export const ReportList = ListOf(Report)
+
+export const ReportStatus = Schema.Literals(['open', 'resolved', 'dismissed'])
+export type ReportStatus = typeof ReportStatus.Type
+export const ReportStatusUpdate = Schema.Struct({ status: ReportStatus })
+
+/** The queue's filter, from `?status=`; anything else is the open queue. */
+export const ReportFilter = Schema.Literals(['open', 'resolved', 'dismissed', 'all'])
+export type ReportFilter = typeof ReportFilter.Type
+export const reportFilterFromSearch = (params: URLSearchParams): ReportFilter =>
+  Option.getOrElse(Schema.decodeUnknownOption(ReportFilter)(params.get('status')), () => 'open' as const)
+
+/** Only an http(s) address becomes a link, whatever the server sent. */
+export const reportedLink = (r: Pick<Report, 'reported_url'>): string | undefined => (/^https?:\/\//i.test(r.reported_url) ? r.reported_url : undefined)
+
 export const Invite = Schema.Struct({
   id: Schema.String,
   note: Schema.String,
