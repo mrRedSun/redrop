@@ -27,6 +27,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/netutil"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/internal/tunnel"
 	"github.com/mrRedSun/redrop/internal/web"
 )
 
@@ -43,6 +44,7 @@ type App struct {
 	Accounts *accounts.Service
 	Sharing  *sharing.Service
 	API      *httpapi.API
+	Tunnels  *tunnel.Registry
 	janitor  *janitor.Janitor
 	handler  http.Handler
 }
@@ -72,9 +74,15 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	}
 	acc := accounts.New(db, cfg, secret, log)
 	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader, TrustedHops: cfg.TrustedHops}
+	// Live tunnel connections: the sharing service reports access changes
+	// to them, accounts report disabled users and deleted tokens.
+	tunnels := tunnel.New(cfg.Tunnels, log)
+	sh.SetTunnels(tunnels)
+	acc.SetRevocations(tunnels)
 
 	site := web.New(opts.Dashboard, opts.CLIDir, cfg.PublicOrigin())
 	api := httpapi.New(acc, sh, cfg, clients, log)
+	api.SetTunnels(tunnels)
 	installers := site.Installers()
 	api.Mount("/install.sh", installers.ServeHTTP)
 	api.Mount("/install.ps1", installers.ServeHTTP)
@@ -86,20 +94,26 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	api.Mount("/", site.SPA)
 
 	a := &App{
-		cfg: cfg, log: log, db: db, Accounts: acc, Sharing: sh, API: api,
+		cfg: cfg, log: log, db: db, Accounts: acc, Sharing: sh, API: api, Tunnels: tunnels,
 		janitor: janitor.New(sh, db, cfg.DataDir, log),
 	}
-	a.handler = hostRouter(cfg.ContentHost(), content.New(sh, cfg, clients, log, installers), api.Handler())
+	a.handler = hostRouter(cfg.ContentHost(), content.New(sh, cfg, clients, log, installers).WithTunnels(tunnels), api.Handler())
 	return a, nil
 }
 
 // Close releases what New built: the services' background goroutines,
 // then the database. Call it after Run has returned.
 func (a *App) Close() error {
+	a.Tunnels.Shutdown(tunnelShutdownWait)
+	a.Tunnels.Close()
 	a.Accounts.Close()
 	a.Sharing.Close()
 	return a.db.Close()
 }
+
+// tunnelShutdownWait bounds how long shutdown waits for tunnel connections
+// to close after telling their CLIs to reconnect elsewhere.
+const tunnelShutdownWait = 5 * time.Second
 
 // Handler routes content-domain hosts to the content transport and every
 // other host to the API/dashboard.
@@ -149,7 +163,12 @@ func (a *App) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		return srv.Shutdown(sctx)
+		// In-flight requests finish first, tunnelled ones included; the
+		// tunnel connections are hijacked, so Shutdown doesn't wait for
+		// them: they are told to reconnect (1001) once it returns.
+		err := srv.Shutdown(sctx)
+		a.Tunnels.Shutdown(tunnelShutdownWait)
+		return err
 	}
 }
 

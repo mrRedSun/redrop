@@ -54,3 +54,7 @@ export const setArtifactRevoked = Atom.family((id: string) =>
 export const deleteArtifact = Atom.family((id: string) =>
   mutation((_: void) => endpoints.deleteArtifact(id), { invalidates: ['admin', 'artifacts'], success: 'Artifact deleted' }),
 )
+
+export const endTunnel = Atom.family((id: string) =>
+  mutation((_: void) => endpoints.endTunnel(id), { invalidates: ['admin', 'artifacts'], success: 'Tunnel ended; revoke it to keep it off' }),
+)

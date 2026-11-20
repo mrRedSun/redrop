@@ -58,7 +58,8 @@ const program = Effect.gen(function* () {
 
   const list = yield* artifacts.list({ q: '', status: 'all' })
   check('artifact list decodes', true)
-  const first = list[0]
+  // Tunnels have no files or versions to check; take a stored artifact.
+  const first = list.find((a) => a.kind !== 'tunnel')
   if (first) {
     const a = yield* artifacts.get(first.id)
     const versions = yield* artifacts.versions(a.id)
@@ -98,6 +99,8 @@ const program = Effect.gen(function* () {
     yield* admin.deleteInvite(inv.id)
     const all = yield* admin.artifacts('', 'all')
     check('admin artifacts decode without links', all.every((a) => !('url' in a)))
+    const tunnels = yield* admin.tunnels
+    check('admin tunnels decode without links', tunnels.every((t) => !('url' in t) && all.some((a) => a.id === t.id && a.online)))
     // An administrator's revocation: the owner sees it and cannot undo it.
     if (first && first.status === 'active') {
       const revoked = yield* admin.setArtifactRevoked(first.id, true)

@@ -4,10 +4,12 @@ go 1.26.11
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
+	github.com/coder/websocket v1.8.15
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getkin/kin-openapi v0.153.0
 	github.com/go-fuego/fuego v0.21.0
+	github.com/hashicorp/yamux v0.1.2
 	github.com/pquerna/otp v1.5.0
 	github.com/spf13/cobra v1.10.2
 	github.com/yuin/goldmark v1.8.7

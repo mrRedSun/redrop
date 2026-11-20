@@ -172,8 +172,12 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 	} else {
 		fmt.Fprintf(w, "status:\t%s\n", a.Status)
 	}
-	fmt.Fprintf(w, "kind:\t%s (%d file%s, %s)\n", a.Kind, a.Files, plural(a.Files), human(a.Size))
-	fmt.Fprintf(w, "version:\t%d of %d\n", a.Version, a.Versions)
+	if a.Kind == api.KindTunnel {
+		fmt.Fprintf(w, "kind:\ttunnel (%s)\n", tunnelState(a))
+	} else {
+		fmt.Fprintf(w, "kind:\t%s (%d file%s, %s)\n", a.Kind, a.Files, plural(a.Files), human(a.Size))
+		fmt.Fprintf(w, "version:\t%d of %d\n", a.Version, a.Versions)
+	}
 	fmt.Fprintf(w, "expires:\t%s (%s)\n", fmtTime(a.ExpiresAt), until(a.ExpiresAt))
 	prot := []string{}
 	if a.HasPassword {
@@ -199,11 +203,13 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		info = "hidden (direct view)"
 	}
 	fmt.Fprintf(w, "info button:\t%s\n", info)
-	old := "viewers see the list only"
-	if a.OldVersions {
-		old = "viewers can open them"
+	if a.Kind != api.KindTunnel {
+		old := "viewers see the list only"
+		if a.OldVersions {
+			old = "viewers can open them"
+		}
+		fmt.Fprintf(w, "older versions:\t%s\n", old)
 	}
-	fmt.Fprintf(w, "older versions:\t%s\n", old)
 	fb := "off"
 	switch {
 	case a.Feedback && a.InfoButton:
@@ -216,6 +222,14 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		fmt.Fprintf(w, "deleted at:\t%s\n", fmtTime(a.PurgeAt))
 	}
 	return w.Flush()
+}
+
+// tunnelState is a tunnel's connection: online while its redrop tunnel runs.
+func tunnelState(a *api.Artifact) string {
+	if a.Online {
+		return "online"
+	}
+	return "offline"
 }
 
 func plural(n int) string {
@@ -528,7 +542,14 @@ func listCmd() *cobra.Command {
 				if len(title) > 48 {
 					title = title[:47] + "…"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, a.Status, a.Kind, human(a.Size), views, until(a.ExpiresAt), acc, title)
+				status, size := a.Status, human(a.Size)
+				if a.Kind == api.KindTunnel {
+					size = "-"
+					if a.Status == api.StatusActive {
+						status = tunnelState(&a)
+					}
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, status, a.Kind, size, views, until(a.ExpiresAt), acc, title)
 			}
 			return w.Flush()
 		},

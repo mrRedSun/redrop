@@ -3,6 +3,7 @@ import { RedropApi, json } from '@/api/redrop-api'
 import {
   AdminArtifactList,
   AdminArtifactUpdate,
+  AdminTunnelList,
   AdminArtifact,
   AdminResetRequest,
   AdminUpdateUserRequest,
@@ -45,3 +46,8 @@ export const setArtifactRevoked = (id: string, revoked: boolean) =>
   )
 
 export const deleteArtifact = (id: string) => RedropApi.use((api) => api.call({ method: 'DELETE', path: ['admin', 'artifacts', id] }))
+
+export const tunnels = RedropApi.use((api) => api.call({ method: 'GET', path: ['admin', 'tunnels'], response: AdminTunnelList })).pipe(Effect.map(items))
+
+/** Ends a tunnel's connection; the owner may start it again (revoke keeps it off). */
+export const endTunnel = (id: string) => RedropApi.use((api) => api.call({ method: 'DELETE', path: ['admin', 'tunnels', id] }))

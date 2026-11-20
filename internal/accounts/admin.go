@@ -86,6 +86,7 @@ func (a *Administration) UpdateUser(ctx context.Context, admin *Principal, userI
 		if err := s.db.DeleteUserSessions(ctx, u.ID, ""); err != nil {
 			return User{}, apperr.Internal(err)
 		}
+		s.userDisabled(u.ID)
 	}
 	s.log.Info("admin updated user", "admin", admin.user.Username, "user", u.Username)
 	usage, err := s.db.UserUsage(ctx, u.ID)
