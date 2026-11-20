@@ -650,3 +650,34 @@ func TestTunnelFavicon(t *testing.T) {
 		t.Fatalf("icon with access: %q", b)
 	}
 }
+
+// TestOwnerRevokeAndDeleteEndTheTunnel: the owner's own revoke and delete
+// end the connection at once, with the reason, as admin moderation does.
+func TestOwnerRevokeAndDeleteEndTheTunnel(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, reason string
+		do           func(id string) error
+	}{
+		{"revoke", "the link was revoked", func(id string) error {
+			yes := true
+			_, err := f.c.UpdateArtifact(ctx, id, &api.UpdateArtifactRequest{Revoked: &yes})
+			return err
+		}},
+		{"delete", "the tunnel was deleted", func(id string) error { return f.c.DeleteArtifact(ctx, id) }},
+	} {
+		a := f.create(api.CreateTunnelRequest{})
+		run := f.connect(f.c, a)
+		if err := tc.do(a.ID); err != nil {
+			t.Fatal(err)
+		}
+		var ended *client.TunnelEndedError
+		if err := run.ended(t); !errors.As(err, &ended) || ended.Reason != tc.reason {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if f.h.app.Tunnels.Online(a.ID) {
+			t.Fatalf("%s: still online", tc.name)
+		}
+	}
+}
