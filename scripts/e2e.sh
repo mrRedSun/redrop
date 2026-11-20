@@ -394,6 +394,51 @@ $R feedback resolve "$FBURL" "$CID" >/dev/null
 [ "$($R feedback "$FBURL" --all --json | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["resolved_at"] is not None)')" = True ] || die "resolved comment in --all"
 pass "feedback: closed by default, opened with set --feedback, posted as a browser would, read with --json, resolved"
 
+# abuse reports: the gate page links the report form on the app origin
+# (page in the fragment); the endpoint takes same-origin JSON only and
+# answers an unknown link like a real one; the admin queue shows the report
+# with its link, and revoking from it stops the link for good. An upload
+# with an executable is flagged without changing it. Without
+# REDROP_ABUSE_CONTACT there is no security.txt.
+PUB=$(curl -fsS "$BASE/api/v1/auth/config" | python3 -c 'import json,sys;print(json.load(sys.stdin)["public_url"])')
+RURL=$($R share "$WORK/page-v1.html" --password letmein-please -q)
+RID=$($R info "$RURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+RENC=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote_plus(sys.argv[1]))' "$RURL")
+curl -fsS "${DOC[@]}" "$RURL" | grep -qF "href=\"$PUB/report#url=$RENC\"" || die "gate page links the report form with the page"
+[ "$(code_of "$BASE/report")" = 200 ] || die "report page"
+rbody() { python3 -c 'import json,sys;print(json.dumps({"url":sys.argv[1],"category":"phishing","details":"e2e: fake sign-in","contact":"e2e"}))' "$1"; }
+RH=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin')
+[ "$(code_of "${RH[@]}" -H 'Origin: https://evil.example' -d "$(rbody "${RURL}x.html")" "$BASE/api/v1/reports")" = 403 ] || die "cross-origin report accepted"
+[ "$(code_of "${RH[@]}" -d "$(rbody "${RURL}x.html")" "$BASE/api/v1/reports")" = 403 ] || die "report without Origin accepted"
+OKR=$(curl -fsS "${RH[@]}" -H "Origin: $PUB" -d "$(rbody "${RURL}x.html#frag")" "$BASE/api/v1/reports")
+UNK=$(python3 -c 'import sys,urllib.parse as u;p=u.urlsplit(sys.argv[1]);print(p._replace(netloc="zebra-zebra-zebra-zebra."+p.netloc.split(".",1)[1]).geturl())' "$RURL")
+UNKR=$(curl -fsS "${RH[@]}" -H "Origin: $PUB" -d "$(rbody "$UNK")" "$BASE/api/v1/reports")
+[ "$OKR" = '{"ok":true}' ] && [ "$UNKR" = "$OKR" ] || die "report answers differ: $OKR / $UNKR"
+REPID=$(curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports" | python3 -c 'import json,sys
+d=[r for r in json.load(sys.stdin)["items"] if r["source"]=="visitor"]
+assert len(d)==1, d
+r=d[0]
+assert r["artifact_id"]==sys.argv[1] and r["reported_url"]==sys.argv[2]+"x.html" and r["category"]=="phishing" and r["status"]=="open", r
+assert r["artifact"] and r["artifact"]["url"]=="" and r["owner_username"]==sys.argv[3], r
+print(r["id"])' "$RID" "$RURL" "$USER") || die "report in the admin queue"
+curl -fsS -b "$CJ" "${H[@]}" -X POST "$BASE/api/v1/admin/reports/$REPID/revoke" | python3 -c 'import json,sys
+r=json.load(sys.stdin)
+assert r["status"]=="resolved" and r["artifact"]["revoked_by_admin"] and r["history"][-1]["action"]=="artifact.revoke", r' || die "revoke from the queue"
+[ "$(code_of "${DOC[@]}" "$RURL")" = 404 ] || die "revoked from the queue, link still works"
+[ "$($R info "$RID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["revoked_by_admin"])')" = True ] || die "owner sees the administrator's revocation"
+mkdir -p "$WORK/exe-site"
+printf '<p>downloads</p>' > "$WORK/exe-site/index.html"
+printf 'MZ not really a program' > "$WORK/exe-site/setup.exe"
+EURL=$($R share "$WORK/exe-site" -q)
+EID=$($R info "$EURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports" | python3 -c 'import json,sys
+d=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
+assert len(d)==1 and d[0]["source"]=="system" and d[0]["category"]=="malware" and d[0]["details"]=="setup.exe: Windows program (.exe)" and d[0]["reported_url"]=="", d' "$EID" || die "executable upload flagged"
+curl -fsS "${EURL}setup.exe" | cmp -s - "$WORK/exe-site/setup.exe" || die "flagged file changed"
+APEX=$(python3 -c 'import sys,urllib.parse as u;p=u.urlsplit(sys.argv[1]);print(p.scheme+"://"+p.netloc.split(".",1)[1])' "$RURL")
+[ "$(code_of "$BASE/.well-known/security.txt")" = 404 ] && [ "$(code_of "$APEX/.well-known/security.txt")" = 404 ] || die "security.txt without REDROP_ABUSE_CONTACT"
+pass "abuse reports: gate link, same-origin form, same answer for unknown links, queue, revoke; executable flagged, served unchanged"
+
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)
 SID=$($R info "$SURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
