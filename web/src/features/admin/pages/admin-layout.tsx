@@ -10,6 +10,7 @@ const tabs = [
   { to: paths.adminUsers, label: 'Users' },
   { to: paths.adminInvites, label: 'Invites' },
   { to: paths.adminArtifacts, label: 'Artifacts' },
+  { to: paths.adminReports, label: 'Reports' },
 ]
 
 /** Admin section (guarded by requireAdmin). Admins see artifact metadata only, never links or content. */

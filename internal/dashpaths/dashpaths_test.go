@@ -14,7 +14,7 @@ func TestSPAKnowsServerPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(b)
-	for _, p := range []string{Home, Login, Account, AccountLinked, TokensWelcome, Setup, Invite, Reset} {
+	for _, p := range []string{Home, Login, Account, AccountLinked, TokensWelcome, Report, Setup, Invite, Reset} {
 		if !strings.Contains(src, "'"+p+"'") {
 			t.Errorf("web/src/app/paths.ts does not declare %q", p)
 		}

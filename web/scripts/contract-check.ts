@@ -17,6 +17,7 @@ import * as admin from '@/features/admin/endpoints'
 import * as artifacts from '@/features/artifacts/endpoints'
 import { settingsDefaults, ArtifactSettingsForm, toUpdateRequest } from '@/features/artifacts/schemas'
 import * as auth from '@/features/auth/endpoints'
+import * as reports from '@/features/reports/endpoints'
 import * as tokens from '@/features/tokens/endpoints'
 import { Schema } from 'effect'
 
@@ -28,11 +29,15 @@ const password = process.env.E2E_PASSWORD ?? 'correct-horse-battery'
 ;(globalThis as { location?: unknown }).location = { origin: base, pathname: '/', href: base + '/' }
 
 // fetch with a cookie jar and the browser's same-origin header, like the dashboard.
+// A browser also sends Origin with every POST; the report endpoint requires
+// it to be the server's public origin (read from /auth/config below).
 let cookie = ''
+let publicOrigin = ''
 const browserFetch: typeof fetch = async (input, init) => {
   const headers = new Headers(init?.headers)
   if (cookie) headers.set('cookie', cookie)
   headers.set('sec-fetch-site', 'same-origin')
+  if (publicOrigin && init?.method === 'POST' && String(input instanceof Request ? input.url : input).endsWith('/api/v1/reports')) headers.set('origin', publicOrigin)
   const res = await fetch(input, { ...init, headers })
   const set = res.headers.getSetCookie().map((c) => c.split(';')[0])
   if (set.length) cookie = set.join('; ')
@@ -54,7 +59,9 @@ const program = Effect.gen(function* () {
   check('login signs in (or asks for TOTP)', login._tag === 'SignedIn' || login._tag === 'TotpRequired')
   const me = yield* auth.getSession
   check('session decodes after login', Option.isSome(me))
-  check('auth config decodes', (yield* auth.config).public_url.startsWith('http'))
+  const config = yield* auth.config
+  check('auth config decodes', config.public_url.startsWith('http'))
+  publicOrigin = config.public_url
 
   const list = yield* artifacts.list({ q: '', status: 'all' })
   check('artifact list decodes', true)
@@ -96,6 +103,19 @@ const program = Effect.gen(function* () {
     check('created invite URL is Redacted', Redacted.value(inv.url).includes('/invite/'))
     check('invite list decodes', (yield* admin.invites).some((i) => i.id === inv.id))
     yield* admin.deleteInvite(inv.id)
+    // Abuse reports (DESIGN.md "Abuse handling"): file one as the report page
+    // does, find it in the queue without a link on its artifact, dismiss it.
+    if (first) {
+      const link = (yield* artifacts.get(first.id)).url
+      yield* reports.submit({ url: link, category: 'other', details: 'contract-check' })
+      const queued = (yield* admin.reports('open')).find((r) => r.artifact_id === first.id && r.details === 'contract-check')
+      check('report reaches the admin queue', queued !== undefined && queued.reported_url === link && queued.artifact !== null && !('url' in queued.artifact))
+      if (queued) {
+        const dismissed = yield* admin.setReportStatus(queued.id, { status: 'dismissed' })
+        check('report dismissal is audited', dismissed.status === 'dismissed' && (dismissed.history ?? []).some((e) => e.action === 'report.dismissed'))
+      }
+    }
+    check('admin report queue decodes', Array.isArray(yield* admin.reports('all')))
     const all = yield* admin.artifacts('', 'all')
     check('admin artifacts decode without links', all.every((a) => !('url' in a)))
     // An administrator's revocation: the owner sees it and cannot undo it.

@@ -9,6 +9,9 @@ import {
   CreateInviteRequest,
   CreatedInvite,
   InviteList,
+  Report,
+  ReportList,
+  ReportStatusUpdate,
   ResetLink,
   Stats,
   User,
@@ -45,3 +48,16 @@ export const setArtifactRevoked = (id: string, revoked: boolean) =>
   )
 
 export const deleteArtifact = (id: string) => RedropApi.use((api) => api.call({ method: 'DELETE', path: ['admin', 'artifacts', id] }))
+
+export const reports = (status: string) =>
+  RedropApi.use((api) => api.call({ method: 'GET', path: ['admin', 'reports'], query: { status }, response: ReportList })).pipe(Effect.map(items))
+
+export const setReportStatus = (id: string, req: typeof ReportStatusUpdate.Type) =>
+  RedropApi.use((api) => api.call({ method: 'PATCH', path: ['admin', 'reports', id], body: json(ReportStatusUpdate, req), response: Report }))
+
+/** The administrator's revocation of the reported artifact; resolves its open reports. */
+export const revokeReported = (id: string) => RedropApi.use((api) => api.call({ method: 'POST', path: ['admin', 'reports', id, 'revoke'], response: Report }))
+
+/** Disables the owner's account and revokes all of its artifacts; resolves their open reports. */
+export const suspendReportedOwner = (id: string) =>
+  RedropApi.use((api) => api.call({ method: 'POST', path: ['admin', 'reports', id, 'suspend'], response: Report }))

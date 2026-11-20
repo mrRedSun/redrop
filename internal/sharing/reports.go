@@ -1,0 +1,309 @@
+package sharing
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/ids"
+	"github.com/mrRedSun/redrop/internal/notify"
+	"github.com/mrRedSun/redrop/internal/store"
+)
+
+// Abuse reports (DESIGN.md "Abuse handling"): anyone may report a link
+// through the form on the app origin; administrators work through the queue
+// on the Moderation port. A report never acts on its own.
+
+// Report categories.
+const (
+	CategoryPhishing = "phishing"
+	CategoryMalware  = "malware"
+	CategoryIllegal  = "illegal"
+	CategorySpam     = "spam"
+	CategoryOther    = "other"
+)
+
+// ReportCategories lists the categories a visitor may choose.
+var ReportCategories = []string{CategoryPhishing, CategoryMalware, CategoryIllegal, CategorySpam, CategoryOther}
+
+// Report limits, in Unicode code points except the URL (bytes).
+const (
+	maxReportURL     = 2048
+	maxReportDetails = 2000
+	maxReportContact = 200
+	maxReportList    = 500
+)
+
+// ReportInput is a report as a visitor files it. Every field is untrusted.
+type ReportInput struct {
+	URL      string
+	Category string
+	Details  string
+	Contact  string
+}
+
+// SetNotifier sets where new reports are announced. Call it before serving;
+// without it, nothing is sent.
+func (s *Service) SetNotifier(n notify.Notifier) { s.notifier = n }
+
+// SubmitReport files a visitor's report from the client network. Rate
+// limits, validation and the global cap answer the same whatever the URL
+// names; past them the answer is always success, whether the report was
+// stored or dropped (an unknown link, a full artifact, or a duplicate from
+// the same network), so the form can't be used to find links.
+func (s *Service) SubmitReport(ctx context.Context, network string, in ReportInput) error {
+	if !s.reportLimiter.Allow(network) {
+		return apperr.RateLimited("Too many reports from your network. Try again later.").WithRetryAfter(s.reportLimiter.Wait(network))
+	}
+	slug, link, err := s.reportedLink(in.URL)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(ReportCategories, in.Category) {
+		return apperr.Invalid("Choose a category.")
+	}
+	details := strings.TrimSpace(cleanText(in.Details, true))
+	if utf8.RuneCountInString(details) > maxReportDetails {
+		return apperr.Invalid("Describe the problem in up to %d characters.", maxReportDetails)
+	}
+	contact := strings.TrimSpace(cleanText(in.Contact, false))
+	if utf8.RuneCountInString(contact) > maxReportContact {
+		return apperr.Invalid("The contact can have up to %d characters.", maxReportContact)
+	}
+	if n, err := s.db.CountOpenReports(ctx, store.ReportVisitor); err != nil {
+		return apperr.Internal(err)
+	} else if n >= s.cfg.ReportsMaxOpen {
+		return s.queueFull()
+	}
+	a, err := s.Lookup(ctx, slug)
+	if err != nil {
+		return nil // unknown link: dropped, answered like a stored report
+	}
+	r := &store.Report{ArtifactID: a.ID, OwnerID: a.UserID, URL: link, Category: in.Category, Details: details, Contact: contact, Network: s.networkKey(network)}
+	stored, err := s.db.AddVisitorReport(ctx, r, s.cfg.ReportsMaxOpen, s.cfg.ReportsMaxOpenPerArtifact)
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	if stored {
+		s.log.Info("abuse report", "report", r.ID, "id", a.ID, "category", r.Category)
+		s.announce(r, a.OwnerUsername)
+	}
+	return nil
+}
+
+func (s *Service) queueFull() error {
+	msg := "This server isn't accepting reports right now."
+	if c, ok := strings.CutPrefix(s.cfg.AbuseContact, "mailto:"); ok {
+		msg += " Write to " + c + " instead."
+	} else if s.cfg.AbuseContact != "" {
+		msg += " Use " + s.cfg.AbuseContact + " instead."
+	}
+	return apperr.RateLimited("%s", msg)
+}
+
+// reportedLink checks that raw is a link to an artifact host of this
+// server's content domain, by syntax only, and returns its slug and the link
+// to store (without a fragment).
+func (s *Service) reportedLink(raw string) (slug, link string, err error) {
+	bad := apperr.Invalid("Enter the address of a page shared from this server, like %s.", s.cfg.ArtifactURL("amber-otter-quilt-river"))
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > maxReportURL {
+		return "", "", bad
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Opaque != "" {
+		return "", "", bad
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	label, ok := strings.CutSuffix(host, "."+s.cfg.ContentHost())
+	if !ok || !ids.ValidSlug(label) {
+		return "", "", bad
+	}
+	u.Fragment, u.RawFragment = "", ""
+	port := u.Port()
+	u.Host = host
+	if port != "" {
+		u.Host = net.JoinHostPort(host, port)
+	}
+	return label, u.String(), nil
+}
+
+// networkKey is the keyed hash of a client network that a report keeps
+// while it is open, for the duplicate check. The address itself is never
+// stored.
+func (s *Service) networkKey(network string) string {
+	m := hmac.New(sha256.New, s.reportKey)
+	m.Write([]byte(network))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// announce sends the webhook notification of a stored report: category,
+// artifact ID and owner only. Report text, contacts, links and file names
+// are untrusted and never leave the server this way.
+func (s *Service) announce(r *store.Report, owner string) {
+	title := "redrop: abuse report"
+	if r.Source == store.ReportSystem {
+		title = "redrop: upload flagged"
+	}
+	s.notifier.Notify(notify.Message{
+		Level:   "warning",
+		Title:   title,
+		Message: fmt.Sprintf("Category %s, artifact %s, owner %s.", r.Category, r.ArtifactID, owner),
+		Key:     "redrop-report-" + r.ID,
+	})
+}
+
+// --- the admin queue ---
+
+// AdminReport is a report as the queue shows it. Like AdminArtifact it
+// carries no link to the artifact, with one exception: ReportedURL, the
+// link a visitor submitted with the report (DESIGN.md "Admin queue").
+type AdminReport struct {
+	ID          string
+	Source      string // visitor | system
+	Category    string
+	Details     string // untrusted: the reporter's text, or the finding
+	Contact     string // untrusted, unverified
+	ReportedURL string // visitor reports: the link as submitted; "" for system reports
+	Version     int    // system reports: the flagged version
+	Status      string
+	CreatedAt   time.Time
+	ClosedAt    *time.Time
+	ClosedBy    string
+
+	ArtifactID     string
+	Artifact       *AdminArtifact // nil once the artifact is deleted
+	OwnerUsername  string
+	OwnerSuspended bool // the owner's account is disabled
+	History        []AuditEntry
+}
+
+// AuditEntry is one action on a report.
+type AuditEntry struct {
+	At     time.Time
+	Actor  string
+	Action string
+	Detail string
+}
+
+// Reports lists the queue: status is open (the default), resolved,
+// dismissed or all. Newest first, at most maxReportList.
+func (m *Moderation) Reports(ctx context.Context, status string) ([]AdminReport, error) {
+	switch status {
+	case "":
+		status = store.ReportOpen
+	case "all":
+		status = ""
+	case store.ReportOpen, store.ReportResolved, store.ReportDismissed:
+	default:
+		return nil, apperr.Invalid("status must be open, resolved, dismissed or all")
+	}
+	rows, err := m.s.db.ListReports(ctx, status, maxReportList)
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+	return m.reportViews(ctx, rows)
+}
+
+func (m *Moderation) reportViews(ctx context.Context, rows []store.Report) ([]AdminReport, error) {
+	artifactIDs := make([]string, 0, len(rows))
+	reportIDs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		artifactIDs = append(artifactIDs, r.ArtifactID)
+		reportIDs = append(reportIDs, r.ID)
+	}
+	slices.Sort(artifactIDs)
+	arts, err := m.s.db.ArtifactsByIDs(ctx, slices.Compact(artifactIDs))
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+	hist, err := m.s.db.AuditFor(ctx, reportIDs)
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+	out := make([]AdminReport, 0, len(rows))
+	for _, r := range rows {
+		v := AdminReport{ID: r.ID, Source: r.Source, Category: r.Category, Details: r.Details, Contact: r.Contact, ReportedURL: r.URL,
+			Version: r.Version, Status: r.Status, CreatedAt: r.CreatedAt, ClosedAt: r.ClosedAt, ClosedBy: r.ClosedBy,
+			ArtifactID: r.ArtifactID, OwnerUsername: r.OwnerUsername, OwnerSuspended: r.OwnerDisabled, History: []AuditEntry{}}
+		if a, ok := arts[r.ArtifactID]; ok {
+			av := m.s.adminView(a)
+			v.Artifact = &av
+		}
+		for _, e := range hist[r.ID] {
+			v.History = append(v.History, AuditEntry{At: e.At, Actor: e.Actor, Action: e.Action, Detail: e.Detail})
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func (m *Moderation) report(ctx context.Context, id string) (AdminReport, error) {
+	r, err := m.s.db.ReportByID(ctx, id)
+	if err != nil {
+		return AdminReport{}, reportErr(err)
+	}
+	views, err := m.reportViews(ctx, []store.Report{*r})
+	if err != nil {
+		return AdminReport{}, err
+	}
+	return views[0], nil
+}
+
+// SetReportStatus resolves, dismisses or reopens a report.
+func (m *Moderation) SetReportStatus(ctx context.Context, admin, id, status string) (AdminReport, error) {
+	if status != store.ReportOpen && status != store.ReportResolved && status != store.ReportDismissed {
+		return AdminReport{}, apperr.Invalid("status must be open, resolved or dismissed")
+	}
+	if err := m.s.db.SetReportStatus(ctx, id, status, admin); err != nil {
+		return AdminReport{}, reportErr(err)
+	}
+	m.s.log.Info("admin changed report", "admin", admin, "report", id, "status", status)
+	return m.report(ctx, id)
+}
+
+// RevokeReported revokes the reported artifact as an administrator (the
+// owner can't undo it) and resolves its open reports.
+func (m *Moderation) RevokeReported(ctx context.Context, admin, id string) (AdminReport, error) {
+	detail, err := m.s.db.RevokeReported(ctx, id, admin)
+	if err != nil {
+		return AdminReport{}, reportErr(err)
+	}
+	m.s.log.Info("admin revoked reported artifact", "admin", admin, "report", id, "detail", detail)
+	return m.report(ctx, id)
+}
+
+// SuspendReportedOwner suspends the reported artifact's owner: the account
+// is disabled (no sign-in, no API tokens, so no publishing), every artifact
+// it owns is revoked as an administrator, and their open reports are
+// resolved. Administrator accounts are refused.
+func (m *Moderation) SuspendReportedOwner(ctx context.Context, admin, id string) (AdminReport, error) {
+	detail, err := m.s.db.SuspendReported(ctx, id, admin)
+	if err != nil {
+		return AdminReport{}, reportErr(err)
+	}
+	m.s.log.Info("admin suspended reported owner", "admin", admin, "report", id, "detail", detail)
+	return m.report(ctx, id)
+}
+
+func reportErr(err error) error {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return apperr.NotFound("report not found")
+	case errors.Is(err, store.ErrArtifactGone):
+		return apperr.Conflict("the reported artifact was deleted")
+	case errors.Is(err, store.ErrOwnerIsAdmin):
+		return apperr.Conflict("the owner is an administrator; change their role on the Users page before suspending them")
+	}
+	return apperr.Internal(err)
+}
