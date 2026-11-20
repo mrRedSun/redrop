@@ -916,8 +916,13 @@ counting. It differs from the plain viewer:
 * Its script (`viewer.js`, with `e2e.js`) reads the key, checks it,
   decrypts the manifest (which checks the content before anything is
   framed, and gives the tab title), registers the worker, gives it the
-  key, and only then points the frame at `/__redrop/v/<N>/<page>`. The CSP adds `worker-src` for the worker
-  script and `connect-src` for `/__redrop/v/`, nothing else.
+  key, and only then points the frame at `/__redrop/v/<N>/<page>`. The
+  CSP adds `e2e.js` to `script-src`, `worker-src` for the worker script
+  and `connect-src` for `/__redrop/v/`, nothing else.
+* **A fragment the visitor changes** (a full link pasted into a tab that
+  is already on the page) reloads the viewer, which then reads it. The
+  viewer's own address bar updates use `history.replaceState`, which fires
+  no `hashchange`, so only the visitor's changes do.
 * **Address bar, paths kept private.** The address bar shows the frame's
   page in the fragment, not the path: `https://<slug>…/#/docs/a.html#part`
   (plus `?redrop-version=N` for an older version). A reload sends the
