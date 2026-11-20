@@ -1218,3 +1218,129 @@ version stays live until the rebuilt content publishes as a normal change.
 Authentication and not-found errors use the normal CLI exit codes. Cancellation
 returns success. The command creates immutable versions; it does not squash
 history or inject live-reload code into uploaded artifacts.
+
+## Live reload
+
+While the owner runs `redrop watch`, viewers of the current version see each
+new version without reloading by hand. It answers the rest of issue #15. The
+issue's "injected script" is replaced by the principle above: nothing is added
+to the artifact. redrop's own viewer page watches for a new current version
+and reloads its frame.
+
+### Decisions
+
+* **Opt-in and temporary.** Live mode is on for an artifact only while an
+  owner's `redrop watch` holds a **live lease** on it. `--live` is the
+  default for `watch`; `--no-live` turns it off. The CLI renews the lease
+  while it runs and releases it when it stops; a watcher that dies lets it
+  lapse.
+* **Viewer page only.** Live reload needs redrop's viewer page: an `html` or
+  `bundle` artifact with the info button on, showing the current version.
+  * `--no-info` and `?redrop-info=0` (direct views) get no live reload:
+    there is no redrop page to do it.
+  * `file` artifacts get no live reload: their page is redrop's file page,
+    with no frame to reload, and reloading the page itself would be a new
+    top-level load.
+  * A viewer showing an older version (`?redrop-version=N`) is not live.
+  * The server refuses a lease (`409`) for an artifact with the info button
+    off or a `file` current version, and `watch` says so and carries on
+    without live reload.
+* **When it is off, viewers make no extra requests.** The viewer page
+  includes the live element only while a lease is active. A page whose
+  stream ends is told so (`end`) and stops; it does not poll.
+* **Views.** Reloading never uses a view, so live reload also works on
+  view-limited and `--once` links:
+  * the stream request is not a page load and never records a view;
+  * the frame reload is a frame navigation (`Sec-Fetch-Dest: iframe`), which
+    never counts (see "Gates and view counting");
+  * gated links count only at Open, and a reload never presses Open. A visit
+    grant that ran out while the page was open shows the gate in the frame,
+    exactly as following a link in the frame would.
+
+### Lease
+
+* `PUT /api/v1/artifacts/{id}/live/{session}` creates or renews the lease of
+  one watch session; `DELETE` on the same path releases it. Owner only (token
+  or session); other users' artifacts are `404`. `session` is chosen by the
+  CLI: 16 to 64 characters of `[A-Za-z0-9_-]`. The answer is
+  `{"expires_at", "renew_after_seconds"}`.
+* A lease lasts `REDROP_LIVE_LEASE` (default 60 s). The CLI renews it every
+  third of that (20 s by default), so a missed renewal or two does not end
+  it. Live mode is on while any session's lease is unexpired, so two
+  watchers on one artifact don't switch each other off.
+* **Bounds.** At most 8 sessions per artifact (`409` beyond) and 10,000
+  leases on the server (`429` beyond). Expired leases are pruned by the
+  maintenance sweep and whenever a lease on the same artifact changes.
+* Leases live in the server's memory, not the database: there is no
+  migration, and a restart drops them. The CLI renews within 20 s and the
+  viewer reconnects after 25 s (`retry`), so a restart costs at most one
+  missed update for open pages. Rolling back the binary just removes the
+  feature.
+
+### Stream
+
+`GET /__redrop/live` on the artifact's own host is a server-sent events
+stream.
+
+* **Access.** The request passes the same decision as the content
+  (`sharing.Decide`: not expired, revoked or used up, password entered,
+  visit grant valid; an owner preview counts), live mode must be on, and the
+  current version must be framed. `Sec-Fetch-Site`, when present, must be
+  `same-origin`. Every failure is **the identical miss**: byte for byte the
+  answer to an unknown `/__redrop/` path, spending one token of miss budget.
+  So with live mode off, the endpoint can't be told apart from an unknown
+  path, and a visitor without access learns nothing. No response carries
+  `Access-Control-*` headers.
+* **Events.**
+  * On connect: `retry: 25000` and a `version` event with the current
+    version, so a page that missed an update between its load and the
+    connection catches up.
+  * `version` with `{"version", "published", "size", "files"}` whenever the
+    current version changes (a publish or a rollback). These are the
+    shown-version facts the info panel already gives a viewer.
+  * `end` when live mode stops, access ends, or the link is revoked, rotated
+    or deleted. The page closes the stream and makes no more requests.
+  * A comment line (`: keep-alive`) every `REDROP_LIVE_KEEPALIVE` (default
+    20 s, at most 29 s), because Cloudflare closes connections idle for about
+    100 s.
+* **Rechecks.** The stream re-reads the artifact and re-runs the access and
+  live checks on every keep-alive and on every change to the artifact
+  (publish, rollback, settings, revoke, rotate, delete, lease release).
+  Revocation, a password change and a released lease end the stream at once;
+  an expired visit grant or a lapsed lease within one keep-alive interval.
+* **Notification.** The sharing service keeps, per artifact, the set of open
+  streams. A change only "pokes" each stream through a one-slot channel and
+  never blocks: pokes coalesce, and each stream reads the artifact itself.
+* **Bounds.** At most `REDROP_LIVE_MAX_STREAMS` (default 1000) streams on
+  the server, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` (default 100) per
+  artifact, and 16 per client network (keyed like the miss limiter, so a
+  team behind one address still fits). Beyond
+  them the answer is `503` with `Retry-After`; the page shows no live
+  indicator. Each write has a 10 s deadline, so a viewer that stops reading
+  is dropped instead of holding a goroutine and buffers. A stream holds
+  about one goroutine and a few KB.
+* **Shutdown.** Streams end when the server starts shutting down, without
+  `end`, so pages reconnect to the restarted server.
+
+### Viewer side
+
+* The viewer page renders a hidden "Live" row in the info panel
+  (`#rd-live`, with the stream path and the shown version) only while live
+  mode is on, and its CSP adds `connect-src <origin>/__redrop/live`.
+  `viewer.js` opens an `EventSource`; the row shows while the stream is
+  open and hides when it ends or fails for good.
+* **Reload.** On a `version` event for a version other than the one shown,
+  `viewer.js` calls `location.reload()` on the frame's window, so the frame
+  keeps its path, query and fragment and adds no history entry. It skips the
+  reload when the frame is on another origin or on a `/__redrop/` page (an
+  older version's files). Events that arrive during a reload trigger one
+  more reload once it finishes.
+* **Scroll.** Before reloading it reads the frame's scroll position. After
+  the reload, if the browser left the page at the top, it scrolls the frame
+  back. Reading the scroll position, `location.reload()` and `scrollTo()` are
+  the only things the viewer does with the artifact's window beyond what
+  "Address bar" lists; nothing is written to its document.
+* **Panel.** The panel's version line, size, "current" mark and the feedback
+  form's version follow the event, so comments are filed against the version
+  on screen. The version list is otherwise as it was when the page loaded; a
+  version published live appears as a new row without a note.
