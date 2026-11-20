@@ -1419,7 +1419,7 @@ app origin and on the content apex:
 Contact: mailto:abuse@example.com
 # Report a shared link that is abusive: phishing, malware, illegal content, spam.
 Contact: https://redrop.example.com/report
-Expires: <one year from the request, in UTC>
+Expires: <180 days from the request, in UTC>
 Preferred-Languages: en
 Canonical: https://redrop.example.com/.well-known/security.txt
 ```
