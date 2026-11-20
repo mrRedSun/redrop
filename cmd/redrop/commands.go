@@ -542,11 +542,14 @@ func listCmd() *cobra.Command {
 				if len(title) > 48 {
 					title = title[:47] + "…"
 				}
-				status := a.Status
-				if a.Kind == api.KindTunnel && a.Status == api.StatusActive {
-					status = tunnelState(&a)
+				status, size := a.Status, human(a.Size)
+				if a.Kind == api.KindTunnel {
+					size = "-"
+					if a.Status == api.StatusActive {
+						status = tunnelState(&a)
+					}
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, status, a.Kind, human(a.Size), views, until(a.ExpiresAt), acc, title)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.ID, status, a.Kind, size, views, until(a.ExpiresAt), acc, title)
 			}
 			return w.Flush()
 		},
