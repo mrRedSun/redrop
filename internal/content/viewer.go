@@ -77,8 +77,8 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	}
 	data.Info = panelFor(h.sharing.ViewerInfo(r.Context(), a, snap), r.URL)
 	data.Info.Feedback = h.sharing.FeedbackOpen(a)
-	data.Info.Report = h.pages.reportLink(h.selfOrigin(a) + selfRef(r.URL.RequestURI()))
 	self := h.selfOrigin(a)
+	data.Info.Report = h.pages.reportLink(self + selfRef(r.URL.RequestURI()))
 	// frame-src also governs where the frame may navigate, so it allows the
 	// web at large; the viewer itself loads nothing but its own two files.
 	navigable := "https:"

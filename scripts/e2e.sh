@@ -404,7 +404,7 @@ PUB=$(curl -fsS "$BASE/api/v1/auth/config" | python3 -c 'import json,sys;print(j
 RURL=$($R share "$WORK/page-v1.html" --password letmein-please -q)
 RID=$($R info "$RURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 RENC=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote_plus(sys.argv[1]))' "$RURL")
-curl -fsS "${DOC[@]}" "$RURL" | grep -qF "href=\"$PUB/report#url=$RENC\"" || die "gate page links the report form with the page"
+curl -fsS "${DOC[@]}" "$RURL" | grep -qF "href=\"$PUB/report#url=$RENC\" target=\"_blank\"" || die "gate page links the report form with the page"
 [ "$(code_of "$BASE/report")" = 200 ] || die "report page"
 rbody() { python3 -c 'import json,sys;print(json.dumps({"url":sys.argv[1],"category":"phishing","details":"e2e: fake sign-in","contact":"e2e"}))' "$1"; }
 RH=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin')
