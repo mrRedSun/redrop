@@ -17,7 +17,13 @@ import (
 
 // tunnelKeepAlive is how often the CLI pings the server. Cloudflare drops a
 // WebSocket after about 100 idle seconds; a ping is WebSocket data.
-const tunnelKeepAlive = 30 * time.Second
+// tunnelWriteTimeout is how long a frame or a ping's answer may wait to be
+// sent; pings queue behind data, so a slow uplink needs more than yamux's
+// 10-second default. The server uses the same values.
+const (
+	tunnelKeepAlive    = 30 * time.Second
+	tunnelWriteTimeout = 30 * time.Second
+)
 
 // TunnelRequest describes one proxied request for --log: never headers,
 // bodies or the query string.
@@ -35,6 +41,7 @@ type TunnelRequest struct {
 func ServeTunnelSession(ctx context.Context, conn net.Conn, target *TunnelTarget, onRequest func(TunnelRequest)) error {
 	cfg := yamux.DefaultConfig()
 	cfg.KeepAliveInterval = tunnelKeepAlive
+	cfg.ConnectionWriteTimeout = tunnelWriteTimeout
 	cfg.LogOutput = io.Discard
 	sess, err := yamux.Server(conn, cfg)
 	if err != nil {

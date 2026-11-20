@@ -1321,7 +1321,10 @@ session (yamux enforces it).
 
 **Keepalive.** Both ends send a yamux ping every 30 seconds, as WebSocket
 data, so Cloudflare (which drops a WebSocket after about 100 idle seconds)
-keeps the connection, and a dead peer is noticed within about 40 seconds.
+keeps the connection. The answer may take 30 seconds (yamux's default is
+10): it waits in the same send queue as data frames, and a slow uplink with
+many streams sending must not look like a dead peer. A dead peer is noticed
+within about a minute.
 
 **Cancellation.** When a visitor goes away, the request's context ends,
 the server's transport closes the stream, the CLI's `http.Server` sees

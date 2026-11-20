@@ -31,6 +31,13 @@ import (
 // a WebSocket after about 100 idle seconds; a ping is WebSocket data.
 const keepAlive = 30 * time.Second
 
+// writeTimeout bounds how long a frame, a keepalive ping's answer included,
+// may wait in the session's send queue. A ping queues behind data frames,
+// so yamux's 10-second default could drop a healthy connection on a slow
+// uplink with many streams sending; a dead peer is still noticed within
+// about a minute.
+const writeTimeout = 30 * time.Second
+
 // maxBudgetKeys bounds the byte-budget table. Only connected tunnels create
 // keys, and the per-user limit bounds those, so it never fills in practice;
 // when it does, a new tunnel is refused traffic (fail closed) rather than
@@ -300,12 +307,14 @@ func (r *Registry) endLocked(l *link, code int, why string) {
 	l.finish(code, why)
 }
 
-// yamuxConfig is the session configuration on both ends: 256 KiB windows
-// (yamux's minimum), keepalive pings every 30 seconds, and yamux's own
+// yamuxConfig is the server's session configuration: 256 KiB windows
+// (yamux's minimum), keepalive pings every 30 seconds with 30 seconds to
+// answer (the CLI uses the same, see pkg/client), and yamux's own
 // diagnostics at debug level (they never hold request data).
 func yamuxConfig(logger *slog.Logger) *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.KeepAliveInterval = keepAlive
+	c.ConnectionWriteTimeout = writeTimeout
 	c.LogOutput = nil
 	c.Logger = log.New(slogWriter{logger}, "", 0)
 	return c
