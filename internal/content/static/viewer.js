@@ -1,8 +1,9 @@
 // redrop viewer page and file page (DESIGN.md "Viewer frame"). Loaded from
 // /__redrop/viewer.js; the pages carry no inline script. It adds local and
 // relative times to the server-rendered info panel, a live expiry countdown
-// while the panel is open, keeps the address bar on the frame's page, and
-// sends the panel's feedback form (DESIGN.md "Viewer feedback").
+// while the panel is open, keeps the address bar on the frame's page, sends
+// the panel's feedback form (DESIGN.md "Viewer feedback"), and reloads the
+// frame when the owner's watch publishes a version (DESIGN.md "Live reload").
 (function () {
   'use strict'
   var doc = document
@@ -22,9 +23,10 @@
       e.textContent = (t > Date.now() ? 'Expires ' : 'Expired ') + rel(t)
     })
   }
-  each('[data-abs]', function (e) {
+  function absolute(e) {
     e.textContent = new Date(e.getAttribute('data-abs')).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-  })
+  }
+  each('[data-abs]', absolute)
   tick()
   var panel = doc.getElementById('rd-info'), timer = 0
   if (panel) {
@@ -244,4 +246,108 @@
   })
   // The server never sees the fragment: hand it to the frame.
   if (location.hash) frame.src = frame.getAttribute('src') + location.hash
+
+  // ---- live reload ----
+  // The page carries #rd-live only while the owner's watch holds a lease.
+  // On a new current version the frame's own page is reloaded: the same
+  // path, query and fragment, and no history entry. Nothing is written to
+  // the artifact's document; its scroll position is read before the reload
+  // and, if the browser left the page at the top, restored after it.
+  var liveRow = doc.getElementById('rd-live')
+  if (liveRow && window.EventSource) live(liveRow)
+
+  function live(row) {
+    var shown = Number(row.getAttribute('data-version'))
+    var es = new window.EventSource(row.getAttribute('data-src'))
+    var pending = false, again = false, saved = null
+    es.addEventListener('open', function () { row.hidden = false })
+    // "end": live mode stopped or access ended. No more requests.
+    es.addEventListener('end', function () { es.close(); row.hidden = true })
+    // A refused or failed stream is closed for good (readyState 2);
+    // a dropped one reconnects by itself.
+    es.addEventListener('error', function () { if (es.readyState === 2) row.hidden = true })
+    es.addEventListener('version', function (e) {
+      var v = null
+      try { v = JSON.parse(e.data) } catch (x) { return }
+      if (!v || typeof v.version !== 'number' || v.version === shown) return
+      shown = v.version
+      panelShows(v)
+      reload()
+    })
+    function reload() {
+      if (pending) { again = true; return }
+      try {
+        var win = frame.contentWindow, loc = win.location
+        // Another origin's page, or redrop's own (an older version's
+        // files), is left alone.
+        if (loc.origin !== location.origin || loc.pathname.indexOf('/__redrop/') === 0) return
+        saved = { x: win.scrollX, y: win.scrollY }
+        pending = true
+        loc.reload()
+      } catch (x) {
+        pending = false
+      }
+    }
+    frame.addEventListener('load', function () {
+      if (!pending) return
+      pending = false
+      var at = saved
+      saved = null
+      try {
+        var win = frame.contentWindow
+        if (at && (at.x || at.y) && !win.scrollX && !win.scrollY) win.scrollTo(at.x, at.y)
+      } catch (x) {
+        // Another origin by now.
+      }
+      // A version that arrived during the reload may not be in it.
+      if (again) { again = false; reload() }
+    })
+  }
+
+  // panelShows makes the panel describe version v, now current and shown.
+  function panelShows(v) {
+    var line = doc.getElementById('rd-shown')
+    if (line) {
+      var when = doc.createElement('span'), abs = doc.createElement('small')
+      when.setAttribute('data-rel', v.published)
+      abs.setAttribute('data-abs', v.published)
+      line.textContent = 'Version ' + v.version + ', published '
+      line.appendChild(when)
+      line.appendChild(abs)
+      absolute(abs)
+    }
+    var size = doc.getElementById('rd-size')
+    if (size) size.textContent = v.size + ' in ' + v.files + ' file' + (v.files === 1 ? '' : 's')
+    // Comments are filed against the version on screen.
+    var fb = doc.getElementById('rd-fb')
+    if (fb) {
+      fb.setAttribute('data-version', String(v.version))
+      fb.setAttribute('data-current', String(v.version))
+    }
+    var list = doc.querySelector('.rd-revs'), cur = null
+    if (list) {
+      each('.rd-revs > li', function (li) {
+        li.removeAttribute('aria-current')
+        Array.prototype.forEach.call(li.querySelectorAll('.rd-tag'), function (t) { li.removeChild(t) })
+        if (li.getAttribute('data-rev') === String(v.version)) cur = li
+      })
+      if (!cur) {
+        cur = doc.createElement('li')
+        cur.setAttribute('data-rev', String(v.version))
+        cur.appendChild(doc.createTextNode('Version ' + v.version))
+        cur.appendChild(doc.createTextNode(' · '))
+        var t = doc.createElement('span')
+        t.setAttribute('data-rel', v.published)
+        cur.appendChild(t)
+        list.insertBefore(cur, list.firstChild)
+      }
+      var tag = doc.createElement('span')
+      tag.className = 'rd-tag'
+      tag.textContent = 'current'
+      cur.insertBefore(tag, cur.firstChild.nextSibling)
+      cur.insertBefore(doc.createTextNode(' '), tag)
+      cur.setAttribute('aria-current', 'page')
+    }
+    tick()
+  }
 })()

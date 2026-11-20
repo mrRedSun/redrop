@@ -31,6 +31,11 @@ body.rd-viewer{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:c
 .rd-panel a:focus-visible{outline:2px solid var(--rd-acc);outline-offset:1px}
 .rd-revs li[aria-current]{font-weight:600}
 .rd-tag{font-size:11px;padding:0 5px;border:1px solid var(--rd-bd);border-radius:999px;color:var(--rd-mut);font-weight:400}
+.rd-live{display:flex;align-items:center;gap:6px;font-weight:600}
+.rd-live[hidden]{display:none}
+.rd-dot{flex:none;width:8px;height:8px;border-radius:50%;background:#16a34a}
+@media (prefers-reduced-motion:no-preference){.rd-dot{animation:rd-pulse 2s ease-in-out infinite}}
+@keyframes rd-pulse{50%{opacity:.35}}
 .rd-note{display:block;color:var(--rd-mut);font-size:12px;overflow-wrap:anywhere}
 .rd-fb{margin:0;padding:0}
 .rd-fb[hidden],.rd-fb-quote[hidden]{display:none}
