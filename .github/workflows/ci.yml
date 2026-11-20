@@ -82,7 +82,9 @@ jobs:
             echo "version=0.0.0-main+${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
           fi
           echo "commit=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # The commit time in UTC, as the release job stamps it, so an image
+          # and the release binaries of one tag report the same date.
+          echo "date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Build for scanning (amd64)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -129,3 +131,81 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+  # Release binaries, published only after the same checks the image waits
+  # for. Split into build+attest (holds the OIDC token) and publish (holds
+  # the release write), so the third-party release action never runs next to
+  # an attestation-signing token. Runs on v* tags only.
+  release-build:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # sign build provenance attestations
+      attestations: write # write attestations to the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # A hermetic release build; the shared cache is not part of it.
+          cache: false
+      - name: Build CLI binaries
+        env:
+          # The tag itself is the version; main builds stamp
+          # 0.0.0-main+<sha> instead (see docs/RELEASING.md).
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          # Commit time in UTC, the same stamp the image job uses.
+          DATE=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os=${target%/*}; arch=${target#*/}; ext=""; [ "$os" = windows ] && ext=.exe
+            # No VCS build info: the image's CLI (built without .git) has none.
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT::12} -X main.date=${DATE}" \
+              -o "dist/redrop-$os-$arch$ext" ./cmd/redrop
+          done
+          cd dist && sha256sum redrop-* > SHA256SUMS
+      - name: Provenance attestations for the binaries
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Upload artifacts for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release-publish:
+    needs: release-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release and upload assets
+    steps:
+      - name: Download built binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist/
+      # Tags with a - (v1.0.0-rc1) are prereleases: they must not become
+      # GitHub's "latest", which `redrop self-update` installs by default.
+      - name: GitHub Release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          draft: false
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/redrop-*
+            dist/SHA256SUMS
