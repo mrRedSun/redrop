@@ -21,7 +21,10 @@ func TestParseAndCompareSemver(t *testing.T) {
 		{"v1.2.3", [3]int{1, 2, 3}, true},
 		{"1.2.3", [3]int{1, 2, 3}, true},
 		{"v0.0.0", [3]int{0, 0, 0}, true},
-		{"0.0.0-main+abc1234", [3]int{0, 0, 0}, true},
+		{"0.0.0-main+abc1234", [3]int{}, false}, // main builds are not comparable
+		{"v1.2.0-rc1", [3]int{}, false},         // nor are prereleases
+		{"v1.2.3+build", [3]int{}, false},
+		{"v1.2.3x", [3]int{}, false},
 		{"v10.20.30", [3]int{10, 20, 30}, true},
 		{"dev", [3]int{}, false},
 		{"preview-abc1234", [3]int{}, false},
@@ -56,6 +59,12 @@ func TestVersionOutdated(t *testing.T) {
 		{"dev", "v1.0.0", false},       // unknown CLI versions never warn
 		{"v1.0.0", "", false},          // no stated minimum
 		{"v1.0.0", "preview-x", false}, // unparseable minimum never warns
+		// M-2: the CLI production's /install.sh serves, built from the
+		// server's own commit, must not warn when the minimum is raised.
+		{"0.0.0-main+abc123456789", "v0.2.0", false},
+		{"0.0.0-main+abc123456789", "0.2.0", false},
+		{"v1.2.0-rc1", "v1.2.0", false}, // prereleases are not comparable
+		{"v1.1.9", "v1.2.0-rc1", false}, // nor is a prerelease minimum
 	}
 	for _, c := range cases {
 		if got := versionOutdated(c.cli, c.min); got != c.want {
@@ -100,6 +109,7 @@ func TestVersionCommandWarnsOnOldCLI(t *testing.T) {
 		{"older than minimum", "v0.9.0", `{"version":"v1.1.0","commit":"abc1234defg","date":"2026-11-18T00:00:00Z","min_cli_version":"v1.0.0"}`, true},
 		{"equal is fine", "v1.0.0", `{"version":"v1.1.0","commit":"abc1234defg","date":"2026-11-18T00:00:00Z","min_cli_version":"v1.0.0"}`, false},
 		{"newer is fine", "v1.2.0", `{"version":"v1.1.0","commit":"abc1234defg","date":"2026-11-18T00:00:00Z","min_cli_version":"v1.0.0"}`, false},
+		{"main build never warns", "0.0.0-main+abc123456789", `{"version":"v1.1.0","commit":"abc1234defg","date":"2026-11-18T00:00:00Z","min_cli_version":"v1.0.0"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			version = tc.cli
@@ -201,7 +211,9 @@ func TestVersionCommandJSON(t *testing.T) {
 }
 
 // The ldflags stamping: a build with -X must carry the values into the
-// binary's reported version. This compiles and runs the CLI with stamps.
+// binary's reported version. This compiles this package (go test runs in its
+// directory, and the toolchain is always present) and runs it with no
+// configuration, so it cannot reach a server.
 func TestVersionStamping(t *testing.T) {
 	if testing.Short() {
 		t.Skip("compiles the CLI again")
@@ -211,41 +223,31 @@ func TestVersionStamping(t *testing.T) {
 	build := exec.Command("go", "build", "-ldflags",
 		"-X main.version=v9.9.9 -X main.commit=deadbeefcafe -X main.date=2026-11-18T00:00:00Z",
 		"-o", bin, ".")
-	build.Dir = repoRoot(t)
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Skipf("go build unavailable: %v\n%s", err, out)
+		t.Fatalf("go build: %v\n%s", err, out)
 	}
-	cmd := exec.Command(bin, "version")
-	cmd.Env = append(os.Environ(), "REDROP_CONFIG="+filepath.Join(dir, "missing.json"))
-	out, err := cmd.CombinedOutput()
+	cmd := exec.Command(bin, "version", "--json")
+	cmd.Env = []string{"REDROP_CONFIG=" + filepath.Join(dir, "missing.json"), "HOME=" + dir}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "REDROP_") && !strings.HasPrefix(kv, "HOME=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("run stamped binary: %v\n%s", err, out)
 	}
-	for _, want := range []string{"redrop v9.9.9", "deadbeefcafe"} {
-		if !strings.Contains(string(out), want) {
-			t.Errorf("stamped output missing %q: %s", want, out)
-		}
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("version --json: %v\n%s", err, out)
 	}
-	// No config and no --url: the command printed only the CLI lines, which
-	// is what the assertions above checked, without contacting a server.
-}
-
-// repoRoot is the directory holding go.mod: the package under test, or its
-// parent when the test binary is invoked from a subdirectory.
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
+	want := map[string]string{"cli": "v9.9.9", "commit": "deadbeefcafe", "built": "2026-11-18T00:00:00Z"}
+	if len(got) != len(want) {
+		t.Errorf("version --json = %v, want exactly %v (no server fields without configuration)", got, want)
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("go.mod not found above the test directory")
-		}
-		dir = parent
 	}
 }

@@ -39,8 +39,9 @@ func (a *API) getAuthConfig(c fuego.ContextNoBody) (api.AuthConfig, error) {
 	}, nil
 }
 
-// getVersion reports the server build without requiring login, so the CLI
-// can compare versions before it has a token.
+// getVersion reports the server build. It needs no login, like /auth/config:
+// the build is not secret, and installers or monitoring can read it without
+// a token.
 func (a *API) getVersion(fuego.ContextNoBody) (api.ServerVersion, error) {
 	return api.ServerVersion{Version: Version, Commit: Commit, Date: Date, MinCLIVersion: MinCLIVersion}, nil
 }

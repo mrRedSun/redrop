@@ -13,13 +13,16 @@ import (
 	"github.com/mrRedSun/redrop/pkg/client"
 )
 
-// semverRE matches a strict `vX.Y.Z` prefix, the only form compared here.
-// Build-suffix forms (0.0.0-main+sha, prereleases) are not release tags and
-// compare only by their numeric triple.
-var semverRE = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)`)
+// semverRE matches a plain release version, `vX.Y.Z` or `X.Y.Z`, and nothing
+// else. Suffixed versions (0.0.0-main+sha, v1.2.0-rc1) and stamps without a
+// numeric triple (dev, preview builds) are not comparable: main builds track
+// their server rather than the release list, and prereleases do not order
+// like the plain comparison here.
+var semverRE = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
 
-// parseSemver returns the numeric triple of a version string, or false when
-// it does not start with one (e.g. "dev", "preview-abc1234").
+// parseSemver returns the numeric triple of a release version, or false when
+// it is not a plain release: dev and preview stamps, main builds
+// (0.0.0-main+sha) and prereleases (v1.2.0-rc1) never compare.
 func parseSemver(v string) ([3]int, bool) {
 	m := semverRE.FindStringSubmatch(strings.TrimSpace(v))
 	if m == nil {
@@ -34,6 +37,12 @@ func parseSemver(v string) ([3]int, bool) {
 		out[i] = n
 	}
 	return out, true
+}
+
+// isMainBuild reports whether v is a main-branch build stamp
+// (0.0.0-main+sha), the form the server's own /install.sh serves.
+func isMainBuild(v string) bool {
+	return strings.Contains(v, "-main")
 }
 
 // compareSemver compares two numeric triples: -1, 0, or 1.
@@ -73,8 +82,9 @@ func fetchServerVersion(ctx context.Context, c *client.Client) (versionServerInf
 }
 
 // versionOutdated reports whether the CLI is older than the server's stated
-// minimum. Unknown versions (dev builds, "preview-…" stamps) never warn:
-// a development CLI is usually newer than any released minimum.
+// minimum. Only plain releases compare: dev and preview stamps, main builds
+// (which match their own server) and prereleases never warn, and an
+// unparseable minimum never warns.
 func versionOutdated(cliVersion, minCLI string) bool {
 	if minCLI == "" {
 		return false

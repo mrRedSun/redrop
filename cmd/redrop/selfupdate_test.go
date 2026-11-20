@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,14 +17,18 @@ import (
 
 // fakeReleaseServer stands in for GitHub: /repos/<repo>/releases/... for the
 // API and /download/... for the assets, hosted on one httptest server so
-// asset URLs resolve against it.
+// asset URLs resolve against it. SHA256SUMS is listed in the release's
+// assets under /sums/, a different directory from the binary, so a client
+// that guesses the sums URL from the binary's URL fails.
 type fakeReleaseServer struct {
-	tag    string
-	binary []byte // served as the asset; "" means 404 on the asset
-	sums   string // overrides the generated SHA256SUMS when non-empty
-	noSums bool   // 404 on SHA256SUMS
-	// apiRequests records API paths served.
+	tag         string
+	binary      []byte // served as the asset; nil means the asset is not listed
+	sums        string // overrides the generated SHA256SUMS when non-empty
+	noSumsAsset bool   // SHA256SUMS not listed in the release
+	assetURL    string // overrides the binary's browser_download_url
+	// apiRequests and downloads record the paths served.
 	apiRequests []string
+	downloads   []string
 }
 
 func (f *fakeReleaseServer) assetName() string {
@@ -31,48 +37,43 @@ func (f *fakeReleaseServer) assetName() string {
 
 func (f *fakeReleaseServer) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/repos/"):
 			f.apiRequests = append(f.apiRequests, r.URL.Path)
-			assets := "[]"
+			var assets []map[string]string
 			if f.binary != nil {
-				name := f.assetName()
-				assets = fmt.Sprintf(`[{"name":%q,"browser_download_url":"%s/download/%s"}]`, name, serverBase(r), name)
+				u := f.assetURL
+				if u == "" {
+					u = base + "/download/" + f.assetName()
+				}
+				assets = append(assets, map[string]string{"name": f.assetName(), "browser_download_url": u})
 			}
-			fmt.Fprintf(w, `{"tag_name":%q,"assets":%s}`, f.tag, assets)
-		case strings.HasPrefix(r.URL.Path, "/download/"):
-			file := strings.TrimPrefix(r.URL.Path, "/download/")
-			if file == "SHA256SUMS" {
-				if f.noSums {
-					http.NotFound(w, r)
-					return
-				}
-				if f.sums != "" {
-					fmt.Fprint(w, f.sums)
-					return
-				}
-				sum := sha256.Sum256(f.binary)
-				fmt.Fprintf(w, "%x  %s\n", sum, f.assetName())
+			if !f.noSumsAsset {
+				assets = append(assets, map[string]string{"name": "SHA256SUMS", "browser_download_url": base + "/sums/SHA256SUMS"})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"tag_name": f.tag, "assets": assets})
+		case r.URL.Path == "/sums/SHA256SUMS":
+			f.downloads = append(f.downloads, r.URL.Path)
+			if f.sums != "" {
+				fmt.Fprint(w, f.sums)
 				return
 			}
-			if file == f.assetName() && f.binary != nil {
-				w.Write(f.binary)
-				return
-			}
-			http.NotFound(w, r)
+			fmt.Fprintf(w, "%x  %s\n", sha256.Sum256(f.binary), f.assetName())
+		case r.URL.Path == "/download/"+f.assetName() && f.binary != nil:
+			f.downloads = append(f.downloads, r.URL.Path)
+			w.Write(f.binary)
 		default:
 			http.NotFound(w, r)
 		}
 	}
 }
 
-// serverBase reconstructs the server's own base URL from an incoming request.
-func serverBase(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host
+func newFakeRelease(t *testing.T, f *fakeReleaseServer) string {
+	t.Helper()
+	srv := httptest.NewServer(f.handler(t))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
 
 func updateOpts(t *testing.T, apiBase string) selfUpdateOptions {
@@ -95,20 +96,34 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 }
 
+// requireUntouched checks that the binary still holds its old bytes and that
+// no staging file was left beside it.
+func requireUntouched(t *testing.T, exe, want string) {
+	t.Helper()
+	got, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("binary changed: %q", got)
+	}
+	requireDirectoryNames(t, filepath.Dir(exe), []string{filepath.Base(exe)})
+}
+
 // selfUpdate downloads, verifies the checksum, and atomically replaces the
-// binary: the old inode's content survives for an open reader, and the new
-// path has the downloaded bytes.
+// binary: the old inode's content survives for an open reader, the new path
+// has the downloaded bytes, and the old file's mode is kept.
 func TestSelfUpdateAtomicReplace(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX rename semantics")
 	}
 	newBinary := "#!/bin/sh\necho v1.1.0\n"
 	f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte(newBinary)}
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
-
-	o := updateOpts(t, srv.URL)
+	o := updateOpts(t, newFakeRelease(t, f))
 	mustWrite(t, o.exe, "old binary")
+	if err := os.Chmod(o.exe, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	old, err := os.Open(o.exe)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +134,7 @@ func TestSelfUpdateAtomicReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Updated || res.Latest != "1.1.0" {
+	if !res.Updated || !res.UpdateAvailable || res.Downgraded || res.Latest != "1.1.0" || res.Current != "1.0.0" {
 		t.Fatalf("result = %+v", res)
 	}
 	got, err := os.ReadFile(o.exe)
@@ -133,8 +148,8 @@ func TestSelfUpdateAtomicReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o755 {
-		t.Errorf("replaced mode = %04o, want 0755", st.Mode().Perm())
+	if st.Mode().Perm() != 0o750 {
+		t.Errorf("replaced mode = %04o, want the old 0750", st.Mode().Perm())
 	}
 	// The open file descriptor still reads the old bytes: the replacement
 	// was a rename, not an in-place write.
@@ -145,65 +160,213 @@ func TestSelfUpdateAtomicReplace(t *testing.T) {
 	if string(buf) != "old binary" {
 		t.Errorf("old inode was overwritten in place: %q", buf)
 	}
-	// No staging litter beside the binary.
-	entries, err := os.ReadDir(filepath.Dir(o.exe))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "redrop" {
-		names := make([]string, len(entries))
-		for i, e := range entries {
-			names[i] = e.Name()
-		}
-		t.Errorf("directory contains %v; staging file leaked", names)
-	}
+	requireDirectoryNames(t, filepath.Dir(o.exe), []string{"redrop"})
 }
 
 // A checksum mismatch refuses to install anything, and the old binary stays.
 func TestSelfUpdateChecksumMismatch(t *testing.T) {
 	f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("malicious replacement")}
-	// SHA256SUMS claims a digest for a different file.
-	sum := sha256.Sum256([]byte("something else"))
-	f.sums = fmt.Sprintf("%x  %s\n", sum, f.assetName())
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
-
-	o := updateOpts(t, srv.URL)
+	f.sums = fmt.Sprintf("%x  %s\n", sha256.Sum256([]byte("something else")), f.assetName())
+	o := updateOpts(t, newFakeRelease(t, f))
 	mustWrite(t, o.exe, "old binary")
 	_, err := selfUpdate(context.Background(), o)
 	requireExitCode(t, err, exitGeneral)
 	if !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("error = %v", err)
 	}
-	got, _ := os.ReadFile(o.exe)
-	if string(got) != "old binary" {
-		t.Fatalf("binary was replaced despite the mismatch: %q", got)
+	requireUntouched(t, o.exe, "old binary")
+}
+
+// SHA256SUMS that names other files only is refused, before the asset is
+// downloaded at all.
+func TestSelfUpdateSumsMissingEntry(t *testing.T) {
+	f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new")}
+	f.sums = fmt.Sprintf("%x  redrop-darwin-arm64\n", sha256.Sum256([]byte("new")))
+	o := updateOpts(t, newFakeRelease(t, f))
+	mustWrite(t, o.exe, "old binary")
+	_, err := selfUpdate(context.Background(), o)
+	requireExitCode(t, err, exitGeneral)
+	if !strings.Contains(err.Error(), "no checksum for redrop-linux-amd64") {
+		t.Fatalf("error = %v", err)
 	}
-	entries, _ := os.ReadDir(filepath.Dir(o.exe))
-	if len(entries) != 1 {
-		t.Errorf("staging leaked after mismatch: %d entries", len(entries))
+	if len(f.downloads) != 1 {
+		t.Errorf("downloads = %v; the binary must not be fetched without a checksum", f.downloads)
+	}
+	requireUntouched(t, o.exe, "old binary")
+}
+
+// m-7: an oversized SHA256SUMS is refused without being buffered whole, and
+// an asset over the cap is an error, not a truncated "checksum mismatch".
+func TestSelfUpdateSizeCaps(t *testing.T) {
+	t.Run("sums", func(t *testing.T) {
+		f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new")}
+		f.sums = strings.Repeat("\n", maxSumsSize+1)
+		o := updateOpts(t, newFakeRelease(t, f))
+		mustWrite(t, o.exe, "old binary")
+		_, err := selfUpdate(context.Background(), o)
+		requireExitCode(t, err, exitGeneral)
+		if !strings.Contains(err.Error(), "SHA256SUMS is larger than") {
+			t.Fatalf("error = %v", err)
+		}
+		requireUntouched(t, o.exe, "old binary")
+	})
+	t.Run("asset", func(t *testing.T) {
+		old := maxAssetSize
+		maxAssetSize = 16
+		t.Cleanup(func() { maxAssetSize = old })
+		f := &fakeReleaseServer{tag: "v1.1.0", binary: bytes.Repeat([]byte("x"), 17)}
+		o := updateOpts(t, newFakeRelease(t, f))
+		mustWrite(t, o.exe, "old binary")
+		_, err := selfUpdate(context.Background(), o)
+		requireExitCode(t, err, exitGeneral)
+		if !strings.Contains(err.Error(), "is larger than") {
+			t.Fatalf("error = %v", err)
+		}
+		requireUntouched(t, o.exe, "old binary")
+	})
+}
+
+// M-1: --check never touches the binary, and update_available says whether
+// a newer release exists.
+func TestSelfUpdateCheckOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name, tag string
+		available bool
+	}{
+		{"newer release", "v1.1.0", true},
+		{"already current", "v1.0.0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReleaseServer{tag: tc.tag, binary: []byte("new")}
+			o := updateOpts(t, newFakeRelease(t, f))
+			o.checkOnly = true
+			mustWrite(t, o.exe, "old binary")
+			res, err := selfUpdate(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Updated || !res.CheckOnly || res.UpdateAvailable != tc.available {
+				t.Fatalf("result = %+v; want update_available=%v", res, tc.available)
+			}
+			if len(f.downloads) != 0 {
+				t.Errorf("--check downloaded %v", f.downloads)
+			}
+			requireUntouched(t, o.exe, "old binary")
+		})
 	}
 }
 
-// --check reports the release but never touches the binary.
-func TestSelfUpdateCheckOnly(t *testing.T) {
-	f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new")}
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
+// M-1: the command's own output for --check, in text and JSON, against an
+// up-to-date and an outdated CLI. --check never writes, so the command can
+// run in-process on the test binary.
+func TestSelfUpdateCheckOutput(t *testing.T) {
+	old := version
+	t.Cleanup(func() { version = old })
+	version = "v1.0.0"
+	for _, tc := range []struct {
+		tag, wantText string
+		available     bool
+	}{
+		{"v1.0.0", "redrop 1.0.0 is up to date (latest release 1.0.0)", false},
+		{"v1.1.0", "update available: ", true},
+	} {
+		t.Run(tc.tag, func(t *testing.T) {
+			f := &fakeReleaseServer{tag: tc.tag, binary: []byte("new")}
+			t.Setenv("REDROP_GITHUB_API", newFakeRelease(t, f))
+			var err error
+			out, _ := captureCLIOutput(t, func() {
+				c := selfUpdateCmd()
+				c.SetArgs([]string{"--check"})
+				err = c.Execute()
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(out, tc.wantText) {
+				t.Errorf("text output %q lacks %q", out, tc.wantText)
+			}
+			out, _ = captureCLIOutput(t, func() {
+				g.json = true
+				c := selfUpdateCmd()
+				c.SetArgs([]string{"--check"})
+				err = c.Execute()
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var res selfUpdateResult
+			if err := json.Unmarshal([]byte(out), &res); err != nil {
+				t.Fatalf("json: %v\n%s", err, out)
+			}
+			if res.UpdateAvailable != tc.available || res.Current != "1.0.0" || !strings.HasPrefix(tc.tag, "v"+res.Latest) {
+				t.Errorf("json = %+v", res)
+			}
+		})
+	}
+}
 
-	o := updateOpts(t, srv.URL)
-	o.checkOnly = true
+// M-2: a main build is not compared with the releases. Without --version
+// self-update refuses and names the flag; --check reports without offering
+// an update; with --version it installs.
+func TestSelfUpdateMainBuild(t *testing.T) {
+	const mainVersion = "0.0.0-main+abc123456789"
+	t.Run("refuses without --version", func(t *testing.T) {
+		f := &fakeReleaseServer{tag: "v0.5.0", binary: []byte("release")}
+		o := updateOpts(t, newFakeRelease(t, f))
+		o.current = mainVersion
+		mustWrite(t, o.exe, "main build")
+		_, err := selfUpdate(context.Background(), o)
+		requireExitCode(t, err, exitUsage)
+		if !strings.Contains(err.Error(), "--version v0.5.0") {
+			t.Fatalf("error = %v", err)
+		}
+		requireUntouched(t, o.exe, "main build")
+	})
+	t.Run("check reports only", func(t *testing.T) {
+		f := &fakeReleaseServer{tag: "v0.5.0", binary: []byte("release")}
+		o := updateOpts(t, newFakeRelease(t, f))
+		o.current = mainVersion
+		o.checkOnly = true
+		mustWrite(t, o.exe, "main build")
+		res, err := selfUpdate(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.MainBuild || res.UpdateAvailable || res.Updated {
+			t.Fatalf("result = %+v", res)
+		}
+		requireUntouched(t, o.exe, "main build")
+	})
+	t.Run("--version switches", func(t *testing.T) {
+		f := &fakeReleaseServer{tag: "v0.5.0", binary: []byte("release")}
+		o := updateOpts(t, newFakeRelease(t, f))
+		o.current = mainVersion
+		o.tag = "v0.5.0"
+		mustWrite(t, o.exe, "main build")
+		res, err := selfUpdate(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Not comparable, so not a downgrade either.
+		if !res.Updated || res.Downgraded {
+			t.Fatalf("result = %+v", res)
+		}
+	})
+}
+
+// m-5: --version to an older release installs it (the rollback path) and
+// reports the downgrade.
+func TestSelfUpdateDowngrade(t *testing.T) {
+	f := &fakeReleaseServer{tag: "v0.5.0", binary: []byte("older")}
+	o := updateOpts(t, newFakeRelease(t, f))
+	o.tag = "v0.5.0"
 	mustWrite(t, o.exe, "old binary")
 	res, err := selfUpdate(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Updated || !res.CheckOnly || res.Latest != "1.1.0" {
+	if !res.Updated || !res.Downgraded {
 		t.Fatalf("result = %+v", res)
-	}
-	got, _ := os.ReadFile(o.exe)
-	if string(got) != "old binary" {
-		t.Fatalf("--check replaced the binary: %q", got)
 	}
 }
 
@@ -213,11 +376,8 @@ func TestSelfUpdateRefusesUnwritableDir(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new")}
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
-
 	dir := t.TempDir()
-	o := updateOpts(t, srv.URL)
+	o := updateOpts(t, newFakeRelease(t, f))
 	o.exe = filepath.Join(dir, "redrop")
 	mustWrite(t, o.exe, "old binary")
 	if err := os.Chmod(dir, 0o500); err != nil {
@@ -226,19 +386,47 @@ func TestSelfUpdateRefusesUnwritableDir(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(dir, 0o700) })
 
 	_, err := selfUpdate(context.Background(), o)
-	var ee *exitError
-	if !asExit(err, &ee) || ee.code != exitGeneral {
-		t.Fatalf("error = %v, want exitGeneral", err)
-	}
+	requireExitCode(t, err, exitGeneral)
 	if !strings.Contains(err.Error(), "not writable") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(f.apiRequests) != 1 {
-		t.Errorf("download continued after the writable check: %v", f.apiRequests)
+	if len(f.downloads) != 0 {
+		t.Errorf("downloaded %v after the writable check failed", f.downloads)
 	}
 	got, _ := os.ReadFile(o.exe)
 	if string(got) != "old binary" {
 		t.Fatalf("binary changed: %q", got)
+	}
+}
+
+// m-1: system and package-manager trees are refused (Homebrew's Cellar,
+// which is what EvalSymlinks yields for a brew install, Linuxbrew, Nix);
+// the installer's own root location is not.
+func TestManagedPaths(t *testing.T) {
+	for _, exe := range []string{
+		"/usr/bin/redrop", "/bin/redrop", "/sbin/redrop", "/usr/sbin/redrop",
+		"/opt/homebrew/bin/redrop",
+		"/usr/local/Cellar/redrop/1.0.0/bin/redrop",
+		"/home/linuxbrew/.linuxbrew/Cellar/redrop/1.0.0/bin/redrop",
+		"/home/u/.linuxbrew/bin/redrop",
+		"/nix/store/abc-redrop-1.0.0/bin/redrop",
+	} {
+		if !isManagedPath(exe) {
+			t.Errorf("%s is not treated as managed", exe)
+		}
+		var ee *exitError
+		if err := checkWritable(exe); !asExit(err, &ee) || ee.code != exitUsage {
+			t.Errorf("checkWritable(%s) = %v, want exitUsage", exe, err)
+		}
+	}
+	for _, exe := range []string{
+		"/usr/local/bin/redrop", // install.sh as root
+		"/home/u/.local/bin/redrop",
+		"/opt/tools/redrop",
+	} {
+		if isManagedPath(exe) {
+			t.Errorf("%s is wrongly treated as managed", exe)
+		}
 	}
 }
 
@@ -250,39 +438,20 @@ func asExit(err error, target **exitError) bool {
 	return false
 }
 
-// A binary in a package-manager location is refused.
-func TestSelfUpdateRefusesManagedLocations(t *testing.T) {
-	for _, prefix := range managedPrefixes {
-		exe := filepath.Join(strings.TrimSuffix(prefix, "/"), "redrop")
-		err := checkWritable(exe)
-		var ee *exitError
-		if !asExit(err, &ee) || ee.code != exitUsage {
-			t.Errorf("checkWritable(%s) = %v, want exitUsage", exe, err)
-		}
-	}
-}
-
-// A pinned --version that equals the running version still reports the
-// release without rewriting the binary; an unpinned call on the latest
-// version is reported as up to date.
+// An unpinned call on the latest version is reported as up to date and
+// leaves the binary alone.
 func TestSelfUpdateUpToDate(t *testing.T) {
 	f := &fakeReleaseServer{tag: "v1.0.0", binary: []byte("same")}
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
-
-	o := updateOpts(t, srv.URL)
+	o := updateOpts(t, newFakeRelease(t, f))
 	mustWrite(t, o.exe, "old binary")
 	res, err := selfUpdate(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Updated {
-		t.Fatalf("already-current release was installed: %+v", res)
+	if res.Updated || res.UpdateAvailable {
+		t.Fatalf("already-current release was installed or offered: %+v", res)
 	}
-	got, _ := os.ReadFile(o.exe)
-	if string(got) != "old binary" {
-		t.Fatalf("binary changed on a no-op update: %q", got)
-	}
+	requireUntouched(t, o.exe, "old binary")
 }
 
 // The API asks /releases/tags/vX.Y.Z for a pinned --version and
@@ -295,58 +464,108 @@ func TestSelfUpdateReleaseLookup(t *testing.T) {
 		{"", "/repos/example/redrop/releases/latest"},
 		{"v1.2.3", "/repos/example/redrop/releases/tags/v1.2.3"},
 	} {
-		f := &fakeReleaseServer{tag: "v1.1.0", binary: nil}
-		srv := httptest.NewServer(f.handler(t))
-		o := updateOpts(t, srv.URL)
+		f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new")}
+		o := updateOpts(t, newFakeRelease(t, f))
 		o.tag = tc.tag
-		o.checkOnly = true // enough to reach the lookup
+		o.checkOnly = true
 		if _, err := selfUpdate(context.Background(), o); err != nil {
-			t.Logf("tag=%q: %v", tc.tag, err)
+			t.Fatalf("tag=%q: %v", tc.tag, err)
 		}
-		srv.Close()
-		if len(f.apiRequests) == 0 || f.apiRequests[0] != tc.want {
+		if len(f.apiRequests) != 1 || f.apiRequests[0] != tc.want {
 			t.Errorf("tag=%q asked %v, want %s", tc.tag, f.apiRequests, tc.want)
 		}
 	}
 }
 
-// A release without this platform's asset is a clean not-found.
-func TestSelfUpdateMissingAsset(t *testing.T) {
-	f := &fakeReleaseServer{tag: "v1.1.0", binary: nil} // asset 404s
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
-
-	o := updateOpts(t, srv.URL)
-	mustWrite(t, o.exe, "old binary")
-	_, err := selfUpdate(context.Background(), o)
-	requireExitCode(t, err, exitNotFound)
-	if !strings.Contains(err.Error(), "no redrop-linux-amd64 asset") {
-		t.Fatalf("error = %v", err)
+// A release without this platform's binary, or without SHA256SUMS, is a
+// clean not-found.
+func TestSelfUpdateMissingAssets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    *fakeReleaseServer
+		want string
+	}{
+		{"binary", &fakeReleaseServer{tag: "v1.1.0"}, "no redrop-linux-amd64 asset"},
+		{"sums", &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new"), noSumsAsset: true}, "no SHA256SUMS asset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := updateOpts(t, newFakeRelease(t, tc.f))
+			mustWrite(t, o.exe, "old binary")
+			_, err := selfUpdate(context.Background(), o)
+			requireExitCode(t, err, exitNotFound)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v", err)
+			}
+			requireUntouched(t, o.exe, "old binary")
+		})
 	}
 }
 
-func TestVerifyChecksum(t *testing.T) {
-	body := []byte("the binary")
-	sum := sha256.Sum256(body)
-	name := "redrop-linux-amd64"
-	ok := fmt.Sprintf("%x  %s\n", sum, name)
-	single := fmt.Sprintf("%x %s\n", sum, name)
-	wrong := fmt.Sprintf("%x  %s\n", sha256.Sum256([]byte("other")), name)
-	missing := fmt.Sprintf("%x  redrop-darwin-arm64\n", sum)
+// m-2: a release whose asset URL is plain HTTP on another host is refused
+// before anything is downloaded.
+func TestSelfUpdateRefusesNonHTTPSAsset(t *testing.T) {
+	f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new"), assetURL: "http://downloads.example/redrop-linux-amd64"}
+	o := updateOpts(t, newFakeRelease(t, f))
+	mustWrite(t, o.exe, "old binary")
+	_, err := selfUpdate(context.Background(), o)
+	requireExitCode(t, err, exitGeneral)
+	if !strings.Contains(err.Error(), "non-HTTPS") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(f.downloads) != 0 {
+		t.Errorf("downloaded %v", f.downloads)
+	}
+	requireUntouched(t, o.exe, "old binary")
+}
 
-	for _, tc := range []struct {
-		sums string
-		want bool
-	}{
-		{ok, true},
-		{single, true},             // single-space separator
-		{wrong, false},             // digest of different bytes
-		{missing, false},           // entry for another file
-		{"", false},                // empty sums
-		{"garbage\n\n" + ok, true}, // leading junk lines are skipped
+func TestRequireHTTPS(t *testing.T) {
+	for u, ok := range map[string]bool{
+		"https://api.github.com":         true,
+		"https://mirror.example/api":     true,
+		"http://127.0.0.1:8080":          true,
+		"http://localhost:9000/x":        true,
+		"http://[::1]:9000":              true,
+		"http://api.github.com":          false,
+		"http://192.0.2.1":               false,
+		"ftp://example.com/redrop":       false,
+		"http://localhost.example.com/x": false,
 	} {
-		if got := verifyChecksum([]byte(tc.sums), name, sum); got != tc.want {
-			t.Errorf("verifyChecksum(%q) = %v, want %v", tc.sums, got, tc.want)
+		if err := requireHTTPS(u); (err == nil) != ok {
+			t.Errorf("requireHTTPS(%q) = %v, want ok=%v", u, err, ok)
+		}
+	}
+}
+
+// REDROP_GITHUB_API must be HTTPS unless it is loopback; it is a
+// configuration error otherwise, before any request.
+func TestSelfUpdateRejectsPlainHTTPAPI(t *testing.T) {
+	t.Setenv("REDROP_GITHUB_API", "http://api.github.com")
+	var err error
+	captureCLIOutput(t, func() {
+		c := selfUpdateCmd()
+		c.SetArgs([]string{"--check"})
+		err = c.Execute()
+	})
+	requireExitCode(t, err, exitConfig)
+}
+
+func TestParseSums(t *testing.T) {
+	sum := fmt.Sprintf("%x", sha256.Sum256([]byte("the binary")))
+	in := "garbage\n\n" +
+		sum + "  redrop-linux-amd64\n" +
+		strings.ToUpper(sum) + " redrop-darwin-arm64\n" +
+		"too many fields here\n"
+	got, err := parseSums(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"redrop-linux-amd64": sum, "redrop-darwin-arm64": sum}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
 		}
 	}
 }

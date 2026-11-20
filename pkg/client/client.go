@@ -29,10 +29,6 @@ type Client struct {
 	UserAgent string
 }
 
-// DefaultGitHubAPI is the public GitHub REST API root, overridable in tests
-// and by future configuration.
-const DefaultGitHubAPI = "https://api.github.com"
-
 func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:   strings.TrimRight(baseURL, "/"),
