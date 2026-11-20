@@ -2,7 +2,9 @@
 // /__redrop/viewer.js; the pages carry no inline script. It adds local and
 // relative times to the server-rendered info panel, a live expiry countdown
 // while the panel is open, keeps the address bar on the frame's page, and
-// sends the panel's feedback form (DESIGN.md "Viewer feedback").
+// sends the panel's feedback form (DESIGN.md "Viewer feedback"). On an
+// end-to-end encrypted link it also takes the key from the fragment and
+// starts the decrypting worker (DESIGN.md "End-to-end encrypted links").
 (function () {
   'use strict'
   var doc = document
@@ -36,6 +38,14 @@
 
   var frame = doc.getElementById('rd-frame')
   var OLD = /^\/__redrop\/v\/([1-9][0-9]*)(\/.*)$/
+  // An end-to-end encrypted link's frame always shows a version path, the
+  // current version's too (data-current).
+  var e2e = frame && frame.getAttribute('data-e2e') !== null ? {
+    artifact: frame.getAttribute('data-artifact'),
+    version: frame.getAttribute('data-version'),
+    current: frame.getAttribute('data-current'),
+    check: frame.getAttribute('data-key-check'),
+  } : null
   // barURL maps the frame's location to the address bar: version N's files
   // (/__redrop/v/N/path) show as path?redrop-version=N. It returns null for
   // another origin, for redrop's own pages, and for a location without a
@@ -45,7 +55,9 @@
     var path = loc.pathname, search = loc.search
     if (path.charAt(0) !== '/') return null
     var m = OLD.exec(path)
-    if (m) {
+    if (m && e2e && m[1] === e2e.current) {
+      path = m[2]
+    } else if (m) {
       var q = new URLSearchParams(search)
       q.set('redrop-version', m[1])
       path = m[2]
@@ -178,9 +190,18 @@
   // replaceState, never pushState: the frame owns the history entries.
   if (!frame) return
   var POLL_MS = 250
+  // addressFor is the address bar for the frame's location. An end-to-end
+  // encrypted link keeps the page in the fragment (/#/docs/a.html#part),
+  // so a reload sends the server only "/" and the paths stay private.
+  function addressFor(loc) {
+    if (!e2e) return barURL(loc)
+    var m = loc.origin === location.origin && OLD.exec(loc.pathname)
+    if (!m) return null
+    return '/' + (m[1] !== e2e.current ? '?redrop-version=' + m[1] : '') + '#' + m[2] + loc.search + loc.hash
+  }
   function sync() {
     try {
-      var next = barURL(frame.contentWindow.location)
+      var next = addressFor(frame.contentWindow.location)
       if (next !== null && next !== location.pathname + location.search + location.hash) {
         history.replaceState(history.state, '', next)
       }
@@ -243,5 +264,145 @@
     else stop()
   })
   // The server never sees the fragment: hand it to the frame.
-  if (location.hash) frame.src = frame.getAttribute('src') + location.hash
+  if (e2e) bootE2E()
+  else if (location.hash) frame.src = frame.getAttribute('src') + location.hash
+
+  // ---- end-to-end encrypted links ----
+  // The key comes from the link's fragment (#k=<key>, optionally followed
+  // by & and the page or the artifact's own fragment). It leaves the
+  // address bar at once and stays in this tab's sessionStorage, so reloads
+  // and the viewer's own links keep working. The frame never gets it: the
+  // worker gets a non-extractable CryptoKey, and only then is the frame
+  // pointed at the version path it decrypts.
+  function bootE2E() {
+    var E = window.RedropE2E
+    var KEY_ITEM = 'redrop-e2e-key'
+    var note = doc.getElementById('rd-e2e-msg')
+    var hash = location.hash.slice(1)
+    var parts = E ? E.splitFragment(hash) : { key: null, rest: hash }
+    var keyText = parts.key, rest = parts.rest, key = null
+    function show(text) {
+      note.textContent = text
+      note.hidden = false
+    }
+    // The viewer never changes the fragment with an event (replaceState
+    // fires none), so a hashchange is the visitor's: a pasted full link or
+    // an edited page. Start over with it.
+    window.addEventListener('hashchange', function () { location.reload() })
+    if (keyText) {
+      try { sessionStorage.setItem(KEY_ITEM, keyText) } catch (e) { /* storage off: this page still opens */ }
+      history.replaceState(history.state, '', location.pathname + location.search + (rest ? '#' + rest : ''))
+    } else {
+      try { keyText = sessionStorage.getItem(KEY_ITEM) } catch (e) { keyText = null }
+    }
+    // The frame's first page: a page in the fragment, else this path with
+    // the artifact's own fragment.
+    var target = rest.charAt(0) === '/'
+      ? '/__redrop/v/' + e2e.version + rest
+      : frame.getAttribute('data-src') + (rest ? '#' + rest : '')
+    if (!E || !keyText) {
+      show('This page is end-to-end encrypted, and the key is missing from the link. Open the complete link you were given, including the part after #.')
+      return
+    }
+    if (!window.isSecureContext || !window.crypto || !crypto.subtle || !navigator.serviceWorker) {
+      show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
+      return
+    }
+    function coded(code, status) {
+      var e = new Error(code)
+      e.code = code
+      e.status = status
+      return e
+    }
+    function object(name) {
+      return fetch('/__redrop/v/' + e2e.version + '/' + name, { credentials: 'same-origin', cache: 'no-store' }).then(function (res) {
+        if (!res.ok) throw coded('http', res.status)
+        return res.arrayBuffer()
+      }).then(function (buf) { return new Uint8Array(buf) })
+    }
+    function sendKey(to) {
+      to.postMessage({ type: 'redrop-e2e-key', key: key, artifact: e2e.artifact })
+    }
+    function activeWorker(reg) {
+      return new Promise(function (resolve, reject) {
+        var w = reg.installing || reg.waiting
+        if (!w) {
+          if (reg.active) resolve(reg.active)
+          else reject(coded('worker'))
+          return
+        }
+        w.addEventListener('statechange', function () {
+          if (w.state === 'activated') resolve(w)
+          else if (w.state === 'redundant') {
+            if (reg.active) resolve(reg.active)
+            else reject(coded('worker'))
+          }
+        })
+      })
+    }
+    function startWorker() {
+      // A worker that was stopped asks for the key again.
+      navigator.serviceWorker.addEventListener('message', function (e) {
+        if (e.data && e.data.type === 'redrop-e2e-need-key' && e.source && key) sendKey(e.source)
+      })
+      navigator.serviceWorker.startMessages()
+      return navigator.serviceWorker.register('/__redrop/e2e-sw.js', { scope: '/__redrop/v/', updateViaCache: 'none' })
+        .catch(function () { throw coded('worker') })
+        .then(activeWorker)
+    }
+    function offerDownload(m) {
+      var button = doc.getElementById('rd-e2e-download')
+      if (!button || m.kind !== 'file') return
+      var f = m.byPath[m.entry]
+      button.addEventListener('click', function () {
+        button.disabled = true
+        object(f.object).then(function (bytes) {
+          return E.openBytes(bytes, key, E.fileBinding(e2e.artifact, Number(e2e.version), f.path))
+        }).then(function (plain) {
+          var url = URL.createObjectURL(new Blob([plain], { type: f.type }))
+          var a = doc.createElement('a')
+          a.href = url
+          a.download = f.path.slice(f.path.lastIndexOf('/') + 1)
+          doc.body.appendChild(a)
+          a.click()
+          a.remove()
+          setTimeout(function () { URL.revokeObjectURL(url) }, 60000)
+        }).catch(function () {
+          button.textContent = 'Download failed. Reload and try again.'
+        }).then(function () { button.disabled = false })
+      })
+      button.hidden = false
+    }
+    E.importKey(keyText).then(function (k) {
+      key = k
+      return E.keyCheck(k, e2e.artifact)
+    }).then(function (check) {
+      if (check !== e2e.check) throw coded('wrongkey')
+      // Decrypting the manifest checks the content before anything is framed.
+      return object('manifest')
+    }).then(function (bytes) {
+      return E.openBytes(bytes, key, E.manifestBinding(e2e.artifact, Number(e2e.version)))
+    }).then(E.parseManifest).then(function (m) {
+      if (m.title) {
+        if (!doc.title) doc.title = m.title
+        if (!frame.title) frame.title = m.title
+        var heading = panel && panel.querySelector('h2')
+        if (heading && !heading.textContent) heading.textContent = m.title
+      }
+      offerDownload(m)
+      return startWorker()
+    }).then(function (worker) {
+      sendKey(worker)
+      frame.src = target
+    }).catch(function (err) {
+      var code = err && err.code
+      if (code === 'wrongkey') show('This link\'s key doesn\'t open this page. Check that you have the complete link, including the part after #.')
+      else if (code === 'key') show('This link\'s key is damaged. Open the complete link you were given, including the part after #.')
+      else if (code === 'auth' || code === 'format' || code === 'manifest') show('This page failed its integrity check: its content was changed, or it belongs to another link. Nothing of it is shown.')
+      else if (code === 'http' && err.status === 403) show('Your access to this link has ended. Reload the page to open it again.')
+      else if (code === 'http' && err.status === 404) show('This link doesn\'t exist, or it has expired.')
+      else if (code === 'worker') show('Your browser could not start the decryption worker. Allow this site to use service workers (some private windows block them) and reload.')
+      else show('This page could not be opened. Reload to try again.')
+    })
+  }
 })()

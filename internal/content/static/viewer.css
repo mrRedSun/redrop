@@ -53,4 +53,12 @@ body.rd-viewer{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:c
 @media (prefers-reduced-motion:no-preference){.rd-panel:popover-open{animation:rd-in .12s ease-out}}
 @keyframes rd-in{from{opacity:0;transform:translateY(4px)}}
 
+.rd-e2e-msg{position:fixed;inset:0;display:grid;place-items:center;margin:0;padding:24px;box-sizing:border-box;
+  background:var(--rd-bg);color:var(--rd-fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;text-align:center}
+.rd-e2e-msg[hidden]{display:none}
+.rd-e2e-download{margin-top:10px;padding:5px 12px;border:1px solid var(--rd-bd);border-radius:6px;background:var(--rd-bg);color:var(--rd-fg);font:inherit;cursor:pointer}
+.rd-e2e-download[hidden]{display:none}
+.rd-e2e-download:focus-visible{outline:2px solid var(--rd-acc);outline-offset:1px}
+@media (pointer:coarse){.rd-e2e-download{min-height:40px}}
+
 @media print{.rd-i,.rd-panel,.rd-bar{display:none!important}body.rd-viewer{display:block;height:auto}.rd-frame{height:100vh}}

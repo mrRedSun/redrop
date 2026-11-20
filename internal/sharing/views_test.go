@@ -34,19 +34,22 @@ func TestViewerInfoFields(t *testing.T) {
 
 // TestModeFor: the only kind policy. HTML and bundles get the frame when the
 // info button is on and are served directly when it is off; files always get
-// redrop's own file page.
+// redrop's own file page; end-to-end encrypted versions of every kind always
+// get the decrypting viewer.
 func TestModeFor(t *testing.T) {
 	for _, tc := range []struct {
-		kind string
-		info bool
-		want Mode
+		kind      string
+		info, e2e bool
+		want      Mode
 	}{
-		{api.KindHTML, true, ModeFramed}, {api.KindBundle, true, ModeFramed},
-		{api.KindHTML, false, ModeDirect}, {api.KindBundle, false, ModeDirect},
-		{api.KindFile, true, ModeFilePage}, {api.KindFile, false, ModeFilePage},
+		{api.KindHTML, true, false, ModeFramed}, {api.KindBundle, true, false, ModeFramed},
+		{api.KindHTML, false, false, ModeDirect}, {api.KindBundle, false, false, ModeDirect},
+		{api.KindFile, true, false, ModeFilePage}, {api.KindFile, false, false, ModeFilePage},
+		{api.KindHTML, true, true, ModeEncrypted}, {api.KindBundle, false, true, ModeEncrypted},
+		{api.KindFile, true, true, ModeEncrypted}, {api.KindFile, false, true, ModeEncrypted},
 	} {
-		if got := modeFor(tc.kind, tc.info); got != tc.want {
-			t.Errorf("modeFor(%s, %v) = %v, want %v", tc.kind, tc.info, got, tc.want)
+		if got := modeFor(tc.kind, tc.info, tc.e2e); got != tc.want {
+			t.Errorf("modeFor(%s, %v, %v) = %v, want %v", tc.kind, tc.info, tc.e2e, got, tc.want)
 		}
 	}
 }

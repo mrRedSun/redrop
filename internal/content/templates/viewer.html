@@ -8,11 +8,14 @@
 <title>{{.Title}}</title>
 <link rel="icon" href="/__redrop/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/__redrop/viewer.css">
-<script src="/__redrop/viewer.js" defer></script>
+{{if .Data.E2E}}<script src="/__redrop/e2e.js" defer></script>
+{{end}}<script src="/__redrop/viewer.js" defer></script>
 </head>
 <body class="rd-viewer">
 {{with .Data}}{{if .OldVersion}}<div class="rd-bar" role="status">Viewing version {{.OldVersion}} of {{.Info.Latest}} · <a href="{{.Latest}}">Back to latest</a></div>
-{{end}}<iframe id="rd-frame" class="rd-frame" src="{{.FrameSrc}}" title="{{.Info.Title}}" allow="fullscreen; clipboard-write"></iframe>
-{{template "panel" .Info}}{{end}}
+{{end}}{{with $e := .E2E}}<iframe id="rd-frame" class="rd-frame" data-e2e data-src="{{$.Data.FrameSrc}}" data-artifact="{{$e.Artifact}}" data-version="{{$e.Version}}" data-current="{{$e.Current}}" data-key-check="{{$e.KeyCheck}}" title="{{$.Data.Info.Title}}" allow="fullscreen; clipboard-write"></iframe>
+<p id="rd-e2e-msg" class="rd-e2e-msg" role="alert" hidden></p>
+{{else}}<iframe id="rd-frame" class="rd-frame" src="{{.FrameSrc}}" title="{{.Info.Title}}" allow="fullscreen; clipboard-write"></iframe>
+{{end}}{{if .Panel}}{{template "panel" .Info}}{{end}}{{end}}
 </body>
 </html>

@@ -119,10 +119,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// They are never artifact paths: answer before gates and routing.
 		h.miss(w, r)
 		return
-	case isServiceWorkerScript(r):
+	case isServiceWorkerScript(r) && r.URL.Path != e2eWorkerPath:
 		// A service worker would outlive revocation and could answer the
 		// viewer page's own navigations, so no content host serves one,
-		// not even redrop's own scripts.
+		// not even redrop's own scripts. The one exception is the
+		// decrypting worker, on end-to-end encrypted artifacts' hosts only
+		// (e2eWorkerScript), which is built to do neither.
 		h.pages.notFound(w)
 		return
 	case h.serveServerIcon(w, r) || serveViewerAsset(w, r):
@@ -168,6 +170,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.preview(w, r, a)
 		case rest == "open":
 			h.open(w, r, a)
+		case rest == "e2e-sw.js":
+			h.e2eWorkerScript(w, r, a)
 		case strings.HasPrefix(rest, versionPrefix):
 			h.serveOldVersion(w, r, a, strings.TrimPrefix(rest, versionPrefix))
 		default:
@@ -319,6 +323,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 			return
 		}
 	}
+	if h.sharing.Mode(a, snap) == sharing.ModeEncrypted {
+		h.serveE2E(w, r, a, snap, d, direct)
+		return
+	}
 	old := snap.Version != a.CurrentVersion
 	switch {
 	case h.getsViewer(w, r, a, snap, direct):
@@ -348,6 +356,10 @@ func (h *Handler) serveOldVersion(w http.ResponseWriter, r *http.Request, a *sto
 	}
 	d, ok := h.admit(w, r, a)
 	if !ok {
+		return
+	}
+	if a.E2E {
+		h.serveE2EVersion(w, r, a, n, num, rest, sub)
 		return
 	}
 	snap, err := h.sharing.OldVersion(r.Context(), a, n)

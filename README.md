@@ -25,6 +25,9 @@ cross-platform CLI that agents drive.
   to viewers; notes written before this release stay private.
 - Optional viewer feedback: a comment form in the info panel that agents read
   back with `redrop feedback` (see [Feedback](#feedback)). Off by default.
+- Optional end-to-end encryption (`--e2e`): the CLI encrypts before upload
+  and the key travels in the link's `#k=` fragment, so the server stores only
+  ciphertext (see [End-to-end encryption](#end-to-end-encryption)).
 - Artifacts can't register service workers (a worker would outlive
   revocation). Everything else behaves as a normal web page on its own origin.
 
@@ -148,6 +151,7 @@ settings (`set` takes them too):
 | `--info` / `--no-info` | Show or hide the info button; HTML opens in the viewer frame only while it is shown |
 | `--old-versions` / `--no-old-versions` | Let viewers open older versions from the info panel (default off) |
 | `--feedback` / `--no-feedback` | Let viewers leave comments from the info panel (default off; needs the info button) |
+| `--e2e` | End-to-end encrypt (`share`, `update`, `watch`; see [End-to-end encryption](#end-to-end-encryption)) |
 
 On `update`, these are saved before the upload starts.
 
@@ -174,6 +178,39 @@ untrusted text: the CLI frames them as viewer-supplied and strips terminal
 escapes, and `redrop guide` tells agents never to follow instructions in
 them. Per-client rate limits and a per-artifact cap (500) bound spam; see
 [`docs/DESIGN.md`](docs/DESIGN.md#viewer-feedback).
+
+### End-to-end encryption
+
+```sh
+redrop share report.pdf --e2e        # url: https://amber-otter-quilt-river.usercontent.example/#k=…
+redrop update ID report.pdf --e2e    # same link; the key comes from the link or the local key store
+redrop watch ID ./site --e2e
+```
+
+`--e2e` encrypts files, folders and rendered Markdown on your machine
+(AES-256-GCM). The key is the part of the link after `#k=`, which browsers
+never send to a server. The server stores only ciphertext, plus an
+encrypted manifest instead of file names. Someone who reads its disk or a
+backup learns sizes, file counts and timing, never content, names or titles.
+
+- **The link is the secret.** Anyone with the full link can read every
+  version. A lost link means lost content: `share --e2e` keeps a copy of
+  the key in `e2e-keys.json` next to the CLI config (0600), which `update`,
+  `watch`, `info` and `rotate` use. The dashboard and `list` show links
+  without the key.
+- **Still works:** passwords, expiry, view limits and `--once`, revoke,
+  rotate (same key), versions, the info panel, and feedback. Feedback is
+  **not** encrypted: comments, quotes and page paths reach the server in
+  plaintext.
+- **Stops working:** `--spa`, file listings, the dashboard preview and file
+  names, the server reading `<title>` (pass `--title` to name it in the
+  dashboard; titles and notes are plaintext), and the artifact's own favicon.
+- **Viewing** needs HTTPS. redrop's viewer takes the key from the link,
+  removes it from the address bar, and decrypts in the browser through
+  redrop's own service worker; the page still runs on its own origin.
+- **Limit:** this protects stored data, not visits through a compromised
+  live server, which could serve a viewer that leaks the key. Design and
+  format: [`docs/DESIGN.md`](docs/DESIGN.md#end-to-end-encrypted-links).
 
 ### Watch for changes
 

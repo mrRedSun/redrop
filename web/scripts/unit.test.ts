@@ -104,7 +104,7 @@ await test('viewer settings: defaults from the artifact and both are always sent
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: new Date(), updated_at: new Date(), expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false,
+    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false, e2e: false,
   } as const
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.infoButton, true)
@@ -125,7 +125,7 @@ await test('feedback setting: defaults from the artifact, always sent explicitly
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z', expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, feedback: true, revoked_by_admin: false,
+    info_button: true, viewer_old_versions: false, feedback: true, revoked_by_admin: false, e2e: false,
   })
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.feedback, true)
@@ -181,15 +181,16 @@ await test('an administrator\'s revocation is named and required on the wire', (
   assert.equal(statusLabel({ status: 'revoked', revoked_by_admin: false }), 'revoked')
   assert.equal(statusLabel({ status: 'active', revoked_by_admin: false }), 'active')
   const timestamp = '2026-11-13T12:00:00Z'
-  const meta = { id: 'test', title: 'Report', kind: 'html', status: 'revoked', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null }
+  const meta = { id: 'test', title: 'Report', kind: 'html', status: 'revoked', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, e2e: false }
   assert(Schema.decodeUnknownSync(AdminArtifact)({ ...meta, revoked_by_admin: true }).revoked_by_admin)
   assert(Option.isNone(Schema.decodeUnknownOption(AdminArtifact)(meta)), 'the field is required on the wire')
 })
 
 await test('metadata decoding strips links and token lists strip secrets', () => {
   const timestamp = '2026-11-13T12:00:00Z'
-  const decoded = Schema.decodeUnknownSync(AdminArtifact)({ id: 'test', title: 'Report', kind: 'html', status: 'active', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, revoked_by_admin: false, url: 'must-be-stripped' })
+  const decoded = Schema.decodeUnknownSync(AdminArtifact)({ id: 'test', title: 'Report', kind: 'html', status: 'active', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, revoked_by_admin: false, e2e: true, url: 'must-be-stripped' })
   assert(!('url' in decoded))
+  assert(decoded.e2e, 'admins see that an artifact is end-to-end encrypted')
   const token = { id: 'test', name: 'fixture', prefix: 'fixture', artifacts: 0, created_at: timestamp, expires_at: null, last_used_at: null, secret: 'test-only-value' }
   assert.equal(Schema.decodeUnknownSync(CreatedToken)(token).secret.toString(), '<redacted>')
   assert.equal(Redacted.value(Schema.decodeUnknownSync(CreatedToken)(token).secret), 'test-only-value')

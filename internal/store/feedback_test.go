@@ -43,8 +43,8 @@ func TestFeedbackMigration(t *testing.T) {
 		t.Fatalf("migrated artifact: feedback %v, last version %d, admin revoked %v", a.Feedback, a.LastVersion, a.AdminRevoked)
 	}
 	var v int
-	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) || v != 7 {
-		t.Fatalf("user_version %d (%v), want 7", v, err)
+	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) || v < 7 {
+		t.Fatalf("user_version %d (%v), want %d", v, err, len(migrations))
 	}
 	if list, err := db.ListComments(ctx, "a", CommentFilter{}); err != nil || len(list) != 0 {
 		t.Fatalf("migrated comments: %v %v", list, err)

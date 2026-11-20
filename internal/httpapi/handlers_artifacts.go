@@ -75,6 +75,12 @@ func (a *API) createArtifact(c fuego.ContextWithBody[api.CreateArtifactRequest])
 	return artifactDTO(m), nil
 }
 
+// reserveArtifact mints an artifact ID for an end-to-end share, whose
+// content is bound to the ID before it is uploaded.
+func (a *API) reserveArtifact(c fuego.ContextNoBody) (api.ArtifactReservation, error) {
+	return reservationDTO(a.sharing.Reserve(actorFrom(c.Context()))), nil
+}
+
 func (a *API) getArtifact(c fuego.ContextNoBody) (api.Artifact, error) {
 	m, err := a.sharing.Get(c.Context(), actorFrom(c.Context()), c.PathParam("id"))
 	if err != nil {

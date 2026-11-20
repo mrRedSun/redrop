@@ -37,6 +37,7 @@ var noticeEvents = map[client.NoticeKind]string{
 func watchCmd() *cobra.Command {
 	var cf contentFlags
 	var debounce time.Duration
+	var e2e bool
 	cmd := &cobra.Command{
 		Use:   "watch ID|URL PATH",
 		Short: "Republish PATH as a new version whenever it changes",
@@ -61,7 +62,11 @@ of exiting. Ctrl-C or SIGTERM stops watching and exits 0. Network errors,
 rate limiting, and server errors are retried with nominal exponential
 backoff from 1s to 60s, with jitter below the cap. Rate-limit responses
 honor Retry-After up to 10 minutes. Auth or not-found errors stop with the
-CLI's usual exit codes.`,
+CLI's usual exit codes.
+
+An end-to-end encrypted artifact needs --e2e; every version is encrypted
+with its key (from the full link given as ID|URL, or this machine's key
+store), so the link keeps working.`,
 		Example: `  redrop watch k2j4m9qx7d4a report.html
   redrop watch https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
   redrop watch k2j4m9qx7d4a ./site --debounce 1s --json
@@ -98,7 +103,33 @@ CLI's usual exit codes.`,
 				return err
 			}
 			opts := watchOptions(id, args[1], debounce)
-			err = watchArtifact(cmd.Context(), c, id, src, opts)
+			var up client.Uploader = c
+			if e2e {
+				// Check the artifact and the key at startup, not at the
+				// first change. (Without --e2e, the server refuses the first
+				// publish to an end-to-end artifact and names the flag.)
+				a, err := checkE2EArtifact(cmd.Context(), c, id)
+				if err != nil {
+					return err
+				}
+				key, err := e2eKeyFor(c, args[0], id)
+				if err != nil {
+					return err
+				}
+				if err := client.CheckE2EKey(a, key); err != nil {
+					return mapErr(err)
+				}
+				rememberKey(c, id, key)
+				up = &client.E2EUploader{Client: c, Key: key}
+				publish := opts.OnPublish
+				opts.OnPublish = func(r client.WatchResult) {
+					shown := *r.Artifact
+					shown.URL = client.E2ELink(shown.URL, key)
+					r.Artifact = &shown
+					publish(r)
+				}
+			}
+			err = watchArtifact(cmd.Context(), up, id, src, opts)
 			if err != nil {
 				return mapErr(err)
 			}
@@ -110,6 +141,7 @@ CLI's usual exit codes.`,
 	}
 	cf.register(cmd)
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
+	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eFlagHelp)
 	return cmd
 }
 

@@ -151,6 +151,7 @@ func artifactSlug(arg string) (string, error) {
 }
 
 func printArtifact(a *api.Artifact, extra map[string]string) error {
+	a = withKeyLink(a)
 	if g.json {
 		out := map[string]any{}
 		b, _ := jsonRoundTrip(a)
@@ -212,6 +213,13 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		fb = "on, but closed while the info button is hidden"
 	}
 	fmt.Fprintf(w, "feedback:\t%s\n", fb)
+	if a.E2E {
+		e2e := "end-to-end encrypted (the key is the link's #k= part; the server never had it)"
+		if !strings.Contains(a.URL, "#k=") {
+			e2e = "end-to-end encrypted; this machine has no key, so the url above opens nothing: use the full link from share"
+		}
+		fmt.Fprintf(w, "e2e:\t%s\n", e2e)
+	}
 	if a.PurgeAt != nil {
 		fmt.Fprintf(w, "deleted at:\t%s\n", fmtTime(a.PurgeAt))
 	}
@@ -311,7 +319,7 @@ func shareCmd() *cobra.Command {
 	var cf contentFlags
 	var vf viewerFlags
 	var title, ttl, password, passwordFile string
-	var genPassword, once, quiet bool
+	var genPassword, once, quiet, e2e bool
 	var maxViews int
 	cmd := &cobra.Command{
 		Use:     "share PATH",
@@ -353,6 +361,14 @@ old browsers (no Fetch Metadata) always get the artifact directly. Inside an
 older version, a root-absolute link (/x.html) leads to the current version.
 --feedback lets viewers leave comments from the info panel, optionally
 quoting selected text; only you read them, with "redrop feedback ID".
+
+--e2e encrypts everything on this machine before upload. The key goes in
+the link after #k= (https://<slug>.<content-domain>/#k=…), which browsers
+never send to a server: the server stores only ciphertext. The link is then
+the secret, and a lost link means lost content (this machine keeps a copy
+of the key for "update" and "watch"). Viewing needs HTTPS. Passwords,
+expiry and view limits still work; SPA fallback, file listings and the
+dashboard preview don't. See "redrop guide".
 
 The link is printed on the first line; it is the only way in, so share it
 deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
@@ -411,8 +427,23 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 				password = generatePassword()
 				extra["password"] = password
 			}
-			a, err := c.Share(cmd.Context(), src, client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old, Feedback: fb != nil && *fb}, progressFn())
-			if err != nil {
+			opts := client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old, Feedback: fb != nil && *fb}
+			var a *api.Artifact
+			if e2e {
+				// The key is saved before anything is uploaded.
+				var key client.E2EKey
+				a, key, err = c.ShareE2E(cmd.Context(), src, opts, func(id string, key client.E2EKey) error {
+					if err := saveKey(c.BaseURL, id, key); err != nil {
+						return fmt.Errorf("could not save the key in %s, so nothing was uploaded: %w", keysPath(), err)
+					}
+					return nil
+				}, progressFn())
+				if err != nil {
+					return mapErr(err)
+				}
+				a.URL = client.E2ELink(a.URL, key)
+				e2eNotice(keysPath())
+			} else if a, err = c.Share(cmd.Context(), src, opts, progressFn()); err != nil {
 				return mapErr(err)
 			}
 			warnFeedbackClosed(a, info, fb)
@@ -437,12 +468,14 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 	f.IntVar(&maxViews, "max-views", 0, "stop working after N opens (0 = unlimited)")
 	f.BoolVar(&once, "once", false, "one-time link (same as --max-views 1)")
 	f.BoolVarP(&quiet, "quiet", "q", false, "print only the URL (and generated password)")
+	f.BoolVar(&e2e, "e2e", false, e2eFlagHelp)
 	return cmd
 }
 
 func updateCmd() *cobra.Command {
 	var cf contentFlags
 	var vf viewerFlags
+	var e2e bool
 	cmd := &cobra.Command{
 		Use:   "update ID|URL PATH",
 		Short: "Publish a new version of an artifact at the same link",
@@ -450,9 +483,14 @@ func updateCmd() *cobra.Command {
 password, and view limit stay the same; previous versions are kept and can be
 restored with "redrop rollback". --info / --no-info, --old-versions /
 --no-old-versions and --feedback / --no-feedback also change those viewer
-settings; they are saved before the upload.`,
+settings; they are saved before the upload.
+
+An end-to-end encrypted artifact needs --e2e: the new version is encrypted
+with the artifact's key, taken from its full link (ID|URL with #k=…) or from
+this machine's key store, so the link keeps working.`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
-  redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa`,
+  redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
+  redrop update 'https://amber-otter-quilt-river.usercontent.example/#k=…' report.html --e2e`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
@@ -472,8 +510,23 @@ settings; they are saved before the upload.`,
 				return err
 			}
 			// The settings are saved before the upload (see UpdateWithOptions).
-			a, err := c.UpdateWithOptions(cmd.Context(), id, src, client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}, progressFn())
-			if err != nil {
+			// Without --e2e, the server refuses a plaintext version of an
+			// end-to-end artifact and names the flag.
+			vo := client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}
+			var a *api.Artifact
+			if e2e {
+				if _, err := checkE2EArtifact(cmd.Context(), c, id); err != nil {
+					return err
+				}
+				key, err := e2eKeyFor(c, args[0], id)
+				if err != nil {
+					return err
+				}
+				if a, err = c.UpdateE2E(cmd.Context(), id, key, src, vo, progressFn()); err != nil {
+					return mapErr(err)
+				}
+				rememberKey(c, id, key)
+			} else if a, err = c.UpdateWithOptions(cmd.Context(), id, src, vo, progressFn()); err != nil {
 				return mapErr(err)
 			}
 			warnFeedbackClosed(a, info, fb)
@@ -482,6 +535,7 @@ settings; they are saved before the upload.`,
 	}
 	cf.register(cmd)
 	vf.register(cmd)
+	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eFlagHelp)
 	return cmd
 }
 
@@ -756,6 +810,9 @@ func deleteCmd() *cobra.Command {
 					return mapErr(fmt.Errorf("%s: %w", arg, err))
 				}
 				deleted = append(deleted, id)
+				if err := forgetKey(c.BaseURL, id); err != nil {
+					fmt.Fprintf(os.Stderr, "redrop: warning: could not remove the key of %s from %s: %v\n", id, keysPath(), err)
+				}
 				if !g.json {
 					fmt.Println("deleted", id)
 				}

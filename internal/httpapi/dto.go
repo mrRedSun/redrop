@@ -17,12 +17,13 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
 		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
-		OldVersions: m.OldVersions, Feedback: m.Feedback, RevokedByAdmin: m.RevokedByAdmin,
+		OldVersions: m.OldVersions, Feedback: m.Feedback, RevokedByAdmin: m.RevokedByAdmin, E2E: m.E2E,
 	}
 }
 
 func artifactDTO(a sharing.Artifact) api.Artifact {
 	out := artifactMetaDTO(a.ArtifactMeta)
+	out.E2EKeyCheck, out.NextVersion = a.E2EKeyCheck, a.NextVersion
 	out.URL = a.URL
 	return out
 }
@@ -44,7 +45,7 @@ func mapItems[T, U any](in []T, f func(T) U) []U {
 
 func versionDTO(v sharing.Version) api.Version {
 	return api.Version{Number: v.Number, Kind: v.Kind, Size: v.Size, Files: v.Files, Entry: v.Entry, SPA: v.SPA,
-		Note: v.Note, NotePublic: v.NotePublic, CreatedAt: v.CreatedAt, TokenName: v.TokenName, Current: v.Current}
+		Note: v.Note, NotePublic: v.NotePublic, CreatedAt: v.CreatedAt, TokenName: v.TokenName, Current: v.Current, E2E: v.E2E}
 }
 
 func fileListDTO(f sharing.FileList) api.FileList {
@@ -105,7 +106,15 @@ func providersDTO(ps []accounts.Provider) []api.AuthProvider {
 // --- requests ---
 
 func contentFromRequest(p api.PublishRequest) sharing.Content {
-	return sharing.Content{UploadID: p.UploadID, SHA256: p.SHA256, Kind: p.Kind, Filename: p.Filename, Entry: p.Entry, SPA: p.SPA, Note: p.Note}
+	c := sharing.Content{UploadID: p.UploadID, SHA256: p.SHA256, Kind: p.Kind, Filename: p.Filename, Entry: p.Entry, SPA: p.SPA, Note: p.Note}
+	if p.E2E != nil {
+		c.E2E = &sharing.E2EContent{KeyCheck: p.E2E.KeyCheck, Version: p.E2E.Version, Reservation: p.E2E.Reservation}
+	}
+	return c
+}
+
+func reservationDTO(r sharing.Reservation) api.ArtifactReservation {
+	return api.ArtifactReservation{ID: r.ID, Token: r.Token, ExpiresAt: r.ExpiresAt}
 }
 
 func settingsFromRequest(r api.CreateArtifactRequest) sharing.Settings {

@@ -147,9 +147,13 @@ func releasesUpload(err error) bool {
 	if err == nil {
 		return false
 	}
-	switch apperr.KindOf(err) {
+	switch e := apperr.As(err); e.Kind {
 	case apperr.KindInvalid, apperr.KindTooLarge, apperr.KindNotFound, apperr.KindForbidden, apperr.KindGone:
 		return true
+	case apperr.KindConflict:
+		// End-to-end content encrypted for a version number another version
+		// took can never be published; the client encrypts again.
+		return e.Code == codeVersionConflict
 	}
 	return false
 }
