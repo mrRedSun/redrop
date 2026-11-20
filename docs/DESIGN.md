@@ -1291,7 +1291,9 @@ visitor ──HTTPS──▶ Cloudflare ─▶ Traefik ─▶ redrop content han
 3. Before upgrading, the server checks the token, ownership, kind, that the
    link is live (not expired or revoked), that tunnels are on, the
    per-user limit, and that no other process holds the tunnel. Failures
-   are ordinary JSON problems (`401`, `404`, `409`, `410`, `429`).
+   are ordinary JSON problems: `401` (token), `403` (tunnels off, or a
+   session instead of a token), `404`, `400` (not a tunnel), `410`
+   (revoked or expired), `409` `tunnel_in_use`, `429` `tunnel_limit`.
 4. After the upgrade, the WebSocket carries one
    [yamux](https://github.com/hashicorp/yamux) session. The server is the
    yamux client and opens one stream per visitor request; the CLI accepts
