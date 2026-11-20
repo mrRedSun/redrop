@@ -8,24 +8,25 @@ pull-request titles when a `vX.Y.Z` tag is cut (see
 
 ## Unreleased
 
-- Release process: `vX.Y.Z` tags build signed CLI binaries for Linux, macOS
-  and Windows (amd64/arm64) with `SHA256SUMS` and GitHub build-provenance
-  attestations, and publish them to a GitHub Release with generated notes.
-- Versions are real now: CI stamps the version, commit and build date into
-  the server and the CLI. `GET /api/v1/version` reports them plus the minimum
-  supported CLI version; `redrop version` shows both sides and warns when the
-  CLI is older than the server's minimum. `/healthz` is unchanged.
-- `redrop self-update` downloads a release (latest or `--version vX.Y.Z`),
-  verifies it against `SHA256SUMS`, and replaces the running binary
-  atomically; `--check` only reports. It refuses package-manager locations
-  and unwritable directories.
-
-## 0.1.0-dev
-
-Everything below predates the release process; there are no tagged versions
-yet. Entries summarize the merged pull requests.
+No version has been tagged yet, so everything merged so far is listed here.
+It becomes the v0.1.0 entry when that tag is cut. Entries summarize the merged
+pull requests.
 
 ### Added
+
+- Release process: after the CI checks pass, a `vX.Y.Z` tag builds CLI
+  binaries for Linux, macOS and Windows (amd64/arm64) with `SHA256SUMS` and
+  GitHub build-provenance attestations, and publishes them to a GitHub
+  Release with generated notes. Tags with a `-` become prereleases. (#31)
+- Real versions: CI stamps the version, commit and build date into the server
+  and the CLI. `GET /api/v1/version` reports them plus the minimum supported
+  CLI version. `redrop version` shows both sides and warns when a release CLI
+  is older than the server's minimum. `/healthz` is unchanged. (#31)
+- `redrop self-update` downloads a release (latest or `--version vX.Y.Z`),
+  verifies it against `SHA256SUMS`, and replaces the running binary
+  atomically; `--check` only reports. It refuses system and package-manager
+  locations and unwritable directories, and asks for `--version` before
+  replacing a `main` build. (#31)
 
 - Go server (Fuego + SQLite), CLI, and design doc: sessions, API tokens,
   invites, OIDC, TOTP, chunked resumable uploads, per-artifact-subdomain
@@ -70,3 +71,4 @@ yet. Entries summarize the merged pull requests.
 
 - CI and supply-chain hardening: Dependabot, SHA-pinned actions,
   least-privilege checkouts, govulncheck in CI, weekly rescans, SECURITY.md. (#28)
+- Go dependency bumps: fsnotify 1.10.1 and kin-openapi 0.153.0. (#29)
