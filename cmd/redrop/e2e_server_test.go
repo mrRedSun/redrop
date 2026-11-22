@@ -8,14 +8,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/mrRedSun/redrop/internal/app"
 	"github.com/mrRedSun/redrop/internal/config"
+	"github.com/mrRedSun/redrop/internal/e2e"
 	"github.com/mrRedSun/redrop/pkg/api"
 	"github.com/mrRedSun/redrop/pkg/client"
 )
@@ -134,6 +137,53 @@ func (s *cliServer) run(t *testing.T, cfg, stdin string, args ...string) (string
 	return out, errOut, runErr
 }
 
+// decrypt reads path from version n of a, as a viewer would.
+func (s *cliServer) decrypt(t *testing.T, a *api.Artifact, n int, path string) string {
+	t.Helper()
+	key, ok, err := client.E2EKeyFromLink(a.URL)
+	if err != nil || !ok {
+		t.Fatalf("key in %q: %v", a.URL, err)
+	}
+	u, err := url.Parse(a.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(name string) []byte {
+		req, _ := http.NewRequest(http.MethodGet, s.url+"/__redrop/v/"+strconv.Itoa(n)+"/"+name, nil)
+		req.Host = u.Host
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", name, resp.StatusCode, b)
+		}
+		return b
+	}
+	plain, err := e2e.OpenBytes(get(e2e.ManifestPath), key, e2e.ManifestBinding(a.ID, n))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := e2e.ParseManifest(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range m.Files {
+		if f.Path == path {
+			b, err := e2e.OpenBytes(get(f.Object), key, e2e.FileBinding(a.ID, n, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(b)
+		}
+	}
+	t.Fatalf("no %s in version %d", path, n)
+	return ""
+}
+
 func shareE2E(t *testing.T, s *cliServer, cfg, page string) *api.Artifact {
 	t.Helper()
 	out, _, err := s.run(t, cfg, "", "share", page, "--e2e", "--json")
@@ -188,6 +238,15 @@ func TestCLINeverUploadsPlaintextForAnEncryptedArtifact(t *testing.T) {
 		if got := s.requests.since(start); strings.Contains(got, "/api/v1/uploads") || strings.Contains(got, marker) || strings.Contains(got, "PATCH") {
 			t.Fatalf("%v sent an upload, plaintext or settings:\n%s", args, got)
 		}
+	}
+
+	// Content on stdin is read once: the artifact is checked first, and the
+	// encrypted version holds exactly what stdin held.
+	if _, errOut, err := s.run(t, owner, "<p>from stdin "+marker+"</p>", "update", a.ID, "-", "--name", "page.html"); err != nil {
+		t.Fatalf("update from stdin: %v %s", err, errOut)
+	}
+	if got := s.decrypt(t, a, 3, "index.html"); got != "<p>from stdin "+marker+"</p>" {
+		t.Fatalf("version 3 holds %q", got)
 	}
 
 	// watch with the key stored encrypts every publish.

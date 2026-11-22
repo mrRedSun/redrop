@@ -54,7 +54,8 @@ var ErrE2EKeyMismatch = errors.New("this key does not belong to the artifact; us
 
 // ErrEncryptedArtifact means a plaintext version was about to be published
 // to an end-to-end encrypted artifact. Nothing was uploaded: publish it
-// with the artifact's key (UpdateE2E, E2EUploader).
+// with the artifact's key (UpdateE2E, E2EUploader). The source was already
+// prepared, so a Source.Reader has been read: pass a fresh one.
 var ErrEncryptedArtifact = errors.New("the artifact is end-to-end encrypted; its new versions must be encrypted with its key")
 
 // checkPlaintextTarget reads the artifact before a plaintext version is

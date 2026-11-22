@@ -525,8 +525,10 @@ process lists.`,
 			// The settings are saved before the upload (see UpdateWithOptions).
 			vo := client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}
 			var key *client.E2EKey
-			if e2e {
-				if key, err = versionKey(cmd.Context(), c, ref, id, true); err != nil {
+			if e2e || src.Reader != nil {
+				// Stdin can be read only once, so for it the artifact is
+				// checked before anything is prepared.
+				if key, err = versionKey(cmd.Context(), c, ref, id, e2e); err != nil {
 					return err
 				}
 			}
@@ -536,7 +538,7 @@ process lists.`,
 				// before uploading: an end-to-end encrypted artifact stops it
 				// with nothing sent, and its key, if available, encrypts.
 				a, err = c.UpdateWithOptions(cmd.Context(), id, src, vo, progressFn())
-				if errors.Is(err, client.ErrEncryptedArtifact) {
+				if errors.Is(err, client.ErrEncryptedArtifact) && src.Reader == nil {
 					if key, err = versionKey(cmd.Context(), c, ref, id, false); err != nil {
 						return err
 					}
