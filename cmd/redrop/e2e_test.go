@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/mrRedSun/redrop/pkg/api"
 	"github.com/mrRedSun/redrop/pkg/client"
@@ -60,7 +59,7 @@ func TestKeyStoreRoundTripAndMode(t *testing.T) {
 	if err := forgetKey(testServer, "bbbbbbbbbbbbbbbb"); err != nil {
 		t.Fatalf("forgetting an unknown key: %v", err)
 	}
-	requireDirectoryNames(t, dir, []string{"e2e-keys.json"})
+	requireDirectoryNames(t, dir, []string{"e2e-keys.json", "e2e-keys.json.lock"})
 }
 
 func TestKeyStoreRefusesSymlinks(t *testing.T) {
@@ -113,21 +112,44 @@ func TestKeyStoreConcurrentWriters(t *testing.T) {
 	}
 }
 
-func TestKeyStoreStaleLock(t *testing.T) {
+// The lock is the operating system's: a held lock keeps a second writer
+// out until it is released, and a lock file left by a writer that died
+// holds nothing, so there is no stale lock to take over (review 33 m-B).
+func TestKeyStoreLock(t *testing.T) {
 	useConfigPath(t, filepath.Join(t.TempDir(), "config.json"))
 	lock := keysPath() + ".lock"
-	if err := os.WriteFile(lock, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-2 * lockStale)
-	if err := os.Chtimes(lock, old, old); err != nil {
+	if err := os.WriteFile(lock, nil, 0o600); err != nil { // left behind
 		t.Fatal(err)
 	}
 	if err := saveKey(testServer, "aaaaaaaaaaaaaaaa", newTestKey(t)); err != nil {
-		t.Fatalf("a stale lock blocked the store: %v", err)
+		t.Fatalf("a leftover lock file blocked the store: %v", err)
 	}
-	if _, err := os.Stat(lock); !os.IsNotExist(err) {
-		t.Fatalf("lock left behind: %v", err)
+	unlock, err := lockFile(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := make(chan error, 1)
+	k := newTestKey(t)
+	go func() { saved <- saveKey(testServer, "bbbbbbbbbbbbbbbb", k) }()
+	// The writer waits for the lock: it can't finish while it is held. Its
+	// result arrives only after unlock, so this is not a timing assertion.
+	select {
+	case err := <-saved:
+		t.Fatalf("a second writer got in while the lock was held: %v", err)
+	default:
+	}
+	if _, ok, _ := storedKey(testServer, "bbbbbbbbbbbbbbbb"); ok {
+		t.Fatal("a second writer wrote while the lock was held")
+	}
+	unlock()
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := storedKey(testServer, "bbbbbbbbbbbbbbbb"); err != nil || !ok || got != k {
+		t.Fatalf("key after unlock: %v %v", ok, err)
+	}
+	if _, ok, _ := storedKey(testServer, "aaaaaaaaaaaaaaaa"); !ok {
+		t.Fatal("the first key was lost")
 	}
 }
 
@@ -149,20 +171,20 @@ func TestE2EKeyFor(t *testing.T) {
 	c := client.New(testServer, "rdp_x")
 	k := newTestKey(t)
 	link := client.E2ELink("https://amber-otter-quilt-river.usercontent.example/", k)
-	if got, err := e2eKeyFor(c, link, "aaaaaaaaaaaaaaaa"); err != nil || got != k {
+	if got, from, err := e2eKeyFor(c, link, "aaaaaaaaaaaaaaaa"); err != nil || got != k || from != "its link" {
 		t.Fatalf("key from the link: %v", err)
 	}
-	_, err := e2eKeyFor(c, "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa")
+	_, _, err := e2eKeyFor(c, "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa")
 	requireExitCode(t, err, exitUsage)
-	if !strings.Contains(err.Error(), "#k=") {
+	if !strings.Contains(err.Error(), "nothing was uploaded") {
 		t.Fatalf("missing-key message: %v", err)
 	}
-	_, err = e2eKeyFor(c, "https://amber-otter-quilt-river.usercontent.example/#k=broken", "aaaaaaaaaaaaaaaa")
+	_, _, err = e2eKeyFor(c, "https://amber-otter-quilt-river.usercontent.example/#k=broken", "aaaaaaaaaaaaaaaa")
 	requireExitCode(t, err, exitUsage)
 	if err := saveKey(testServer, "aaaaaaaaaaaaaaaa", k); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := e2eKeyFor(c, "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa"); err != nil || got != k {
+	if got, from, err := e2eKeyFor(c, "aaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa"); err != nil || got != k || from != "this machine's key store" {
 		t.Fatalf("key from the store: %v", err)
 	}
 }

@@ -106,28 +106,8 @@ func saveConfig(c fileConfig) error {
 		return err
 	}
 	// A fresh private inode avoids retaining permissive modes or following
-	// destination symlinks. Keep it beside the destination for atomic rename.
-	f, err := os.CreateTemp(dir, "."+filepath.Base(p)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		f.Close()
-		os.Remove(f.Name())
-	}()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), p)
+	// destination symlinks. It sits beside the destination for atomic rename.
+	return writePrivateFile(p, append(b, '\n'))
 }
 
 func normalizeURL(raw string) (string, error) {
