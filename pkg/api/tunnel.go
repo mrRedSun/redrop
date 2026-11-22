@@ -56,8 +56,8 @@ type Tunnel struct {
 	OwnerUsername string    `json:"owner_username"`
 	TokenName     string    `json:"token_name" description:"API token the CLI connected with"`
 	ConnectedAt   time.Time `json:"connected_at"`
-	Streams       int       `json:"streams" description:"Open requests and WebSockets"`
-	BytesThisHour int64     `json:"bytes_this_hour" description:"Bytes both ways in the current hourly budget window"`
+	Streams       int       `json:"streams" description:"Stream slots in use: open requests and WebSockets, and streams not yet closed"`
+	BytesThisHour int64     `json:"bytes_this_hour" description:"The owner's bytes both ways in the current hourly budget window, over all their tunnels"`
 }
 
 type TunnelList struct {
