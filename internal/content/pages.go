@@ -2,7 +2,9 @@ package content
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -23,6 +25,8 @@ type pages struct {
 	tmpl *template.Template
 	css  template.CSS
 	csp  string
+	// gateCSP is csp plus the gate's one inline script, pinned by hash.
+	gateCSP string
 	// pageDirectives are the default policy's directives after style-src,
 	// shared with the file page's policy (see pagePolicy).
 	pageDirectives []string
@@ -73,12 +77,31 @@ func newPages(cfg *config.Config) *pages {
 		"utc":   func(t time.Time) string { return t.UTC().Format("2 Jan 2006, 15:04 UTC") },
 	}).ParseFS(templateFS, "templates/*.html"))
 	directives := []string{"img-src 'self'", "media-src 'self'", "frame-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'self' " + cfg.PublicOrigin()}
+	gate := append([]string{"script-src '" + gateScriptHash() + "'"}, directives...)
 	return &pages{
 		tmpl:           t,
 		css:            template.CSS(css),
 		csp:            pagePolicy("", "'unsafe-inline'", directives...),
+		gateCSP:        pagePolicy("", "'unsafe-inline'", gate...),
 		pageDirectives: directives,
 	}
+}
+
+// gateScriptHash is the CSP source of gate.html's inline script, which
+// keeps the link's fragment through the gate (DESIGN.md "End-to-end
+// encrypted links", "What still works").
+func gateScriptHash() string {
+	b, err := templateFS.ReadFile("templates/gate.html")
+	if err != nil {
+		panic(err)
+	}
+	_, script, ok := strings.Cut(string(b), "<script>")
+	script, _, ok2 := strings.Cut(script, "</script>")
+	if !ok || !ok2 {
+		panic("gate.html has no inline script")
+	}
+	sum := sha256.Sum256([]byte(script))
+	return "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
 }
 
 type pageData struct {
@@ -127,10 +150,10 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	if a.MaxViews > 0 {
 		remaining = a.MaxViews - a.Views
 	}
-	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
+	p.renderWithCSP(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
 		"Action": "/" + api.ReservedPrefix + "/open",
-	})
+	}, p.gateCSP)
 }
 
 type fileData struct {

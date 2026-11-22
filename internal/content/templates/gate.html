@@ -8,5 +8,13 @@
 {{if .Password}}<input type="password" name="password" placeholder="Password" aria-label="Password" autocomplete="current-password" autofocus required>{{end}}
 <button type="submit">Open</button>
 </form>
+{{/* The script keeps the link's fragment (an end-to-end link's key, or a
+page's own #part) through Open: the redirect after it keeps the fragment of
+the form's action. html/template strips comments inside scripts, so the
+script has none: pages.go pins its exact text by hash. */}}<script>
+document.querySelectorAll('form').forEach(function (f) {
+  f.addEventListener('submit', function () { if (location.hash) f.action = f.getAttribute('action') + location.hash })
+})
+</script>
 {{end}}
 {{template "foot" .}}
