@@ -316,10 +316,13 @@ now and stops when this computer sleeps.
   is offline".
 - The app receives Host: TARGET; X-Forwarded-Host is the link's host and
   X-Forwarded-For the visitor's address. WebSockets work, so hot reload
-  does. The server limits request and response sizes, bandwidth per hour,
-  and how long the app may take to start answering (about 90 seconds).
-- --log prints "METHOD /path STATUS TIME" to stderr per request; never the
-  query, headers or bodies.
+  does. The server limits request and response sizes, bandwidth per user
+  per hour, and how long the app may take to start answering (about 90
+  seconds). A user keeps a limited number of tunnels (20 unless the server
+  sets another): reuse one with --id rather than creating new ones.
+- --log prints "METHOD /path STATUS TIME" to stderr per request, with the
+  path percent-encoded as sent and the final status; never the query,
+  headers or bodies.
 - Network trouble: it reconnects by itself (backoff 1s to 30s). It exits 7
   when the server ended the tunnel (revoked, deleted, expired, or ended by
   an administrator), 3 for a bad token, 4 for an unknown --id, 2 for a bad

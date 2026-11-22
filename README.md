@@ -217,12 +217,17 @@ so dev-server hot reload does. Nothing is added to the app's pages.
   target is resolved once and pinned.
 - **What the app sees:** `Host` is the target you named (`localhost:5173`, so
   Vite's host check passes); `X-Forwarded-Host` is the link's host,
-  `X-Forwarded-For` the visitor's address as the server resolved it, and
-  `X-Forwarded-Proto` the link's scheme. redrop's own cookies are never sent
-  to the app, and a `Domain` on the app's cookies is removed.
-- **Limits** (server settings, below): 3 connected tunnels per user, 32 open
-  requests per tunnel, 100 MB requests, 1 GB responses, 2 GB per tunnel per
-  hour, and about 90 seconds for the app to start answering.
+  `X-Forwarded-For` the visitor's full address as the server resolved it,
+  and `X-Forwarded-Proto` the link's scheme. Other forwarding and client-IP
+  headers, and header names with an underscore, are removed. redrop's own
+  cookies are never sent to the app, and a `Domain` on the app's cookies is
+  removed, as is a `Clear-Site-Data` from the app. `1xx` responses from the
+  app (such as `103 Early Hints`) are not passed on.
+- **Limits** (server settings, below): 3 connected and 20 kept tunnels per
+  user, 32 open requests per tunnel, 100 MB requests, 1 GB responses, 2 GB per
+  user per hour over all their tunnels, and about 90 seconds for the app to
+  start answering. A visitor who stops reading is cut after the idle
+  timeout.
 
 The server keeps connected tunnels in memory: run one redrop process. See
 [`docs/DESIGN.md`](docs/DESIGN.md#tunnels) for the protocol and threat model.
@@ -261,9 +266,10 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_FEEDBACK_BURST`, `REDROP_FEEDBACK_PER_MINUTE` | `5`, `1`: viewer comments a client may post (burst, then per minute) |
 | `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
 | `REDROP_TUNNELS_PER_USER` | `3`: tunnels one user may have connected; `0` turns tunnels off |
+| `REDROP_TUNNEL_ARTIFACTS_PER_USER` | `20`: tunnels one user may keep, connected or not, until deleted |
 | `REDROP_TUNNEL_STREAMS`, `REDROP_TUNNEL_STREAMS_TOTAL` | `32`, `256`: open requests and WebSockets per tunnel, and across the server (each holds at most about 300 KB) |
 | `REDROP_TUNNEL_MAX_REQUEST_SIZE`, `REDROP_TUNNEL_MAX_RESPONSE_SIZE` | `100MB`, `1GB`: one request or response body through a tunnel |
-| `REDROP_TUNNEL_BYTES_PER_HOUR` | `2GB`: traffic per tunnel, both ways, per hour |
+| `REDROP_TUNNEL_BYTES_PER_HOUR` | `2GB`: traffic per user, over all their tunnels, both ways, per hour |
 | `REDROP_TUNNEL_RESPONSE_TIMEOUT`, `REDROP_TUNNEL_IDLE_TIMEOUT` | `90s`, `100s`: how long a request waits for a free slot, and then for the app to start answering; a request or WebSocket that moves no bytes is closed after the idle time |
 
 ## Reverse proxy

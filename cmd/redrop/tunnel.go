@@ -56,8 +56,9 @@ trouble. --id ID reuses an existing tunnel's link, so the link stays the same
 across restarts.
 
 Requests are limited in size, time and bandwidth by the server; the app must
-start answering within about 90 seconds. --log prints one line per request
-(method, path, status, time) to stderr, never headers or bodies.
+start answering within about 90 seconds. Each user keeps a limited number of
+tunnels, so reuse one with --id. --log prints one line per request (method,
+percent-encoded path, final status, time) to stderr, never headers or bodies.
 
 With --json, the first line has the link, then each change (online, offline,
 retry) is one JSON line. Exit codes: 0 after Ctrl-C, 7 when the server ended
