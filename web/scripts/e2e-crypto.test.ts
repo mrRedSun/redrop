@@ -50,12 +50,20 @@ type Tx = { oncomplete?: () => void; onerror?: () => void; onabort?: () => void;
 // transactions complete once their requests have.
 function fakeIndexedDB() {
   const stores = new Map<string, Map<string, unknown>>()
+  let version = 0
   return {
     stores,
-    open() {
+    // planted makes the database exist already, without the key store, as
+    // an artifact on the same origin could.
+    planted() { version = 1 },
+    open(_name: string, want?: number) {
       const req: Req = {}
       queueMicrotask(() => {
+        const upgrade = want !== undefined ? want > version : version === 0
+        if (upgrade) version = want ?? 1
         const db = {
+          version,
+          objectStoreNames: { contains: (n: string) => stores.has(n) },
           createObjectStore(n: string) { stores.set(n, new Map()) },
           close() {},
           transaction(n: string) {
@@ -79,7 +87,7 @@ function fakeIndexedDB() {
           },
         }
         req.result = db
-        if (!stores.has('keys')) req.onupgradeneeded?.()
+        if (upgrade) req.onupgradeneeded?.()
         req.onsuccess?.()
       })
       return req
@@ -257,4 +265,11 @@ await test('the browser key store keeps only CryptoKeys, and only while fresh', 
   await K.keys.remove(vectors.artifact)
   assert.equal(await K.keys.get(vectors.artifact, t0), null)
   await assert.rejects(loadE2E().keys.get(vectors.artifact, t0), (e: { code?: string }) => e.code === 'storage', 'no IndexedDB')
+  // A database the artifact made under the same name, without the store,
+  // is upgraded rather than left to hang the viewer.
+  const planted = fakeIndexedDB()
+  planted.planted()
+  const P = loadE2E({ indexedDB: planted })
+  await P.keys.put(vectors.artifact, key, t0)
+  assert.equal(await P.keys.get(vectors.artifact, t0), key)
 })

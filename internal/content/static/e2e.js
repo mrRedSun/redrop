@@ -287,21 +287,44 @@
   // bytes (DESIGN.md "End-to-end encrypted links", "Keys and links").
   var KEY_DB = 'redrop-e2e', KEY_STORE = 'keys'
   var KEY_TTL_MS = 12 * 60 * 60 * 1000
-  function keyTx(mode, run) {
+  // keyDB opens the database with its store. The artifact shares this
+  // origin's IndexedDB and may have made a database of the same name
+  // without the store; the store is then added in a version upgrade.
+  function keyDB(idb, version) {
     return new Promise(function (resolve, reject) {
-      var idb = root.indexedDB
-      if (!idb) { reject(fail('storage', 'IndexedDB is not available')); return }
       var open
-      try { open = idb.open(KEY_DB, 1) } catch (e) { reject(fail('storage', 'IndexedDB is not available')); return }
-      open.onupgradeneeded = function () { open.result.createObjectStore(KEY_STORE) }
-      open.onerror = function () { reject(fail('storage', 'IndexedDB refused')) }
+      try { open = version ? idb.open(KEY_DB, version) : idb.open(KEY_DB) } catch (e) { reject(fail('storage', 'IndexedDB is not available')); return }
+      open.onupgradeneeded = function () {
+        if (!open.result.objectStoreNames.contains(KEY_STORE)) open.result.createObjectStore(KEY_STORE)
+      }
+      open.onerror = open.onblocked = function () { reject(fail('storage', 'IndexedDB refused')) }
       open.onsuccess = function () {
-        var db = open.result, out
-        var tx = db.transaction(KEY_STORE, mode)
-        run(tx.objectStore(KEY_STORE), function (v) { out = v })
+        var db = open.result
+        if (db.objectStoreNames.contains(KEY_STORE)) { resolve(db); return }
+        var next = db.version + 1
+        db.close()
+        if (version) { reject(fail('storage', 'IndexedDB refused')); return }
+        keyDB(idb, next).then(resolve, reject)
+      }
+    })
+  }
+  function keyTx(mode, run) {
+    var idb = root.indexedDB
+    if (!idb) return Promise.reject(fail('storage', 'IndexedDB is not available'))
+    return keyDB(idb, 0).then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var out, tx
+        try {
+          tx = db.transaction(KEY_STORE, mode)
+          run(tx.objectStore(KEY_STORE), function (v) { out = v })
+        } catch (e) {
+          db.close()
+          reject(fail('storage', 'IndexedDB refused'))
+          return
+        }
         tx.oncomplete = function () { db.close(); resolve(out) }
         tx.onerror = tx.onabort = function () { db.close(); reject(fail('storage', 'IndexedDB refused')) }
-      }
+      })
     })
   }
   var keys = {
