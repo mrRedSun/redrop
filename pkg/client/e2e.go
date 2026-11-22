@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"os"
 	"path"
@@ -268,8 +269,18 @@ func encryptPrepared(p *Prepared, src *Source, key E2EKey, artifactID string, ve
 			os.Remove(out.Name())
 		}
 	}()
-	w := &e2eWriter{key: key, artifact: artifactID, version: version, gz: gzipNoCompression(out)}
-	w.tw = tar.NewWriter(w.gz)
+	// Objects are encrypted in source order into a scratch file, then
+	// archived in a random order (archive()), so neither the stored rows
+	// nor the blobs' write order show the layout.
+	scratch, err := os.CreateTemp("", "redrop-e2e-objects-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		scratch.Close()
+		os.Remove(scratch.Name())
+	}()
+	w := &e2eWriter{key: key, artifact: artifactID, version: version, scratch: scratch}
 	m := e2e.Manifest{Format: e2e.FormatVersion, Kind: p.Kind}
 	switch p.Kind {
 	case api.KindHTML, api.KindFile:
@@ -312,10 +323,7 @@ func encryptPrepared(p *Prepared, src *Source, key E2EKey, artifactID string, ve
 	if err := w.seal(e2e.ManifestPath, e2e.ManifestBinding(artifactID, version), bytes.NewReader(manifest), int64(len(manifest))); err != nil {
 		return nil, err
 	}
-	if err := w.tw.Close(); err != nil {
-		return nil, err
-	}
-	if err := w.gz.Close(); err != nil {
+	if err := w.archive(out); err != nil {
 		return nil, err
 	}
 	digest := p.Digest
@@ -325,25 +333,40 @@ func encryptPrepared(p *Prepared, src *Source, key E2EKey, artifactID string, ve
 	return &encrypted{file: out.Name(), digest: digest}, nil
 }
 
-// gzipNoCompression: ciphertext doesn't compress.
-func gzipNoCompression(w io.Writer) *gzip.Writer {
-	gz, err := gzip.NewWriterLevel(w, gzip.NoCompression)
+// writeTarGzipLevel is writeTarGzip at a chosen level: ciphertext doesn't
+// compress, so encrypted uploads use gzip.NoCompression.
+func writeTarGzipLevel(w io.Writer, level int, write func(*tar.Writer) error) (err error) {
+	gz, err := gzip.NewWriterLevel(w, level)
 	if err != nil {
-		panic(err) // only for invalid levels
+		return err
 	}
-	return gz
+	tw := tar.NewWriter(gz)
+	defer func() {
+		for _, finish := range []func() error{tw.Close, gz.Close} {
+			if closeErr := finish(); err == nil {
+				err = closeErr
+			}
+		}
+	}()
+	return write(tw)
 }
 
-// e2eWriter writes encrypted objects into the upload's archive and keeps
-// the manifest entries.
+// e2eWriter encrypts objects into a scratch file and keeps the manifest
+// entries; archive writes the upload from it.
 type e2eWriter struct {
 	key      E2EKey
 	artifact string
 	version  int
-	gz       *gzip.Writer
-	tw       *tar.Writer
+	scratch  *os.File
+	objects  []sealedObject // in scratch, in source order
 	files    []e2e.ManifestFile
 	titles   map[string]string // <title> of HTML files, by path
+}
+
+// sealedObject is one encrypted object's place in the scratch file.
+type sealedObject struct {
+	name        string
+	offset, len int64
 }
 
 // add encrypts n bytes of r as the file at name.
@@ -379,10 +402,37 @@ func (w *e2eWriter) add(name string, r io.Reader, n int64) error {
 }
 
 func (w *e2eWriter) seal(object string, b e2e.Binding, r io.Reader, n int64) error {
-	if err := w.tw.WriteHeader(&tar.Header{Name: object, Mode: 0o600, Typeflag: tar.TypeReg, Size: e2e.SealedSize(n)}); err != nil {
+	offset, err := w.scratch.Seek(0, io.SeekCurrent)
+	if err != nil {
 		return err
 	}
-	return e2e.Seal(w.tw, r, n, w.key, b, rand.Reader)
+	if err := e2e.Seal(w.scratch, r, n, w.key, b, rand.Reader); err != nil {
+		return err
+	}
+	w.objects = append(w.objects, sealedObject{name: object, offset: offset, len: e2e.SealedSize(n)})
+	return nil
+}
+
+// archive writes every sealed object, the manifest among them, to out as a
+// tar.gz in a random order.
+func (w *e2eWriter) archive(out io.Writer) (err error) {
+	var seed [32]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return err
+	}
+	order := append([]sealedObject(nil), w.objects...)
+	mrand.New(mrand.NewChaCha8(seed)).Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	return writeTarGzipLevel(out, gzip.NoCompression, func(tw *tar.Writer) error {
+		for _, o := range order {
+			if err := tw.WriteHeader(&tar.Header{Name: o.name, Mode: 0o600, Typeflag: tar.TypeReg, Size: o.len}); err != nil {
+				return err
+			}
+			if _, err := io.Copy(tw, io.NewSectionReader(w.scratch, o.offset, o.len)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // addArchive encrypts every regular file of a prepared tar.gz bundle,

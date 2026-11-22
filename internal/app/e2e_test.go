@@ -697,3 +697,41 @@ func TestE2EFragmentsAreNeverLogged(t *testing.T) {
 		t.Fatalf("a fragment was logged:\n%s", logs.String())
 	}
 }
+
+// M1 of review 33: the gate keeps the link's fragment through Open. Its one
+// inline script is pinned by hash in the gate's policy, and the served
+// script is exactly the hashed one.
+func TestGateScriptIsPinned(t *testing.T) {
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	page := writeFile(t, t.TempDir(), "page.html", "<p>x</p>")
+	a, _, err := c.ShareE2E(context.Background(), &client.Source{Path: page}, client.PublishOptions{Password: "hunter22"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.fetchContent(a.URL, "/", nil, docHeaders...)
+	expectStatus(t, r, 200, "gate")
+	html := body(r)
+	_, script, ok := strings.Cut(html, "<script>")
+	script, _, ok2 := strings.Cut(script, "</script>")
+	if !ok || !ok2 || !strings.Contains(script, "location.hash") {
+		t.Fatalf("gate script: %s", html)
+	}
+	sum := sha256.Sum256([]byte(script))
+	csp := r.Header.Get("Content-Security-Policy")
+	if want := "script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"; !strings.Contains(csp, want) {
+		t.Fatalf("gate CSP %q lacks %q", csp, want)
+	}
+	for _, d := range strings.Split(csp, ";") {
+		if d = strings.TrimSpace(d); strings.HasPrefix(d, "script-src") && strings.Count(d, " ") != 1 {
+			t.Fatalf("the gate allows more than its pinned script: %q", d)
+		}
+	}
+	if strings.Count(html, "<script") != 1 {
+		t.Fatal("the gate has more than one script")
+	}
+	// Other server pages still run no script at all.
+	if csp := h.fetchContent("http://amber-otter-quilt-river.content.test/", "/", nil, docHeaders...).Header.Get("Content-Security-Policy"); strings.Contains(csp, "script-src") {
+		t.Fatalf("the miss page allows scripts: %q", csp)
+	}
+}
