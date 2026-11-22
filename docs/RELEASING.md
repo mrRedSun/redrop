@@ -23,8 +23,10 @@ info.
 
 A tag containing `-` (`v1.0.0-rc1`) is published as a **prerelease**. GitHub's
 "latest release", which `redrop self-update` installs by default, never
-points at a prerelease, so a release candidate reaches only those who ask for
-it with `--version`.
+points at a prerelease. `self-update --version` accepts stable `vX.Y.Z` tags
+only, so testers install a release candidate by downloading its binary from
+the release page and checking it against that release's `SHA256SUMS` and
+attestation (see [Trust model](#trust-model)).
 
 ### Version stamps
 
@@ -54,8 +56,9 @@ What `SHA256SUMS` protects, and what it does not:
 
 - `redrop self-update` takes both the binary and `SHA256SUMS` from the
   release's own asset list, over HTTPS. The checksum catches corruption,
-  truncation, and a mismatched binary/sums pair. Downloads that are not HTTPS
-  are refused (loopback excepted, for tests).
+  truncation, and a mismatched binary/sums pair. Every request, the release
+  lookup included, must stay on HTTPS (loopback excepted, for tests), and so
+  must every redirect it follows; at most 10 redirects are followed.
 - Both files come from the same GitHub release, so the checksum does **not**
   protect against a replaced release: a stolen token with `contents: write`
   or a compromised maintainer account could upload a matching pair.

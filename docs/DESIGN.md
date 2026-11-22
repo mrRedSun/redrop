@@ -1244,7 +1244,7 @@ from PR titles. Tags with a `-` are prereleases, so they never become the
 
 `redrop self-update [--check] [--version vX.Y.Z]` downloads the binary for
 the current OS/architecture and `SHA256SUMS` from the release's asset list,
-over HTTPS only (loopback excepted), and replaces the running binary with a
+over HTTPS only (loopback excepted), redirects included, and replaces the running binary with a
 rename in the same directory. The download streams through a SHA-256 hasher
 into a synced staging file with the old binary's mode; on Windows the running
 binary is renamed aside first. The old binary is never touched before the

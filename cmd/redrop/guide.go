@@ -354,8 +354,8 @@ with an explicit --version. A "dev" version is a local go build.
 
 Trust: SHA256SUMS comes from the same GitHub release as the binary, so it
 catches corruption, not a replaced release; authenticity rests on HTTPS to
-GitHub. Downloads that are not HTTPS are refused. For an independent check,
-run: gh attestation verify <binary> --repo mrRedSun/redrop
+GitHub. Non-HTTPS requests and redirects are refused. For an independent
+check, run: gh attestation verify <binary> --repo mrRedSun/redrop
 REDROP_GITHUB_API points self-update at another API root (HTTPS only).
 
 ## Exit codes
