@@ -397,21 +397,29 @@ pass "feedback: closed by default, opened with set --feedback, posted as a brows
 # End-to-end encryption (--e2e): the CLI encrypts, the server stores and
 # serves only ciphertext, and Node's WebCrypto with the viewer's own
 # decryptor (scripts/e2e-decrypt.mjs) reads it back with the link's key.
+# Full links (keys included) travel in files under $WORK and on stdin, never
+# in arguments or this script's output.
 # Optional: E2E_DATA_DIR (the server's data dir) also greps the stored blobs;
 # SERVER_LOG_CMD (e.g. "journalctl -u redrop-preview -o cat") greps the
-# server's log for the key.
+# server's log for keys and refused uploads. With Chromium installed
+# (CHROMIUM, default chromium), scripts/e2e-browser.mjs runs the viewer in a
+# real browser.
 command -v node >/dev/null || die "node (24+) is needed for the end-to-end decryption check"
-DECRYPT=(node "$(cd "$(dirname "$0")" && pwd)/e2e-decrypt.mjs")
+SCRIPTS=$(cd "$(dirname "$0")" && pwd)
+# decrypt LINKFILE [PATH|--list]: decrypt the link in LINKFILE like a viewer.
+decrypt() { local f=$1; shift; node "$SCRIPTS/e2e-decrypt.mjs" "$@" < "$f"; }
+logged_uploads() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'path=/api/v1/uploads' || true; fi; }
 EMARK="e2e-secret-$RANDOM-$RANDOM"
 mkdir -p "$WORK/e2e-site/docs"
 printf '<!doctype html><title>E2E title</title><p>%s</p><a href="docs/n.txt">n</a>\n' "$EMARK" > "$WORK/e2e-site/index.html"
 printf 'note %s\n' "$EMARK" > "$WORK/e2e-site/docs/n.txt"
 EOUT=$($R share "$WORK/e2e-site" --e2e --json 2>"$WORK/e2e-share.err")
-ELINK=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$EOUT")
+ELINKF="$WORK/e2e-link"
+python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$EOUT" > "$ELINKF"
 EID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])' <<<"$EOUT")
-EKEY=${ELINK##*#k=}
-EURL=${ELINK%%#*}
-[ "${#EKEY}" = 43 ] || die "share --e2e link has no 43-character key: $ELINK"
+EKEY=$(sed 's/.*#k=//' "$ELINKF")
+EURL=$(sed 's/#.*//' "$ELINKF")
+[ "${#EKEY}" = 43 ] || die "share --e2e link has no 43-character key"
 grep -q 'end-to-end encrypted' "$WORK/e2e-share.err" || die "share --e2e notice"
 KS="$(dirname "$REDROP_CONFIG")/e2e-keys.json"
 [ "$(stat -c %a "$KS")" = 600 ] || die "key store mode"
@@ -425,13 +433,14 @@ pass "share --e2e: link carries the key, key saved (0600), server has no key and
 page=$(curl -fsS "${DOC[@]}" "$EURL")
 grep -q 'data-e2e' <<<"$page" || die "e2e viewer page"
 grep -q "$EMARK" <<<"$page" && die "viewer page holds plaintext"
-"${DECRYPT[@]}" "$ELINK" > "$WORK/e2e-index.out" || die "decrypting the start page"
+decrypt "$ELINKF" > "$WORK/e2e-index.out" || die "decrypting the start page"
 cmp -s "$WORK/e2e-index.out" "$WORK/e2e-site/index.html" || die "decrypted start page differs"
-[ "$("${DECRYPT[@]}" "$ELINK" docs/n.txt)" = "note $EMARK" ] || die "decrypted docs/n.txt"
-"${DECRYPT[@]}" "${EURL}#k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >/dev/null 2>&1 && die "a wrong key decrypted"
+[ "$(decrypt "$ELINKF" docs/n.txt)" = "note $EMARK" ] || die "decrypted docs/n.txt"
+printf '%s#k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' "$EURL" > "$WORK/e2e-wrong-link"
+decrypt "$WORK/e2e-wrong-link" >/dev/null 2>&1 && die "a wrong key decrypted"
 # Every stored object, as the server serves it, is ciphertext.
-EVER=$("${DECRYPT[@]}" "$ELINK" --list | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')
-for obj in manifest $("${DECRYPT[@]}" "$ELINK" --list | python3 -c 'import json,sys;print(" ".join(f["object"] for f in json.load(sys.stdin)["files"]))'); do
+EVER=$(decrypt "$ELINKF" --list | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')
+for obj in manifest $(decrypt "$ELINKF" --list | python3 -c 'import json,sys;print(" ".join(f["object"] for f in json.load(sys.stdin)["files"]))'); do
   curl -fsS -H 'Sec-Fetch-Dest: empty' "${EURL}__redrop/v/$EVER/$obj" -o "$WORK/e2e-object"
   head -c 4 "$WORK/e2e-object" | grep -q '^RDE' || die "object $obj lacks the format magic"
   grep -q "$EMARK" "$WORK/e2e-object" && die "object $obj holds plaintext"
@@ -446,50 +455,57 @@ fi
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${URL}__redrop/e2e-sw.js")" = 404 ] || die "worker script on a plaintext host"
 pass "e2e: viewer page, Node WebCrypto decryption, ciphertext-only objects, worker on e2e hosts only"
 
-# update and watch keep the link: same URL, same key.
+# Plaintext never goes to an encrypted artifact (review 33 B-1). With the key
+# in this machine's store, update encrypts without --e2e; from the full link
+# on stdin, a machine without the store does too; without any key, update
+# and watch refuse before uploading anything.
 sed -i "s/<p>/<p>v2 /" "$WORK/e2e-site/index.html"
-$R update "$EID" "$WORK/e2e-site" --e2e >/dev/null
-"${DECRYPT[@]}" "$ELINK" | grep -q "v2 $EMARK" || die "update --e2e: the link opens version 2"
-# The full link alone is enough: a config without the key store.
-mkdir -p "$WORK/e2e-other"
+$R update "$EID" "$WORK/e2e-site" >/dev/null 2>"$WORK/e2e-auto.err" || { cat "$WORK/e2e-auto.err"; die "update of an e2e artifact without --e2e"; }
+grep -q "encrypting with the key from this machine's key store" "$WORK/e2e-auto.err" || die "update without --e2e did not say it encrypts"
+decrypt "$ELINKF" | grep -q "v2 $EMARK" || die "update without --e2e: the link opens version 2"
+mkdir -p "$WORK/e2e-other" "$WORK/e2e-nokey"
 cp "$REDROP_CONFIG" "$WORK/e2e-other/cli.json"
-sed -i "s/<p>v2 /<p>v3 /" "$WORK/e2e-site/index.html"
-REDROP_CONFIG="$WORK/e2e-other/cli.json" $R update "$ELINK" "$WORK/e2e-site" --e2e >/dev/null || die "update --e2e with the full link"
-"${DECRYPT[@]}" "$ELINK" | grep -q "v3 $EMARK" || die "the link opens version 3"
-grep -q "$EKEY" "$WORK/e2e-other/e2e-keys.json" || die "a key that worked is remembered"
-mkdir -p "$WORK/e2e-nokey"
 cp "$REDROP_CONFIG" "$WORK/e2e-nokey/cli.json"
-set +e
-REDROP_CONFIG="$WORK/e2e-nokey/cli.json" $R update "$EID" "$WORK/e2e-site" --e2e >/dev/null 2>&1; rc=$?
-set -e
-[ "$rc" = 2 ] || die "update --e2e without any key must exit 2, got $rc"
-set +e
-$R update "$EID" "$WORK/page.html" >/dev/null 2>"$WORK/e2e-plain.err"; rc=$?
-set -e
-[ "$rc" = 2 ] && grep -q -- '--e2e' "$WORK/e2e-plain.err" || die "a plaintext version of an e2e artifact must be refused with exit 2 (got $rc)"
+sed -i "s/<p>v2 /<p>v3 /" "$WORK/e2e-site/index.html"
+REDROP_CONFIG="$WORK/e2e-other/cli.json" $R update - "$WORK/e2e-site" < "$ELINKF" >/dev/null 2>&1 || die "update with the full link on stdin"
+decrypt "$ELINKF" | grep -q "v3 $EMARK" || die "the link opens version 3"
+grep -q "$EKEY" "$WORK/e2e-other/e2e-keys.json" || die "a key that worked is remembered"
+before=$(logged_uploads)
+for cmd in "update $EID $WORK/page.html" "update $EID $WORK/e2e-site --e2e" "watch $EID $WORK/e2e-site"; do
+  set +e
+  # shellcheck disable=SC2086 # the words are the command's arguments
+  REDROP_CONFIG="$WORK/e2e-nokey/cli.json" timeout 60s $R $cmd >/dev/null 2>"$WORK/e2e-nokey.err"; rc=$?
+  set -e
+  [ "$rc" = 2 ] && grep -q 'nothing was uploaded' "$WORK/e2e-nokey.err" || die "'redrop ${cmd%% *}' without a key must exit 2 before uploading (got $rc)"
+done
+[ "$(logged_uploads)" = "$before" ] || die "a refused update or watch started an upload"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"size\":10,\"artifact_id\":\"$EID\"}" "$BASE/api/v1/uploads")
+[ "$code" = 400 ] || die "the server must refuse a plaintext upload declared for an e2e artifact, got $code"
 $R info "$EID" | grep -q "#k=$EKEY" || die "info prints the full link"
-$R watch "$EID" "$WORK/e2e-site" --e2e --debounce 300ms >"$WORK/e2e-watch.log" 2>"$WORK/e2e-watch.err" &
+$R watch "$EID" "$WORK/e2e-site" --debounce 300ms >"$WORK/e2e-watch.log" 2>"$WORK/e2e-watch.err" &
 WPID=$!
 e_ready() { grep -q "^watching" "$WORK/e2e-watch.err"; }
 e_published() { grep -q "#k=$EKEY" "$WORK/e2e-watch.log"; }
 w_exited() { ! kill -0 "$WPID" 2>/dev/null; }
-wait_until 60 e_ready || { cat "$WORK/e2e-watch.err"; die "watch --e2e did not start within 60s"; }
+wait_until 60 e_ready || { cat "$WORK/e2e-watch.err"; die "watch of an e2e artifact did not start within 60s"; }
 sed "s/<p>v3 /<p>v4 /" "$WORK/e2e-site/index.html" > "$WORK/e2e-index.tmp"
 mv "$WORK/e2e-index.tmp" "$WORK/e2e-site/index.html"
-wait_until 60 e_published || { cat "$WORK/e2e-watch.log" "$WORK/e2e-watch.err"; die "watch --e2e did not publish within 60s"; }
-"${DECRYPT[@]}" "$ELINK" | grep -q "v4 $EMARK" || die "watch --e2e: the link opens the watched change"
+wait_until 60 e_published || { cat "$WORK/e2e-watch.log" "$WORK/e2e-watch.err"; die "watch of an e2e artifact did not publish within 60s"; }
+decrypt "$ELINKF" | grep -q "v4 $EMARK" || die "watch: the link opens the watched change"
 kill -TERM "$WPID" 2>/dev/null
-wait_until 60 w_exited || die "watch --e2e did not exit within 60s of SIGTERM"
+wait_until 60 w_exited || die "watch did not exit within 60s of SIGTERM"
 WRC=0; wait "$WPID" || WRC=$?
 WPID=
-[ "$WRC" = 0 ] || die "watch --e2e exit code $WRC after SIGTERM"
-pass "e2e: update (key store or full link) and watch keep the link; plaintext versions refused"
+[ "$WRC" = 0 ] || die "watch exit code $WRC after SIGTERM"
+pass "e2e: update and watch encrypt with the stored key or the link on stdin, flag or not; without a key nothing is uploaded"
 
 # Gates still apply to the viewer page, the ciphertext and the worker.
 GOUT=$($R share "$WORK/e2e-site/docs/n.txt" --e2e --once --password-generate --json 2>/dev/null)
-GLINK=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$GOUT")
+GLINKF="$WORK/e2e-gated-link"
+python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$GOUT" > "$GLINKF"
 GPW=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["password"])' <<<"$GOUT")
-GURL=${GLINK%%#*}
+GURL=$(sed 's/#.*//' "$GLINKF")
 curl -fsS "${DOC[@]}" "$GURL" | grep -q 'password protected' || die "e2e gate"
 [ "$(code_of -H 'Sec-Fetch-Dest: empty' "${GURL}__redrop/v/1/manifest")" = 403 ] || die "ciphertext behind the gate"
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${GURL}__redrop/e2e-sw.js")" = 403 ] || die "worker behind the gate"
@@ -497,15 +513,47 @@ GC="$WORK/e2e-gate-cookies"
 curl -fsS -o /dev/null -c "$GC" -H 'Sec-Fetch-Site: same-origin' --data-urlencode "password=$GPW" "${GURL}__redrop/open"
 GCOOKIE=$(awk '$6 ~ /visit/ {print $6"="$7}' "$GC")
 [ -n "$GCOOKIE" ] || die "visit cookie after open"
-[ "$(REDROP_COOKIE="$GCOOKIE" "${DECRYPT[@]}" "$GLINK")" = "note $EMARK" ] || die "e2e content during the visit"
+[ "$(REDROP_COOKIE="$GCOOKIE" decrypt "$GLINKF")" = "note $EMARK" ] || die "e2e content during the visit"
 [ "$(code_of "${DOC[@]}" "$GURL")" = 404 ] || die "second visitor of a one-time e2e link"
 pass "e2e: password and one-time gates hold for viewer, ciphertext and worker"
 
 if [ -n "${SERVER_LOG_CMD:-}" ]; then
-  for k in "$EKEY" "${GLINK##*#k=}"; do
-    bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -qF -- "$k" && die "the server log holds an e2e key"
+  for f in "$ELINKF" "$GLINKF"; do
+    bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -qF -- "$(sed 's/.*#k=//' "$f")" && die "the server log holds an e2e key"
   done
-  pass "e2e: no key in the server log"
+  bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -q '%23\|#k=' && die "the server log holds a fragment"
+  pass "e2e: no key or fragment in the server log"
+fi
+
+# The viewer in a real browser (review 33 B-2, M1, m-A): no route open to a
+# script in the artifact holds the key, gates keep it, SVG files are inert,
+# and revoking stops an open page. Needs Chromium; the links go in a file.
+if command -v "${CHROMIUM:-chromium}" >/dev/null; then
+  B="$WORK/e2e-browser"
+  mkdir -p "$B/probe/docs"
+  cp "$SCRIPTS/e2e-browser-probe.html" "$B/probe/index.html"
+  printf '<!doctype html><meta charset="utf-8"><title>Two</title><h1 id="sec">two-8842</h1><p><a href="../index.html">back</a></p>\n' > "$B/probe/docs/two.html"
+  printf '<!doctype html><title>pw</title><p>pw-page-5150</p>\n' > "$B/pw.html"
+  printf '<!doctype html><title>once</title><p>once-page-6160</p>\n' > "$B/once.html"
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="teal"/><script>parent.document.title="svg-script-ran"</script></svg>' > "$B/logo.svg"
+  printf 'pw-%s\n' "$RANDOM$RANDOM" > "$B/password"
+  P_OUT=$($R share "$B/probe" --e2e --json 2>/dev/null)
+  W_OUT=$($R share "$B/pw.html" --e2e --password-file "$B/password" --json 2>/dev/null)
+  O_OUT=$($R share "$B/once.html" --e2e --once --json 2>/dev/null)
+  S_OUT=$($R share "$B/logo.svg" --e2e --json 2>/dev/null)
+  python3 - "$B/password" "$P_OUT" "$W_OUT" "$O_OUT" "$S_OUT" > "$B/links.json" <<'PY'
+import json, sys
+pw = open(sys.argv[1]).read().strip()
+names = ["probe", "password", "once", "svg"]
+out = {n: {k: json.loads(raw)[k] for k in ("id", "url")} for n, raw in zip(names, sys.argv[2:])}
+out["password"]["password"] = pw
+print(json.dumps(out))
+PY
+  CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
+  sed 's/^/    /' "$B/out.txt"
+  pass "e2e: in Chromium, no script in the artifact can read the key; gates keep it; SVG files are inert; revocation stops an open page"
+else
+  printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi
 
 # stdin + revoke/restore + rotate

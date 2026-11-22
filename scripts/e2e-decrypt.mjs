@@ -3,20 +3,22 @@
 // (DESIGN.md "End-to-end encrypted links"), with Node's WebCrypto and the
 // viewer's own decryptor, internal/content/static/e2e.js.
 //
-//   node scripts/e2e-decrypt.mjs LINK [PATH]   prints the file at PATH ("" = the start page)
-//   node scripts/e2e-decrypt.mjs LINK --list   prints the version's manifest as JSON
+//   node scripts/e2e-decrypt.mjs [PATH] < link.txt    prints the file at PATH ("" = the start page)
+//   node scripts/e2e-decrypt.mjs --list < link.txt    prints the version's manifest as JSON
 //
-// LINK is the full link, with #k=<key>. The key stays in this process: the
-// script sends the server only what a browser would (the page, the
-// manifest, the object). Set REDROP_COOKIE to send a visit cookie for a
-// password-protected or view-limited link. Exit codes: 0 ok, 1 failure
-// (including a wrong key or damaged content), 2 usage.
+// The full link, with #k=<key>, comes on stdin, never on the command line
+// (shell history and process lists show arguments). The key stays in this
+// process: the script sends the server only what a browser would (the
+// page, the manifest, the object). Set REDROP_COOKIE to send a visit cookie
+// for a password-protected or view-limited link. Exit codes: 0 ok, 1
+// failure (including a wrong key or damaged content), 2 usage.
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 
-const [link, arg = ''] = process.argv.slice(2)
-if (!link || !link.includes('#')) {
-  console.error('usage: e2e-decrypt.mjs LINK#k=KEY [PATH | --list]')
+const arg = process.argv[2] ?? ''
+const link = readFileSync(0, 'utf8').trim()
+if (!link.includes('#') || /\s/.test(link)) {
+  console.error('usage: e2e-decrypt.mjs [PATH | --list] < file-with-the-full-link')
   process.exit(2)
 }
 
