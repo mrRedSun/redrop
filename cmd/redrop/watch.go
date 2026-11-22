@@ -143,7 +143,7 @@ is uploaded. --e2e insists that the artifact is encrypted.`,
 	}
 	cf.register(cmd)
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
-	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eFlagHelp)
+	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eVersionFlagHelp)
 	return cmd
 }
 

@@ -557,7 +557,7 @@ process lists.`,
 	}
 	cf.register(cmd)
 	vf.register(cmd)
-	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eFlagHelp)
+	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eVersionFlagHelp)
 	return cmd
 }
 

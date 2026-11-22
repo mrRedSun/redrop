@@ -648,8 +648,8 @@ client) also counts these POSTs.
 
 ## End-to-end encrypted links
 
-`redrop share --e2e` (and `update --e2e`, `watch --e2e`) encrypts an
-artifact in the CLI before upload. The server stores and serves only
+`redrop share --e2e` encrypts an artifact in the CLI before upload, and
+`update` and `watch` encrypt every later version with the same key. The server stores and serves only
 ciphertext. The key travels in the link's fragment, which browsers never
 send to a server: `https://<slug>.usercontent.example/#k=<key>`. It answers
 issue #7. It is opt-in per artifact and permanent: an artifact is either
@@ -667,13 +667,20 @@ the disk. From those an attacker learns only:
   password hash, slug;
 * the number of files in each version (plus one, the manifest);
 * each file's size, exactly: ciphertext is 20 bytes plus the plaintext plus
-  16 bytes per 64 KiB segment, with no padding;
+  16 bytes per 64 KiB segment, with no padding. The CLI uploads the
+  objects in a random order, so neither the stored rows nor the blobs'
+  write order follow the source's path order; but someone who can guess a
+  site's layout can still match files to it by their sizes;
 * when versions were published and viewed;
 * viewer comments, if the owner turned feedback on. They are plaintext,
   including the quoted text and the page path (see below).
 
 It does not learn file contents, file names or paths, content types, the
-start page, or the page `<title>`. **Paths are encrypted**: the server
+start page, or the page `<title>`. It never receives plaintext for an
+end-to-end artifact either: `update` and `watch` read the artifact before
+uploading and encrypt with its key, or refuse, and the server refuses an
+upload declared for such an artifact unless it is declared encrypted,
+before any byte of it arrives (see "Publishing"). **Paths are encrypted**: the server
 stores an encrypted manifest and opaque random object names, and the
 viewer resolves paths from the manifest (see "Viewing"), so the server
 never needs them.
@@ -690,10 +697,29 @@ alter content, swap files between paths, versions or artifacts, or make a
 viewer show bytes the owner did not encrypt: every object is authenticated
 (see "Format").
 
+**Scripts inside the artifact** (its own code, an analytics tag, a CDN
+library, an XSS in a generated report) run on the viewer's origin, as for
+plain artifacts. They can't obtain the key: the viewer never keeps its
+text, the frame's address never holds it, and the viewer's navigation
+records never did (see "Where the key goes in the browser"). They can
+*use* the non-extractable `CryptoKey` the viewer stores, while a page of
+the link is open in that browser: decrypt what they can fetch (the current
+version, and older ones only when the owner lets viewers open them), and
+send out what they decrypted. They can't copy the key out to use later or
+elsewhere. A browser test (`scripts/e2e-browser.mjs`) checks every place
+such a script could look.
+
+**The key is permanent.** It is the same for every version, and `rotate`
+keeps it (only the slug changes). There is no way to change an artifact's
+key: whoever holds the full link, key included, can read every version,
+past and future, for as long as the link works. To cut someone off,
+rotate the link or share a new artifact. A lost key means lost content;
+nobody can recover it.
+
 **Also out of scope:** the visitor's device and browser extensions, and
-anyone the link is forwarded to. The link is the secret: whoever holds the
-full link, key included, can read every version, now and later. A lost key
-means lost content; nobody can recover it.
+anyone the link is forwarded to. The visitor's browser history and
+address-bar suggestions keep the full link, key included, as they keep
+any URL the visitor opened; the viewer can't remove that.
 
 ### Keys and links
 
@@ -711,28 +737,45 @@ means lost content; nobody can recover it.
   fragment is that rest. An artifact whose own fragment looks exactly like
   `k=` plus 43 base64url characters can't be linked to directly; that is
   accepted.
-* **Where the key goes in the browser.** The viewer reads the fragment
-  once, then:
-  * replaces the address bar without the key (`history.replaceState`), so
-    the key isn't on screen, in screenshots, or in a copied address;
-  * keeps it in `sessionStorage` for this tab and origin, so a reload, the
-    viewer's own links and the artifact's `target=_top` links keep working.
-    Closing the tab forgets it;
-  * hands the service worker a non-extractable `CryptoKey`
-    (`postMessage`), never the text;
-  * never hands it to the frame: the frame's URL, and so anything its
-    scripts read from `location` or report to analytics, never contains
-    it.
-  The artifact runs on the viewer's origin (see "Viewer frame"), so a
-  script inside it could still read the viewer's `sessionStorage`. That
-  is the artifact's own key: it gives a script only what the page already
-  shows, plus the artifact's other versions. A copied address bar has no
-  key, so forward the original link instead.
+* **Where the key goes in the browser.** The artifact runs on the
+  viewer's origin (see "Viewer frame"), so the viewer keeps nothing a
+  script there could read the key from (review 33 B-2). When it finds a
+  key in the fragment, before any frame exists, it:
+  * imports it as a non-extractable `CryptoKey` and checks it against the
+    key check, and never keeps the text (no `sessionStorage`, no
+    variable that outlives the page);
+  * stores only that `CryptoKey`, in the origin's IndexedDB (database
+    `redrop-e2e`), with the time;
+  * replaces the address bar without the key (`history.replaceState`);
+  * reloads itself. The reloaded page has no key in its URL, and so none
+    in its navigation records either: the Performance API's navigation
+    entry and the Navigation API's activation entry name the URL as it was
+    loaded, which before the reload still held the key.
+  The reloaded page reads the `CryptoKey` back, gives it to the service
+  worker (`postMessage`), and only then creates the frame. The stored key
+  lets reloads, the viewer's own links and the artifact's `target=_top`
+  links keep working for 12 hours after the full link was last opened in
+  that browser; after that, or after the site's data is cleared, the full
+  link is needed again. A wrong key is never stored. If the browser
+  refuses IndexedDB (some private windows), the viewer refuses to open
+  the page rather than keep the key any other way. A copied address bar
+  has no key, so forward the original link instead.
+* **Gates keep the fragment.** The password and Open pages carry one
+  small script, pinned in their policy by its hash, that adds the page's
+  fragment to the form's action. The redirect after Open keeps the
+  action's fragment, so a password-protected or one-time end-to-end link
+  arrives at the viewer with its key. A plain link keeps its own `#part`
+  through the gate the same way. Without scripts the fragment is lost; the
+  visitor then opens the full link again within the visit window.
 * **The key never reaches the server.** It is not in any query string,
   path, header, cookie, API call or log. Fragments are never sent in
-  requests or in `Referer`. The CLI sends only the key check below. A test
-  captures every server log line during an end-to-end share, update and
-  view, and checks the key appears nowhere.
+  requests or in `Referer`. The CLI sends only the key check below, and
+  cuts every argument it is given as `ID|URL` at `#` before using it in an
+  API path (`ID#k=…` included), keeping the key for local use. The server
+  also cuts any fragment, `%23`-encoded in a path, out of the paths it
+  logs. Tests record every request the CLI sends and every server log line
+  during end-to-end shares, updates and views, and check the key appears
+  nowhere.
 * **Key check.** `HKDF-SHA256(key, salt = "", info = "redrop-e2e/1
   key-check" ‖ 0x00 ‖ artifact ID)`, 16 bytes, stored with the artifact
   and sent with every publication. The server refuses a version whose key
@@ -743,13 +786,17 @@ means lost content; nobody can recover it.
   to the CLI config file (`REDROP_CONFIG`'s directory, or
   `<user config dir>/redrop/`), keyed by server URL and artifact ID.
   `update`, `watch`, `info` and `rotate` find it there; `update` and
-  `watch` also take it from a full link given as `ID|URL`. The file is
+  `watch` also take it from a full link given as `ID|URL`, or, to keep the
+  key out of shell history and process lists, on stdin with `-` as
+  `ID|URL` (`redrop update - report.html < link.txt`). The file is
   written like the config: a fresh 0600 file renamed into place, never
   through a symlink, and a store path that is a symlink is refused, for
-  reading too. Writers take a lock file (`e2e-keys.json.lock`), so
-  concurrent shares don't lose keys. `delete` removes the key. The key is
-  saved before anything is uploaded, so a failed save never leaves a link
-  without a stored key.
+  reading too. Writers hold the operating system's lock on
+  `e2e-keys.json.lock` (`flock`, or `LockFileEx` on Windows), so
+  concurrent shares don't lose keys; the system releases it when a writer
+  dies, so there is no stale lock to take over. `delete` removes the key.
+  The key is saved before anything is uploaded, so a failed save never
+  leaves a link without a stored key.
 
 ### Format (version 1)
 
@@ -821,6 +868,28 @@ segment  = AES-256-GCM ciphertext of up to 65536 plaintext bytes, then its 16-by
   conflict. Minting the ID on the server keeps IDs unprobeable: a
   client-chosen ID would need a "taken" answer that reveals other users'
   IDs.
+* **Plaintext never goes to an end-to-end artifact** (review 33 B-1).
+  `update` and `watch` read the artifact before uploading anything, with
+  or without `--e2e`. For an end-to-end artifact they take its key from
+  the full link given, else the key store, check it, say so on stderr, and
+  publish encrypted. Without a key they exit 2, and nothing was uploaded.
+  `watch` checks at startup. `--e2e` now only insists that the artifact is
+  encrypted. In `pkg/client`, a plaintext `Update`, `UpdateWithOptions`
+  or `UpdateDigest` reads the artifact after preparing the source and
+  before uploading or applying settings, and stops with
+  `ErrEncryptedArtifact`.
+* **Uploads declare their target.** `POST /api/v1/uploads` takes
+  `artifact_id` (the artifact a new version is for) and `e2e`. The server
+  refuses, before any byte is sent, an upload declared for an end-to-end
+  artifact without `e2e` (and the reverse). A publication must match its
+  upload's declaration: an end-to-end artifact's versions come only from
+  uploads declared encrypted for it, an upload declared for one artifact
+  can't become another's version or a new artifact, and encrypted and
+  plaintext can't be swapped. Undeclared uploads still publish plaintext
+  versions of plaintext artifacts, so older CLIs keep working. The server
+  can't stop a client from uploading plaintext as a *new* upload: that is
+  ordinary sharing; it can only refuse to let it near an encrypted
+  artifact.
 * **Update and watch.** The CLI reads the artifact (`e2e`,
   `e2e_key_check`, `next_version`), checks its key against the key check,
   encrypts for `next_version`, uploads, and publishes with
@@ -840,8 +909,9 @@ segment  = AES-256-GCM ciphertext of up to 65536 plaintext bytes, then its 16-by
   document plus its original, as without `--e2e`; the server never sees
   either.
 * **Storage (migration 8).** `artifacts.e2e` and
-  `artifacts.e2e_key_check`, and `versions.e2e`, all defaulting to
-  plaintext for existing rows. The API reports `e2e` on artifacts and
+  `artifacts.e2e_key_check`, `versions.e2e`, and `uploads.artifact_id`
+  and `uploads.e2e`, all defaulting to plaintext (and undeclared) for
+  existing rows. The API reports `e2e` on artifacts and
   versions, and `e2e_key_check` and `next_version` on the owner's artifact.
 
 ### Viewing
@@ -913,10 +983,12 @@ counting. It differs from the plain viewer:
   the key check as data attributes. The artifact ID is needed for the
   authenticated data; an ID grants nothing without the owner's token.
   This is the one exception to "the panel never shows IDs".
-* Its script (`viewer.js`, with `e2e.js`) reads the key, checks it,
-  decrypts the manifest (which checks the content before anything is
-  framed, and gives the tab title), registers the worker, gives it the
-  key, and only then points the frame at `/__redrop/v/<N>/<page>`. The
+* Its script (`viewer.js`, with `e2e.js`) takes a key from the fragment
+  as described in "Where the key goes in the browser" and reloads. The
+  reloaded page reads the stored `CryptoKey`, checks it, decrypts the
+  manifest (which checks the content before anything is framed, and gives
+  the tab title), registers the worker, gives it the key, and only then
+  points the frame at `/__redrop/v/<N>/<page>`. The
   CSP adds `e2e.js` to `script-src`, `worker-src` for the worker script
   and `connect-src` for `/__redrop/v/`, nothing else.
 * **A fragment the visitor changes** (a full link pasted into a tab that
@@ -936,9 +1008,11 @@ counting. It differs from the plain viewer:
 * **Needs HTTPS.** Browsers expose WebCrypto and service workers only to
   secure contexts (HTTPS, or `localhost`). On a plain-HTTP content domain
   the viewer explains that it can't decrypt.
-* **Files.** A `file` artifact opens in the same frame: the worker serves
-  the file inline when the browser can show it (images, audio, video, PDF,
-  text as plain text) and as a download otherwise. The panel has a
+* **Files.** A `file` artifact opens in the same frame. An image is shown
+  on a small redrop page in an `<img>`, as the plain file page shows it, so
+  an SVG's script can't run (review 33 m-A); the `<img>` request gets the
+  file. Other files are served inline when the browser can show them
+  (audio, video, PDF, text as plain text) and as a download otherwise. The panel has a
   Download button that decrypts in the viewer and saves under the original
   name.
 * **Requests without Fetch Metadata** (curl, scripts) and frames loading a
@@ -953,8 +1027,10 @@ counting. It differs from the plain viewer:
 * **Gates and lifecycle:** passwords, expiry, view limits and `--once`,
   revoke and restore, rotate, delete, rollback and older versions. They
   are all enforced by the server on the viewer page and on every
-  ciphertext and worker request, exactly as for plain artifacts. Views
-  count once per visit, on the viewer page.
+  ciphertext and worker request, exactly as for plain artifacts, and the
+  gate pages keep the key (see "Gates keep the fragment"). Views count
+  once per visit, on the viewer page; the viewer's own reload doesn't
+  count again.
 * **Rotate** gives a new slug; the key stays. The CLI prints the new link
   with the key when the key store has it.
 * **Feedback**, with a caveat the viewer can't see: comments are
@@ -982,6 +1058,9 @@ counting. It differs from the plain viewer:
   working "open" link: the server has no key. The dashboard says so.
 * **Size limits** count ciphertext, slightly larger than the plaintext;
   the manifest doesn't count against `REDROP_MAX_FILES`.
+* **Seeking in large media.** The worker answers whole files and ignores
+  `Range`: a video over 64 MiB plays as it streams, but can't seek ahead
+  of what has arrived, unlike a plain file artifact.
 
 ### Rollback
 
@@ -1267,7 +1346,9 @@ inside their containers on narrow screens. The document is readable without JS.
 The app origin's requests are logged once, by `httpapi.logRequests`: API
 calls and failures, with method, status, size and duration, never query
 strings. A path segment that follows one of `dashpaths.SecretPrefixes`
-(invite, reset and setup tokens) is written as `…`. Fuego's own access log
+(invite, reset and setup tokens) is written as `…`, and anything from a
+`#` on (a fragment a client sent encoded as `%23`, such as an end-to-end
+link's key) as `#…`. Fuego's own access log
 is off, and Fuego's other messages go to redrop's handler at `Info` or
 above only: its debug output includes decoded request bodies, with
 passwords and tokens. A test captures every log line, at debug level,

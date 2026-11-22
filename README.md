@@ -182,9 +182,10 @@ them. Per-client rate limits and a per-artifact cap (500) bound spam; see
 ### End-to-end encryption
 
 ```sh
-redrop share report.pdf --e2e        # url: https://amber-otter-quilt-river.usercontent.example/#k=…
-redrop update ID report.pdf --e2e    # same link; the key comes from the link or the local key store
-redrop watch ID ./site --e2e
+redrop share report.pdf --e2e      # url: https://amber-otter-quilt-river.usercontent.example/#k=…
+redrop update ID report.pdf        # same link, encrypted with the key saved on this machine
+redrop watch ID ./site
+redrop update - report.pdf < link.txt   # elsewhere: the full link on stdin, not in argv
 ```
 
 `--e2e` encrypts files, folders and rendered Markdown on your machine
@@ -194,20 +195,30 @@ encrypted manifest instead of file names. Someone who reads its disk or a
 backup learns sizes, file counts and timing, never content, names or titles.
 
 - **The link is the secret.** Anyone with the full link can read every
-  version. A lost link means lost content: `share --e2e` keeps a copy of
-  the key in `e2e-keys.json` next to the CLI config (0600), which `update`,
-  `watch`, `info` and `rotate` use. The dashboard and `list` show links
-  without the key.
-- **Still works:** passwords, expiry, view limits and `--once`, revoke,
-  rotate (same key), versions, the info panel, and feedback. Feedback is
-  **not** encrypted: comments, quotes and page paths reach the server in
-  plaintext.
+  version, past and future: the key never changes, not even on `rotate`.
+  A lost link means lost content: `share --e2e` keeps a copy of the key in
+  `e2e-keys.json` next to the CLI config (0600). The dashboard and `list`
+  show links without the key. Pass a full link on stdin (`-` as `ID|URL`),
+  not as an argument, so it stays out of shell history and process lists.
+- **Plaintext never reaches the server.** `update` and `watch` check the
+  artifact first and encrypt every new version with its key, with or
+  without `--e2e`. Without a key (from the store or the link) they upload
+  nothing and exit 2, and the server refuses a plaintext upload declared
+  for an encrypted artifact before any byte of it arrives.
+- **Still works:** passwords, expiry, view limits and `--once` (the gate
+  keeps the key), revoke, rotate, versions, the info panel, and feedback.
+  Feedback is **not** encrypted: comments, quotes and page paths reach the
+  server in plaintext.
 - **Stops working:** `--spa`, file listings, the dashboard preview and file
   names, the server reading `<title>` (pass `--title` to name it in the
-  dashboard; titles and notes are plaintext), and the artifact's own favicon.
-- **Viewing** needs HTTPS. redrop's viewer takes the key from the link,
-  removes it from the address bar, and decrypts in the browser through
-  redrop's own service worker; the page still runs on its own origin.
+  dashboard; titles and notes are plaintext), the artifact's own favicon,
+  and seeking in videos over 64 MiB.
+- **Viewing** needs HTTPS. redrop's viewer turns the link's key into a
+  non-extractable `CryptoKey`, removes it from the address bar, reloads,
+  and decrypts in the browser through redrop's own service worker; the
+  page still runs on its own origin. Scripts in the page can't read the
+  key, but can use it while the page is open. The browser keeps the key
+  for 12 hours, so reloads work; its history keeps the full link.
 - **Limit:** this protects stored data, not visits through a compromised
   live server, which could serve a viewer that leaks the key. Design and
   format: [`docs/DESIGN.md`](docs/DESIGN.md#end-to-end-encrypted-links).

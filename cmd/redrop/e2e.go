@@ -22,6 +22,10 @@ import (
 
 const e2eFlagHelp = "end-to-end encrypt: the key goes in the link after #k= and never reaches the server (see redrop guide)"
 
+// e2eVersionFlagHelp is --e2e on update and watch, which encrypt an
+// encrypted artifact's versions whether or not it is given.
+const e2eVersionFlagHelp = "insist that the artifact is end-to-end encrypted (its new versions are encrypted either way)"
+
 // keysPath is the key store, next to the config file.
 func keysPath() string {
 	return filepath.Join(filepath.Dir(configPath()), "e2e-keys.json")
