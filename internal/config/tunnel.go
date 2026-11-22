@@ -12,6 +12,10 @@ type Tunnels struct {
 	// PerUser is how many tunnels one user may have connected at once;
 	// 0 turns tunnels off.
 	PerUser int
+	// Stored is how many tunnel artifacts one user may keep, connected or
+	// not (expired and revoked ones count until deleted). Tunnels take no
+	// storage, so without it nothing would bound them.
+	Stored int
 	// Streams is how many requests and WebSockets one tunnel may have open;
 	// StreamsTotal bounds the same across the server (and with it the
 	// memory tunnels can hold).
@@ -20,8 +24,8 @@ type Tunnels struct {
 	// MaxRequestBytes and MaxResponseBytes bound one body each way.
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
-	// BytesPerHour is each tunnel's traffic budget, both ways, per fixed
-	// one-hour window.
+	// BytesPerHour is each user's traffic budget over all their tunnels,
+	// both ways, per fixed one-hour window.
 	BytesPerHour int64
 	// ResponseTimeout bounds a request's wait for a free stream slot, and
 	// then the app's wait to send response headers once the request
@@ -69,6 +73,9 @@ func loadTunnels() (Tunnels, error) {
 	var t Tunnels
 	var err error
 	if t.PerUser, err = envNonNegativeInt("REDROP_TUNNELS_PER_USER", "3"); err != nil {
+		return t, err
+	}
+	if t.Stored, err = envPositiveInt("REDROP_TUNNEL_ARTIFACTS_PER_USER", "20"); err != nil {
 		return t, err
 	}
 	if t.Streams, err = envPositiveInt("REDROP_TUNNEL_STREAMS", "32"); err != nil {

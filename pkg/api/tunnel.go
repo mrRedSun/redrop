@@ -21,6 +21,9 @@ const (
 	// CodeTunnelLimit (429): the user has as many tunnels connected as the
 	// server allows. The CLI stops.
 	CodeTunnelLimit = "tunnel_limit"
+	// CodeTunnelCount (409): the user keeps as many tunnels as the server
+	// allows, so no new one can be created; reuse one (--id) or delete one.
+	CodeTunnelCount = "tunnel_count_limit"
 )
 
 // WebSocket close codes the server ends a tunnel connection with. Any other

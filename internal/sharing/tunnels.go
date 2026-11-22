@@ -2,6 +2,7 @@ package sharing
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -57,7 +58,10 @@ func (s *Service) CreateTunnel(ctx context.Context, actor Actor, set TunnelSetti
 	id, err := s.db.CreateTunnel(ctx, &store.NewArtifact{
 		UserID: actor.UserID, TokenID: actor.TokenID, TokenName: actor.TokenName,
 		Title: title, PasswordHash: pwHash, ExpiresAt: exp, InfoButton: set.InfoButton, Feedback: set.Feedback,
-	})
+	}, s.cfg.Tunnels.Stored)
+	if errors.Is(err, store.ErrTunnelLimit) {
+		return Artifact{}, apperr.Conflict("you have %d tunnels, the most this server allows; reuse one with redrop tunnel PORT --id ID, or delete one", s.cfg.Tunnels.Stored).WithCode(api.CodeTunnelCount)
+	}
 	if err != nil {
 		return Artifact{}, mapStore(err)
 	}
