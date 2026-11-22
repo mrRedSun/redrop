@@ -387,3 +387,34 @@ func TestByteBudgetIsPerUser(t *testing.T) {
 		t.Fatalf("another owner's tunnel: %d", status)
 	}
 }
+
+// TestEndingALinkReleasesItsSlots: when a connection ends mid-stream, every
+// slot its streams held goes with it.
+func TestEndingALinkReleasesItsSlots(t *testing.T) {
+	lim := testLimits()
+	lim.MaxResponseBytes = 1 << 40
+	writing := make(chan struct{}, 4)
+	f := newFixture(t, lim, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := make([]byte, 32<<10)
+		writing <- struct{}{}
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	f.connectWS(owner("t1", "u1"))
+	for range 3 {
+		r, err := f.request(context.Background(), "GET", "t1", "/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		within(t, "the download", writing)
+	}
+	if got := len(f.reg.slots); got != 3 {
+		t.Fatalf("slots in use while downloading: %d", got)
+	}
+	f.reg.End("t1", WhyAdmin)
+	waitFor(t, "the slots to be released", func() bool { return len(f.reg.slots) == 0 })
+}

@@ -124,6 +124,17 @@ func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 	}
 	sess.Close()
 	l.transport.CloseIdleConnections()
+	// Their reads have ended with the session; close what is left, so every
+	// slot goes with the connection.
+	l.mu.Lock()
+	left := make([]*stream, 0, len(l.streams))
+	for st := range l.streams {
+		left = append(left, st)
+	}
+	l.mu.Unlock()
+	for _, st := range left {
+		st.Close()
+	}
 	code, why := l.closeReason()
 	if why == "" {
 		why = "connection closed"
