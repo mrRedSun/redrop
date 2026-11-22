@@ -115,11 +115,15 @@ func errTunnelVersions() error {
 
 // syncTunnel tells the registry about a tunnel's access after a change:
 // a link that is no longer live ends its connection; otherwise the expiry
-// and access generation are updated.
+// and access generation are updated. Each call reads the committed row and
+// applies it under one lock, so of two changes racing, the one applied last
+// is the newest state, never an older expiry read before the other commit.
 func (s *Service) syncTunnel(ctx context.Context, id string) {
 	if s.tunnels == nil {
 		return
 	}
+	s.tunnelSync.Lock()
+	defer s.tunnelSync.Unlock()
 	a, err := s.db.ArtifactByID(ctx, id)
 	if err != nil {
 		s.tunnels.End(id, tunnel.WhyDeleted)

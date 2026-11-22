@@ -55,7 +55,8 @@ type Service struct {
 
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
 
-	tunnels *tunnel.Registry // live tunnel connections (SetTunnels); nil = none
+	tunnels    *tunnel.Registry // live tunnel connections (SetTunnels); nil = none
+	tunnelSync sync.Mutex       // orders syncTunnel's read-then-apply (see there)
 }
 
 // maxLimiterKeys bounds each unlock limiter's table (about 10 MiB when
