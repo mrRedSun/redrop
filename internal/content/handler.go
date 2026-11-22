@@ -619,8 +619,9 @@ func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
 			d := h.sharing.Decide(a, grants, time.Now())
 			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
 			if proven && sharing.IsTunnel(a) {
-				// The app's own icon, when its tunnel is connected.
-				if h.tunnels != nil && h.tunnels.Serve(w, r, h.tunnelVisit(r, a)) {
+				// The app's own icon, when its tunnel is connected, under
+				// the same rules as the tunnel's other paths.
+				if !sameSiteRefused(r) && h.tunnels != nil && h.tunnels.Serve(w, withoutLinkParams(r), h.tunnelVisit(r, a)) {
 					return
 				}
 			} else if proven {
