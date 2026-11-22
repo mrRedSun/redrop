@@ -82,6 +82,9 @@ func newFixture(t *testing.T, lim config.Tunnels, app http.Handler) *fixture {
 		if id == "" {
 			id = "t1"
 		}
+		for k, v := range contentHeaders {
+			w.Header().Set(k, v)
+		}
 		gen, _ := strconv.Atoi(r.Header.Get("X-Test-Gen"))
 		v := Visit{ArtifactID: id, AccessGen: gen, ClientIP: "192.0.2.1", Proto: "https",
 			Reserved: func(name string) bool { return name == "__Host-rd_visit" }, Strip: []string{"CF-IPCountry"}, Page: testPage}
@@ -91,6 +94,16 @@ func newFixture(t *testing.T, lim config.Tunnels, app http.Handler) *fixture {
 	}))
 	t.Cleanup(f.front.Close)
 	return f
+}
+
+// unchanged is a recheck that finds nothing changed since the first check.
+func unchanged(o Owner) func() (Owner, error) { return func() (Owner, error) { return o, nil } }
+
+// contentHeaders are headers the content handler sets on every response,
+// set here by the test front door the same way.
+var contentHeaders = map[string]string{
+	"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "private, no-cache", "Referrer-Policy": "no-referrer",
+	"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "frame-ancestors 'self'", "Permissions-Policy": "camera=()",
 }
 
 func owner(id, user string) Owner {
@@ -123,7 +136,7 @@ func (f *fixture) connect(o Owner) *peer {
 // (it may end at once).
 func (f *fixture) start(o Owner) *peer {
 	f.t.Helper()
-	lease, err := f.reg.Reserve(o)
+	lease, err := f.reg.Reserve(o, unchanged(o))
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -134,7 +147,7 @@ func (f *fixture) start(o Owner) *peer {
 // connectWS connects over a real WebSocket, as in production.
 func (f *fixture) connectWS(o Owner) *peer {
 	f.t.Helper()
-	lease, err := f.reg.Reserve(o)
+	lease, err := f.reg.Reserve(o, unchanged(o))
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -146,8 +159,8 @@ func (f *fixture) connectWS(o Owner) *peer {
 			return
 		}
 		ws = c
+		// The handler returns; the hijacked connection lives on.
 		accepted <- websocket.NetConn(context.Background(), c, websocket.MessageBinary)
-		<-r.Context().Done()
 	}))
 	f.t.Cleanup(srv.Close)
 	cws, _, err := websocket.Dial(context.Background(), srv.URL, nil)

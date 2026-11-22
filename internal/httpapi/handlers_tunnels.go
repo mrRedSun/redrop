@@ -45,7 +45,10 @@ func (a *API) connectTunnel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	lease, err := a.tunnels.Reserve(owner)
+	// Reserve runs the checks once more after registering the link: a
+	// revoke, a disabled account or a deleted token between the checks
+	// above and the registration would otherwise find no link to end.
+	lease, err := a.tunnels.Reserve(owner, func() (tunnel.Owner, error) { return a.recheckTunnel(r, owner) })
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -59,6 +62,20 @@ func (a *API) connectTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	conn := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	lease.Serve(conn, func(code int, reason string) { ws.Close(websocket.StatusCode(code), reason) })
+}
+
+// recheckTunnel runs the connect checks again: the same token, still
+// valid, for an active account, and the tunnel still the actor's and live.
+func (a *API) recheckTunnel(r *http.Request, before tunnel.Owner) (tunnel.Owner, error) {
+	p, err := a.identify(r)
+	if err != nil {
+		return tunnel.Owner{}, err
+	}
+	if tokenID, _ := p.Token(); !p.IsToken() || tokenID != before.TokenID || p.UserID() != before.UserID {
+		return tunnel.Owner{}, apperr.Unauthorized("the API token changed while connecting")
+	}
+	ctx := context.WithValue(r.Context(), ctxKey{}, p)
+	return a.sharing.TunnelOwner(ctx, actorFrom(ctx), before.ArtifactID, before.Client)
 }
 
 func (h adminAPI) listTunnels(c fuego.ContextNoBody) (api.TunnelList, error) {

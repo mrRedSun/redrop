@@ -1,15 +1,20 @@
 package tunnel
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"io"
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Visit is a visitor's request that passed the access check (the content
@@ -36,8 +41,10 @@ type Visit struct {
 
 // Serve forwards req through the tunnel and writes the app's answer. It
 // returns false, having written nothing, when the tunnel is not connected.
-// The caller has already set the content host's own response headers on w.
+// The caller has already set the content host's own response headers on w;
+// they are kept for the final response, whatever the app sends first.
 func (r *Registry) Serve(w http.ResponseWriter, req *http.Request, v Visit) bool {
+	arrived := time.Now()
 	l := r.connected(v.ArtifactID)
 	if l == nil {
 		return false
@@ -46,11 +53,11 @@ func (r *Registry) Serve(w http.ResponseWriter, req *http.Request, v Visit) bool
 		v.Page(w, http.StatusRequestEntityTooLarge, "Too large", "This request is larger than the server allows for a tunnel.")
 		return true
 	}
-	if r.budget.Blocked(v.ArtifactID) {
-		r.overBudget(w, v)
+	if r.budget.Blocked(l.owner.UserID) {
+		r.overBudget(w, l, v)
 		return true
 	}
-	release, err := l.acquire(req.Context())
+	sl, err := l.acquire(req.Context(), r.lim.ResponseTimeout, v.AccessGen)
 	switch {
 	case errors.Is(err, errOffline):
 		return false
@@ -61,8 +68,14 @@ func (r *Registry) Serve(w http.ResponseWriter, req *http.Request, v Visit) bool
 	case err != nil:
 		return true // the visitor went away
 	}
-	defer release()
-	p := &proxy{reg: r, l: l, v: v, w: w}
+	defer sl.done()
+	// The rest of the response timeout is what the app gets to send its
+	// headers once the request is sent: one budget for both waits.
+	p := &proxy{reg: r, l: l, v: v, slot: sl, headerBudget: r.lim.ResponseTimeout - time.Since(arrived)}
+	defer p.stopHeaderTimer() // a request that failed before its headers
+	vw := newVisitorWriter(w, r.lim.IdleTimeout)
+	p.own = vw.own
+	defer vw.clearDeadline()
 	rp := &httputil.ReverseProxy{
 		Rewrite:        p.rewrite,
 		Transport:      l.transport,
@@ -71,18 +84,19 @@ func (r *Registry) Serve(w http.ResponseWriter, req *http.Request, v Visit) bool
 		ErrorHandler:   p.fail,
 		ErrorLog:       discardLog,
 	}
-	rp.ServeHTTP(w, req)
+	rp.ServeHTTP(vw, req)
 	return true
 }
 
-func (r *Registry) overBudget(w http.ResponseWriter, v Visit) {
-	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(r.budget.Wait(v.ArtifactID).Seconds()))))
-	v.Page(w, http.StatusTooManyRequests, "This tunnel used its traffic for now", "It has moved as much data this hour as the server allows. Try again later.")
+func (r *Registry) overBudget(w http.ResponseWriter, l *link, v Visit) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(r.budget.Wait(l.owner.UserID).Seconds()))))
+	v.Page(w, http.StatusTooManyRequests, "This tunnel used its traffic for now", "Its owner's tunnels have moved as much data this hour as the server allows. Try again later.")
 }
 
 var (
 	errRequestTooLarge  = errors.New("request body over the tunnel limit")
 	errResponseTooLarge = errors.New("response body over the tunnel limit")
+	errHeaderTimeout    = errors.New("the app did not send response headers in time")
 )
 
 // proxy is one request's proxying state.
@@ -90,14 +104,21 @@ type proxy struct {
 	reg     *Registry
 	l       *link
 	v       Visit
-	w       http.ResponseWriter
+	slot    *slot
+	own     http.Header // the content host's headers, applied to the final response
 	reqBody *limitedBody
+
+	outCtx       context.Context // the request to the app
+	headerBudget time.Duration
+	mu           sync.Mutex
+	headerTimer  *time.Timer
+	gotHeaders   bool
 }
 
 // rewrite prepares the outbound request (DESIGN.md "What the app
 // receives"). ReverseProxy has already removed the hop-by-hop headers
-// (keeping Upgrade for upgrades) and every Forwarded and X-Forwarded-*
-// header the visitor sent.
+// (keeping Upgrade for upgrades) and Forwarded, X-Forwarded-For, -Host and
+// -Proto; cleanRequestHeader removes the rest.
 func (p *proxy) rewrite(pr *httputil.ProxyRequest) {
 	out := pr.Out
 	out.URL.Scheme = "http"
@@ -111,21 +132,47 @@ func (p *proxy) rewrite(pr *httputil.ProxyRequest) {
 		p.reqBody = &limitedBody{ReadCloser: out.Body, left: p.reg.lim.MaxRequestBytes, err: errRequestTooLarge}
 		out.Body = p.reqBody
 	}
-	pr.Out = out.WithContext(withGen(out.Context(), p.v.AccessGen))
+	ctx, cancel := context.WithCancelCause(withSlot(out.Context(), p.slot))
+	p.outCtx = ctx
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		// The app's time to answer starts once the whole request reached it.
+		WroteRequest: func(httptrace.WroteRequestInfo) { p.startHeaderTimer(func() { cancel(errHeaderTimeout) }) },
+	})
+	pr.Out = out.WithContext(ctx)
+}
+
+func (p *proxy) startHeaderTimer(expire func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.gotHeaders && p.headerTimer == nil {
+		p.headerTimer = time.AfterFunc(max(p.headerBudget, 0), expire)
+	}
+}
+
+func (p *proxy) stopHeaderTimer() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.gotHeaders = true
+	if p.headerTimer != nil {
+		p.headerTimer.Stop()
+	}
 }
 
 // proxyRemoved are request headers that describe the visitor's path to
 // redrop, not the visitor's request to the app.
-var proxyRemoved = []string{"X-Real-Ip", "True-Client-Ip", "Cdn-Loop"}
+var proxyRemoved = []string{"Forwarded", "X-Real-Ip", "True-Client-Ip", "Client-Ip", "X-Client-Ip", "X-Cluster-Client-Ip", "Cdn-Loop",
+	// The server answers Expect: 100-continue itself.
+	"Expect"}
 
-// cleanRequestHeader removes proxy and CDN headers (every CF-* header among
-// them) and redrop's own cookies.
+// cleanRequestHeader removes proxy and CDN headers (every X-Forwarded-* and
+// CF-* header among them, and any header name with an underscore, which
+// CGI-style servers read as the dashed name) and redrop's own cookies.
 func cleanRequestHeader(h http.Header, strip []string, reserved func(string) bool) {
 	for _, k := range append(proxyRemoved, strip...) {
 		h.Del(k)
 	}
 	for k := range h {
-		if strings.HasPrefix(k, "Cf-") {
+		if strings.HasPrefix(k, "X-Forwarded-") || strings.HasPrefix(k, "Cf-") || strings.ContainsRune(k, '_') {
 			delete(h, k)
 		}
 	}
@@ -148,7 +195,11 @@ func cleanRequestHeader(h http.Header, strip []string, reserved func(string) boo
 // modifyResponse applies the response rules (DESIGN.md "What visitors
 // receive") and bounds the body.
 func (p *proxy) modifyResponse(resp *http.Response) error {
-	cleanResponseHeader(p.w.Header(), resp.Header, p.v.Reserved)
+	p.stopHeaderTimer()
+	if p.slot.changed.Load() {
+		return errAccessChanged
+	}
+	cleanResponseHeader(p.own, resp.Header, p.v.Reserved)
 	if resp.StatusCode == http.StatusSwitchingProtocols || resp.Request.Method == http.MethodHead {
 		return nil
 	}
@@ -164,14 +215,17 @@ func (p *proxy) modifyResponse(resp *http.Response) error {
 
 // forcedHeaders are set by the content handler for every content response
 // and are not the app's to choose; the app's own values are dropped.
-var forcedHeaders = []string{"X-Robots-Tag", "Referrer-Policy", "X-Content-Type-Options", "Strict-Transport-Security"}
+var forcedHeaders = []string{"X-Robots-Tag", "Referrer-Policy", "X-Content-Type-Options", "Strict-Transport-Security",
+	// "cookies" would clear every artifact's grants on the content domain,
+	// which is one site; "storage" and "cache" are no app's to send either.
+	"Clear-Site-Data"}
 
 // cacheHeaders could let a CDN keep a response and serve it without the
 // access check; the content handler's private Cache-Control stands instead.
 var cacheHeaders = []string{"Cache-Control", "Expires", "Cdn-Cache-Control", "Cloudflare-Cdn-Cache-Control", "Surrogate-Control"}
 
 // cleanResponseHeader adjusts the app's response headers (app) and the
-// headers the content handler already set (own) before they are merged.
+// content host's headers for this response (own) before they are merged.
 func cleanResponseHeader(own, app http.Header, reserved func(string) bool) {
 	for _, k := range forcedHeaders {
 		app.Del(k)
@@ -235,15 +289,18 @@ func (p *proxy) fail(w http.ResponseWriter, req *http.Request, err error) {
 	case errors.Is(err, errResponseTooLarge):
 		kind = "response too large"
 		p.v.Page(w, http.StatusBadGateway, "Answer too large", "The app's answer is larger than the server allows for a tunnel.")
-	case p.reg.budget.Blocked(p.v.ArtifactID):
+	case p.reg.budget.Blocked(p.l.owner.UserID):
 		kind = "over budget"
-		p.reg.overBudget(w, p.v)
+		p.reg.overBudget(w, p.l, p.v)
 	case errors.Is(err, errOffline):
 		kind = "offline"
 		p.v.Page(w, http.StatusServiceUnavailable, "This tunnel is offline", offlineText)
-	case errors.Is(err, errAccessChanged):
+	case p.slot.changed.Load() || errors.Is(err, errAccessChanged):
 		kind = "access changed"
 		p.v.Page(w, http.StatusServiceUnavailable, "Access changed", "The link's access changed. Reload the page.")
+	case p.outCtx != nil && errors.Is(context.Cause(p.outCtx), errHeaderTimeout):
+		kind = "timeout"
+		p.v.Page(w, http.StatusGatewayTimeout, "The app took too long", "The app behind this tunnel did not start answering in time.")
 	case req.Context().Err() != nil:
 		kind = "visitor left"
 		w.WriteHeader(http.StatusBadGateway)
@@ -264,6 +321,104 @@ const offlineText = "The app behind this link isn't connected right now. Try aga
 func OfflinePage(w http.ResponseWriter, page func(http.ResponseWriter, int, string, string)) {
 	w.Header().Set("Retry-After", "30")
 	page(w, http.StatusServiceUnavailable, "This tunnel is offline", offlineText)
+}
+
+// visitorWriter is the visitor's ResponseWriter as the reverse proxy sees
+// it.
+//
+//   - It holds the content host's headers (own) and applies them when the
+//     final response is written, or before a protocol switch. They can't
+//     simply stay on the writer: ReverseProxy clears the header map after
+//     each 1xx response it forwards.
+//   - It drops informational (1xx) responses: the server answers a visitor's
+//     Expect: 100-continue itself, and 103 Early Hints is only a hint. A 101
+//     goes through Hijack, not WriteHeader.
+//   - Every write to the visitor gets a deadline of the idle timeout, so a
+//     visitor who stops reading can't hold the request, its stream and its
+//     slots.
+type visitorWriter struct {
+	http.ResponseWriter
+	rc      *http.ResponseController
+	own     http.Header
+	idle    time.Duration
+	applied bool
+}
+
+func newVisitorWriter(w http.ResponseWriter, idle time.Duration) *visitorWriter {
+	own := w.Header().Clone()
+	clear(w.Header())
+	return &visitorWriter{ResponseWriter: w, rc: http.NewResponseController(w), own: own, idle: idle}
+}
+
+// apply merges own into the headers about to be sent. The policy and Vary
+// headers come first, before the app's; the others replace the app's (its
+// copies of forced headers are already gone).
+func (v *visitorWriter) apply() {
+	if v.applied {
+		return
+	}
+	v.applied = true
+	h := v.ResponseWriter.Header()
+	for k, vals := range v.own {
+		switch k {
+		case "Content-Security-Policy", "Vary":
+			h[k] = append(append([]string(nil), vals...), h[k]...)
+		default:
+			h[k] = vals
+		}
+	}
+}
+
+func (v *visitorWriter) deadline() { v.rc.SetWriteDeadline(time.Now().Add(v.idle)) }
+
+// clearDeadline removes the write deadline when the request ends: the
+// visitor's connection may carry other requests.
+func (v *visitorWriter) clearDeadline() { v.rc.SetWriteDeadline(time.Time{}) }
+
+func (v *visitorWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 {
+		return
+	}
+	v.apply()
+	v.deadline()
+	v.ResponseWriter.WriteHeader(code)
+}
+
+func (v *visitorWriter) Write(b []byte) (int, error) {
+	v.apply()
+	v.deadline()
+	return v.ResponseWriter.Write(b)
+}
+
+func (v *visitorWriter) FlushError() error {
+	v.deadline()
+	return v.rc.Flush()
+}
+
+// Hijack hands over the visitor's connection for a protocol switch (a
+// WebSocket), with the content host's headers on the 101 and a deadline on
+// every write.
+func (v *visitorWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	v.apply()
+	c, brw, err := v.rc.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &deadlineConn{Conn: c, idle: v.idle}, brw, nil
+}
+
+func (v *visitorWriter) Unwrap() http.ResponseWriter { return v.ResponseWriter }
+
+// deadlineConn is a hijacked visitor connection whose writes must make
+// progress within the idle timeout.
+type deadlineConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c *deadlineConn) Write(b []byte) (int, error) {
+	c.SetWriteDeadline(time.Now().Add(c.idle))
+	return c.Conn.Write(b)
 }
 
 // limitedBody fails with err once more than left bytes were read.

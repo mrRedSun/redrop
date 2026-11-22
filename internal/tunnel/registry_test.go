@@ -17,7 +17,7 @@ func TestReservePerUserLimitAndInUse(t *testing.T) {
 	f := newFixture(t, lim, http.NotFoundHandler())
 	f.connect(owner("t1", "u1"))
 	f.connect(owner("t2", "u1"))
-	_, err := f.reg.Reserve(owner("t3", "u1"))
+	_, err := f.reg.Reserve(owner("t3", "u1"), unchanged(owner("t3", "u1")))
 	if e := apperr.As(err); e.Kind != apperr.KindRateLimited || e.Code != api.CodeTunnelLimit {
 		t.Fatalf("third tunnel: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestReservePerUserLimitAndInUse(t *testing.T) {
 	// Another CLI process can't take a connected tunnel.
 	other := owner("t1", "u1")
 	other.Client = "another-process"
-	if _, err := f.reg.Reserve(other); apperr.As(err).Code != api.CodeTunnelInUse {
+	if _, err := f.reg.Reserve(other, unchanged(other)); apperr.As(err).Code != api.CodeTunnelInUse {
 		t.Fatalf("second process: %v", err)
 	}
 	// Turned off: refused.
@@ -34,7 +34,7 @@ func TestReservePerUserLimitAndInUse(t *testing.T) {
 	offLim.PerUser = 0
 	off := New(offLim, f.reg.log)
 	defer off.Close()
-	if _, err := off.Reserve(owner("t9", "u9")); apperr.As(err).Kind != apperr.KindForbidden {
+	if _, err := off.Reserve(owner("t9", "u9"), unchanged(owner("t9", "u9"))); apperr.As(err).Kind != apperr.KindForbidden {
 		t.Fatalf("tunnels off: %v", err)
 	}
 }
@@ -151,7 +151,7 @@ func TestShutdownTellsCLIsToReconnect(t *testing.T) {
 	if code, _ := p.closeCode(t); code != websocketGoingAway {
 		t.Fatalf("shutdown closed with %d", code)
 	}
-	if _, err := f.reg.Reserve(owner("t2", "u2")); apperr.As(err).Kind != apperr.KindConflict {
+	if _, err := f.reg.Reserve(owner("t2", "u2"), unchanged(owner("t2", "u2"))); apperr.As(err).Kind != apperr.KindConflict {
 		t.Fatalf("reserve after shutdown: %v", err)
 	}
 }
@@ -160,7 +160,7 @@ func TestCancelledLeaseFreesTheSlot(t *testing.T) {
 	lim := testLimits()
 	lim.PerUser = 1
 	f := newFixture(t, lim, http.NotFoundHandler())
-	lease, err := f.reg.Reserve(owner("t1", "u1"))
+	lease, err := f.reg.Reserve(owner("t1", "u1"), unchanged(owner("t1", "u1")))
 	if err != nil {
 		t.Fatal(err)
 	}

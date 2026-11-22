@@ -38,10 +38,10 @@ const keepAlive = 30 * time.Second
 // about a minute.
 const writeTimeout = 30 * time.Second
 
-// maxBudgetKeys bounds the byte-budget table. Only connected tunnels create
-// keys, and the per-user limit bounds those, so it never fills in practice;
-// when it does, a new tunnel is refused traffic (fail closed) rather than
-// resetting another tunnel's budget.
+// maxBudgetKeys bounds the byte-budget table, keyed by user. Only users with
+// a connected tunnel create keys, so it never fills in practice; when it
+// does, a new user is refused traffic (fail closed) rather than resetting
+// another user's budget.
 const maxBudgetKeys = 50_000
 
 // Close reasons sent with api.TunnelCloseEnded.
@@ -59,7 +59,7 @@ const (
 type Registry struct {
 	lim    config.Tunnels
 	log    *slog.Logger
-	budget *security.Limiter // bytes per tunnel per hour
+	budget *security.Limiter // bytes per user per hour, over all their tunnels
 	slots  chan struct{}     // server-wide stream slots
 
 	mu      sync.Mutex
@@ -102,8 +102,30 @@ type Owner struct {
 // Reserve claims the tunnel for a connection that is about to be upgraded.
 // It enforces the per-user limit and refuses a tunnel held by another CLI
 // process; a reservation by the same process replaces the old connection.
+//
+// The caller checked access before calling it. A revoke, a disabled account
+// or a deleted token that lands after that check but before the link is
+// registered finds nothing to end, so once the link is registered Reserve
+// calls recheck, which runs the checks again: an error gives the
+// reservation up, and the owner it returns brings the access generation and
+// expiry up to date. Changes after that reach the registered link.
+//
 // Errors are apperr values the API returns as they are.
-func (r *Registry) Reserve(o Owner) (*Lease, error) {
+func (r *Registry) Reserve(o Owner, recheck func() (Owner, error)) (*Lease, error) {
+	le, err := r.reserve(o)
+	if err != nil {
+		return nil, err
+	}
+	now, err := recheck()
+	if err != nil {
+		le.Cancel()
+		return nil, err
+	}
+	le.l.setAccess(now.AccessGen, now.Expires)
+	return le, nil
+}
+
+func (r *Registry) reserve(o Owner) (*Lease, error) {
 	if !r.lim.Enabled() {
 		return nil, apperr.Forbidden("tunnels are turned off on this server")
 	}
@@ -160,6 +182,10 @@ const websocketNormal = 1000
 
 // websocketGoingAway is sent at server shutdown (RFC 6455 1001).
 const websocketGoingAway = 1001
+
+// websocketPolicy ends a connection whose CLI broke the protocol (RFC 6455
+// 1008, policy violation).
+const websocketPolicy = 1008
 
 // Serve runs the tunnel over conn, the upgraded WebSocket as a byte stream,
 // until the CLI goes away or the registry ends it. When the registry ends
@@ -263,12 +289,16 @@ func (r *Registry) Shutdown(wait time.Duration) {
 
 // Info describes a connected tunnel for administrators.
 type Info struct {
-	ArtifactID    string
-	UserID        string
-	Username      string
-	TokenName     string
-	ConnectedAt   time.Time
-	Streams       int
+	ArtifactID  string
+	UserID      string
+	Username    string
+	TokenName   string
+	ConnectedAt time.Time
+	// Streams are the stream slots in use: requests in flight and streams
+	// not yet closed.
+	Streams int
+	// BytesThisHour is the owner's use of the hourly byte budget, over all
+	// their tunnels.
 	BytesThisHour int64
 }
 
@@ -287,7 +317,7 @@ func (r *Registry) Connected() []Info {
 			continue
 		}
 		out = append(out, Info{ArtifactID: l.owner.ArtifactID, UserID: l.owner.UserID, Username: l.owner.Username, TokenName: l.owner.TokenName,
-			ConnectedAt: at, Streams: streams, BytesThisHour: int64(r.budget.Count(l.owner.ArtifactID))})
+			ConnectedAt: at, Streams: streams, BytesThisHour: int64(r.budget.Count(l.owner.UserID))})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ConnectedAt.Before(out[j].ConnectedAt) })
 	return out
@@ -310,7 +340,10 @@ func (r *Registry) endLocked(l *link, code int, why string) {
 // yamuxConfig is the server's session configuration: 256 KiB windows
 // (yamux's minimum), keepalive pings every 30 seconds with 30 seconds to
 // answer (the CLI uses the same, see pkg/client), and yamux's own
-// diagnostics at debug level (they never hold request data).
+// diagnostics at debug level (they never hold request data). The accept
+// backlog stays at yamux's default: it also sizes the server's own
+// in-flight stream opens, and the CLI may not open streams anyway (see
+// link.refuseStreams).
 func yamuxConfig(logger *slog.Logger) *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.KeepAliveInterval = keepAlive

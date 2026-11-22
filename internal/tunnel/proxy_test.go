@@ -345,13 +345,16 @@ func TestHeaderHygiene(t *testing.T) {
 		hd.Set("Strict-Transport-Security", "max-age=1")
 		hd.Set("Cross-Origin-Resource-Policy", "cross-origin")
 		hd.Set("Permissions-Policy", "camera=(self)")
+		hd.Set("Clear-Site-Data", `"cookies", "storage"`)
 	}))
 	f.connect(owner("t1", "u1"))
 	r, err := f.request(context.Background(), "GET", "t1", "/", nil,
 		"X-Forwarded-For", "203.0.113.5", "X-Forwarded-Host", "evil.example", "Forwarded", "for=1.2.3.4", "X-Real-IP", "1.2.3.4",
 		"True-Client-IP", "1.2.3.4", "CF-Connecting-IP", "1.2.3.4", "CF-Ray", "x", "CF-IPCountry", "NZ", "CDN-Loop", "cloudflare",
 		"Cookie", "__Host-rd_visit=secret; app=1;  other=2", "Authorization", "Bearer app-token", "Connection", "X-Hop", "X-Hop", "1",
-		"Proxy-Authorization", "x", "Keep-Alive", "timeout=5")
+		"Proxy-Authorization", "x", "Keep-Alive", "timeout=5",
+		"X-Forwarded-Port", "1234", "X-Forwarded-Prefix", "/evil", "X-Forwarded-Server", "evil", "X-Forwarded-Ssl", "on",
+		"X_Forwarded_For", "6.6.6.6", "X_Real_IP", "6.6.6.6", "Client-Ip", "6.6.6.6", "X-Client-Ip", "6.6.6.6")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +364,9 @@ func TestHeaderHygiene(t *testing.T) {
 		"X-Forwarded-For": "192.0.2.1", "X-Forwarded-Proto": "https", "Forwarded": "", "X-Real-Ip": "", "True-Client-Ip": "",
 		"Cf-Connecting-Ip": "", "Cf-Ray": "", "Cf-Ipcountry": "", "Cdn-Loop": "", "Cookie": "app=1; other=2",
 		"Authorization": "Bearer app-token", "X-Hop": "", "Proxy-Authorization": "", "Keep-Alive": "",
-		"Host": strings.TrimPrefix(f.app.URL, "http://"),
+		"Host":             strings.TrimPrefix(f.app.URL, "http://"),
+		"X-Forwarded-Port": "", "X-Forwarded-Prefix": "", "X-Forwarded-Server": "", "X-Forwarded-Ssl": "",
+		"X_forwarded_for": "", "X_real_ip": "", "Client-Ip": "", "X-Client-Ip": "",
 	}
 	for k, v := range want {
 		if got := strings.Join(h.Values(k), ","); got != v {
@@ -375,7 +380,7 @@ func TestHeaderHygiene(t *testing.T) {
 		t.Errorf("Set-Cookie %q", got)
 	}
 	for k, v := range map[string]string{"Cache-Control": "private, no-store", "Surrogate-Control": "", "Strict-Transport-Security": "",
-		"Cross-Origin-Resource-Policy": "cross-origin", "Permissions-Policy": "camera=(self)"} {
+		"Cross-Origin-Resource-Policy": "cross-origin", "Permissions-Policy": "camera=(self)", "Clear-Site-Data": ""} {
 		if got := strings.Join(r.Header.Values(k), ","); got != v {
 			t.Errorf("visitor got %s %q, want %q", k, got, v)
 		}

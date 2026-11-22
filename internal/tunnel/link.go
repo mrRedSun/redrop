@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -19,9 +20,11 @@ var (
 	errAccessChanged = errors.New("access changed")
 )
 
-// streamCloseTimeout bounds how long a stream this side closed may wait for
-// the CLI's own close before it is dropped (yamux's default is 5 minutes).
-const streamCloseTimeout = 30 * time.Second
+// lingerTimeout is how long the CLI has to close a stream the server
+// closed (see stream.linger). The CLI closes its end as soon as the server
+// gives a request up, normally within a round trip; one that doesn't is
+// broken or hostile, and its connection is ended.
+const lingerTimeout = 10 * time.Second
 
 // maxResponseHeaderBytes bounds the response header block an app may send.
 const maxResponseHeaderBytes = 256 << 10
@@ -41,8 +44,8 @@ type link struct {
 	gen       int        // current access generation
 	sess      *yamux.Session
 	connected time.Time
-	streams   map[*stream]struct{}
-	waiting   int // requests waiting for a slot
+	streams   map[*stream]struct{} // open streams, for access changes
+	waiting   int                  // requests waiting for a slot
 	expiry    *time.Timer
 	ended     bool
 	code      int
@@ -52,12 +55,15 @@ type link struct {
 func newLink(r *Registry, o Owner) *link {
 	l := &link{reg: r, owner: o, expires: o.Expires, gen: o.AccessGen, streams: map[*stream]struct{}{},
 		slots: make(chan struct{}, r.lim.Streams), done: make(chan struct{})}
+	// The time to the app's response headers is limited per request, by the
+	// proxy (see proxy.headerTimer), not by ResponseHeaderTimeout: a request
+	// gets the response timeout once, for waiting for a slot and for the
+	// headers together.
 	l.transport = &http.Transport{
 		Proxy:                  nil,
 		DialContext:            l.dial,
 		DisableKeepAlives:      true, // one exchange per stream
 		DisableCompression:     true, // pass the visitor's Accept-Encoding through
-		ResponseHeaderTimeout:  r.lim.ResponseTimeout,
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
 	return l
@@ -74,12 +80,13 @@ func (l *link) session() *yamux.Session {
 	return l.sess
 }
 
-// state returns when the link connected and its open streams; ok is false
-// unless it is serving.
+// state returns when the link connected and its streams: the stream slots
+// in use, held from a request's start until its stream is closed. ok is
+// false unless it is serving.
 func (l *link) state() (connected time.Time, streams int, ok bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.connected, len(l.streams), l.sess != nil && !l.ended
+	return l.connected, len(l.slots), l.sess != nil && !l.ended
 }
 
 // serve runs the session until the CLI goes or the registry ends the link.
@@ -88,7 +95,10 @@ func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 	// close frame with the link's reason, so the CLI knows whether to retry.
 	wc := &closingConn{Conn: conn, closeWith: func() { closeWith(l.closeReason()) }}
 	cfg := yamuxConfig(l.reg.log)
-	cfg.StreamCloseTimeout = streamCloseTimeout
+	// stream.linger, not yamux's timer, bounds a half-closed stream. yamux
+	// marks a timed-out stream closed before it drops it, and a FIN from
+	// the CLI that arrives in between tears the whole session down.
+	cfg.StreamCloseTimeout = 0
 	sess, err := yamux.Client(wc, cfg)
 	if err != nil {
 		l.reg.end(l, 1011, "internal error")
@@ -104,6 +114,7 @@ func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 	l.sess, l.connected = sess, time.Now()
 	l.armExpiryLocked()
 	l.mu.Unlock()
+	go l.refuseStreams(sess)
 	o := l.owner
 	l.reg.log.Info("tunnel connected", "id", o.ArtifactID, "user", o.Username, "token", o.TokenName)
 	select {
@@ -119,6 +130,20 @@ func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 	}
 	l.reg.log.Info("tunnel disconnected", "id", o.ArtifactID, "user", o.Username, "code", code, "reason", why,
 		"seconds", int(time.Since(l.connected).Seconds()))
+}
+
+// refuseStreams ends the connection when the CLI opens a stream of its own.
+// Only the server opens streams; a stream the CLI opens would be held, with
+// up to a window of data, outside every limit, as long as the session
+// lasts. The first one ends the session, and with it every such stream.
+func (l *link) refuseStreams(sess *yamux.Session) {
+	st, err := sess.AcceptStream()
+	if err != nil {
+		return // the session ended
+	}
+	st.Close()
+	l.reg.log.Warn("tunnel CLI opened a stream; ending the connection", "id", l.owner.ArtifactID, "user", l.owner.Username)
+	l.reg.end(l, websocketPolicy, "protocol violation: the CLI opened a stream")
 }
 
 // closeReason is the WebSocket close code and reason the link ended with.
@@ -158,13 +183,14 @@ func (l *link) setAccess(gen int, expires *time.Time) {
 	if gen > l.gen {
 		l.gen = gen
 		for s := range l.streams {
-			if s.gen < gen {
+			if s.slot.gen < gen {
 				stale = append(stale, s)
 			}
 		}
 	}
 	l.mu.Unlock()
 	for _, s := range stale {
+		s.slot.changed.Store(true)
 		s.Close()
 	}
 }
@@ -186,10 +212,31 @@ func (l *link) armExpiryLocked() {
 	l.expiry = time.AfterFunc(max(time.Until(*at), 0), func() { l.reg.end(l, api.TunnelCloseEnded, why) })
 }
 
+// slot is a request's claim on one of its tunnel's stream slots and one of
+// the server's. It is released when the request has ended and the stream it
+// opened is closed (reset if the CLI hadn't finished), whichever is later:
+// slots bound the streams that exist, and so the memory they can hold.
+type slot struct {
+	l       *link
+	gen     int          // the access generation the request was let in under
+	refs    atomic.Int32 // the request, and its stream once dialed
+	changed atomic.Bool  // its stream was closed by an access change
+}
+
+func (s *slot) hold() { s.refs.Add(1) }
+
+func (s *slot) done() {
+	if s.refs.Add(-1) == 0 {
+		<-s.l.reg.slots
+		<-s.l.slots
+	}
+}
+
 // acquire takes one of this tunnel's stream slots and one of the server's,
-// waiting until the response timeout. At most as many requests wait as the
-// tunnel has slots; more are refused at once.
-func (l *link) acquire(ctx context.Context) (release func(), err error) {
+// waiting until wait has passed. At most as many requests wait as the
+// tunnel has slots; more are refused at once. The caller calls done when
+// the request ends.
+func (l *link) acquire(ctx context.Context, wait time.Duration, gen int) (_ *slot, err error) {
 	l.mu.Lock()
 	if l.waiting >= cap(l.slots) {
 		l.mu.Unlock()
@@ -202,7 +249,7 @@ func (l *link) acquire(ctx context.Context) (release func(), err error) {
 		l.waiting--
 		l.mu.Unlock()
 	}()
-	timer := time.NewTimer(l.reg.lim.ResponseTimeout)
+	timer := time.NewTimer(max(wait, 0))
 	defer timer.Stop()
 	select {
 	case l.slots <- struct{}{}:
@@ -226,19 +273,25 @@ func (l *link) acquire(ctx context.Context) (release func(), err error) {
 		<-l.slots
 		return nil, err
 	}
-	return func() { <-l.reg.slots; <-l.slots }, nil
+	s := &slot{l: l, gen: gen}
+	s.refs.Store(1)
+	return s, nil
 }
 
-type genKey struct{}
+type slotKey struct{}
 
-// withGen records the access generation a request was let in under.
-func withGen(ctx context.Context, gen int) context.Context {
-	return context.WithValue(ctx, genKey{}, gen)
+// withSlot passes a request's slot to the dialer that opens its stream.
+func withSlot(ctx context.Context, s *slot) context.Context {
+	return context.WithValue(ctx, slotKey{}, s)
 }
 
 // dial is the transport's dialer: it opens a stream on the session. It
 // ignores the address; the CLI decides where requests go.
 func (l *link) dial(ctx context.Context, _, _ string) (net.Conn, error) {
+	sl, _ := ctx.Value(slotKey{}).(*slot)
+	if sl == nil {
+		return nil, errors.New("tunnel: a request without a slot")
+	}
 	sess := l.session()
 	if sess == nil {
 		return nil, errOffline
@@ -247,11 +300,11 @@ func (l *link) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err != nil {
 		return nil, errOffline
 	}
-	gen, _ := ctx.Value(genKey{}).(int)
-	s := newStream(l, st, gen)
+	s := newStream(l, st, sl)
 	l.mu.Lock()
-	if l.ended || gen < l.gen {
+	if l.ended || sl.gen < l.gen {
 		l.mu.Unlock()
+		sl.changed.Store(true)
 		s.Close()
 		return nil, errAccessChanged
 	}
