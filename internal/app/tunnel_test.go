@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -680,4 +681,111 @@ func TestOwnerRevokeAndDeleteEndTheTunnel(t *testing.T) {
 			t.Fatalf("%s: still online", tc.name)
 		}
 	}
+}
+
+// contentRules are the content host's headers a tunnel response keeps.
+var contentRules = map[string]string{
+	"Cache-Control": "private, no-cache", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+	"X-Robots-Tag": "noindex, nofollow, noarchive, nosnippet, noimageindex", "Cross-Origin-Resource-Policy": "same-site",
+	"Content-Security-Policy": "frame-ancestors 'self' http://app.test",
+}
+
+// TestTunnelInformationalResponsesKeepTheRules: 103 Early Hints from the app
+// and a visitor's Expect: 100-continue must not cost the final response the
+// content host's headers; Cache-Control: private is what keeps a CDN from
+// serving a password-protected response to anyone.
+func TestTunnelInformationalResponsesKeepTheRules(t *testing.T) {
+	f := newTunnelFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/early.js" {
+			w.Header().Set("Link", "</style.css>; rel=preload; as=style")
+			w.WriteHeader(http.StatusEarlyHints)
+		}
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/javascript")
+		io.WriteString(w, "console.log('secret')")
+	}))
+	a := f.create(api.CreateTunnelRequest{Password: "tunnel-pw"})
+	f.connect(f.c, a)
+	cookie := f.unlock(a, "tunnel-pw")[0]
+	for _, tc := range []struct{ name, request string }{
+		{"103 from the app", "GET /early.js HTTP/1.1\r\n"},
+		{"Expect from the visitor", "GET /app.js HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 1\r\n"},
+	} {
+		c, err := net.Dial("tcp", strings.TrimPrefix(f.h.srv.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		br := bufio.NewReader(c)
+		io.WriteString(c, tc.request+"Host: "+hostOf(t, a.URL)+"\r\nCookie: "+cookie.Name+"="+cookie.Value+"\r\nSec-Fetch-Dest: script\r\nSec-Fetch-Site: same-origin\r\n\r\n")
+		if strings.Contains(tc.request, "Expect") {
+			if cont, err := http.ReadResponse(br, nil); err != nil || cont.StatusCode != http.StatusContinue {
+				t.Fatalf("%s: %v %v", tc.name, cont, err)
+			}
+			io.WriteString(c, "x")
+		}
+		var interim []int
+		var resp *http.Response
+		for {
+			if resp, err = http.ReadResponse(br, nil); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode >= 200 {
+				break
+			}
+			interim = append(interim, resp.StatusCode)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		c.Close()
+		if resp.StatusCode != 200 || string(b) != "console.log('secret')" || len(interim) != 0 {
+			t.Fatalf("%s: %d %q, interim %v", tc.name, resp.StatusCode, b, interim)
+		}
+		for k, want := range contentRules {
+			if got := strings.Join(resp.Header.Values(k), ","); got != want {
+				t.Errorf("%s: %s %q, want %q", tc.name, k, got, want)
+			}
+		}
+	}
+}
+
+// TestTunnelIconFollowsTheSameSiteRule: the icon paths are a tunnel's paths
+// too: another artifact's <img> can't reach the app with the visitor's
+// cookies, and the link's own parameters are not passed on.
+func TestTunnelIconFollowsTheSameSiteRule(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	a := f.create(api.CreateTunnelRequest{Password: "tunnel-pw"})
+	f.connect(f.c, a)
+	cookies := f.unlock(a, "tunnel-pw")
+	img := map[string]string{"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "image", "Cookie": "app=session"}
+	before := len(f.seen)
+	r, _ := f.h.send("GET", a.URL, "/favicon.ico?redrop-info=0&x=1", nil, img, cookies...)
+	f.mu.Lock()
+	reached := len(f.seen) != before
+	f.mu.Unlock()
+	if reached || r.StatusCode != 200 || r.Header.Get("Content-Type") != "image/x-icon" {
+		t.Fatalf("same-site icon request: reached the app %v, %d %s; want the redrop icon", reached, r.StatusCode, r.Header.Get("Content-Type"))
+	}
+	own := map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "image"}
+	f.h.send("GET", a.URL, "/favicon.ico?redrop-info=0&x=1", nil, own, cookies...)
+	if got := f.last(); got.Path != "/favicon.ico" || got.RawQuery != "x=1" {
+		t.Fatalf("the page's own icon request reached the app as %s?%s", got.Path, got.RawQuery)
+	}
+}
+
+// TestTunnelCountIsCapped: tunnels take no storage, so a cap bounds them.
+func TestTunnelCountIsCapped(t *testing.T) {
+	t.Setenv("REDROP_TUNNEL_ARTIFACTS_PER_USER", "2")
+	f := newTunnelFixture(t, nil)
+	first := f.create(api.CreateTunnelRequest{})
+	f.create(api.CreateTunnelRequest{})
+	_, err := f.c.CreateTunnel(context.Background(), &api.CreateTunnelRequest{})
+	var e *client.Error
+	if !errors.As(err, &e) || e.Status != http.StatusConflict || e.Title != api.CodeTunnelCount {
+		t.Fatalf("third tunnel: %v", err)
+	}
+	if err := f.c.DeleteArtifact(context.Background(), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.create(api.CreateTunnelRequest{}) // room again
+	// Other artifacts don't count.
+	f.h.share(f.c, "page", client.PublishOptions{})
 }
