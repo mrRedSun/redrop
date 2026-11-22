@@ -649,11 +649,12 @@ client) also counts these POSTs.
 ## End-to-end encrypted links
 
 `redrop share --e2e` encrypts an artifact in the CLI before upload, and
-`update` and `watch` encrypt every later version with the same key. The server stores and serves only
-ciphertext. The key travels in the link's fragment, which browsers never
-send to a server: `https://<slug>.usercontent.example/#k=<key>`. It answers
-issue #7. It is opt-in per artifact and permanent: an artifact is either
-end-to-end encrypted (every version) or not (no version).
+`update` and `watch` encrypt every later version with the same key. The
+server stores and serves only ciphertext. The key travels in the link's
+fragment, which browsers never send to a server:
+`https://<slug>.usercontent.example/#k=<key>`. It answers issue #7. It is
+opt-in per artifact and permanent: an artifact is either end-to-end
+encrypted (every version) or not (no version).
 
 ### Threat model
 
@@ -680,9 +681,9 @@ start page, or the page `<title>`. It never receives plaintext for an
 end-to-end artifact either: `update` and `watch` read the artifact before
 uploading and encrypt with its key, or refuse, and the server refuses an
 upload declared for such an artifact unless it is declared encrypted,
-before any byte of it arrives (see "Publishing"). **Paths are encrypted**: the server
-stores an encrypted manifest and opaque random object names, and the
-viewer resolves paths from the manifest (see "Viewing"), so the server
+before any byte of it arrives (see "Publishing"). **Paths are encrypted**:
+the server stores an encrypted manifest and opaque random object names, and
+the viewer resolves paths from the manifest (see "Viewing"), so the server
 never needs them.
 
 **Does not protect against a malicious or compromised live server.** The
@@ -1012,9 +1013,9 @@ counting. It differs from the plain viewer:
   on a small redrop page in an `<img>`, as the plain file page shows it, so
   an SVG's script can't run (review 33 m-A); the `<img>` request gets the
   file. Other files are served inline when the browser can show them
-  (audio, video, PDF, text as plain text) and as a download otherwise. The panel has a
-  Download button that decrypts in the viewer and saves under the original
-  name.
+  (audio, video, PDF, text as plain text) and as a download otherwise. The
+  panel has a Download button that decrypts in the viewer and saves under
+  the original name.
 * **Requests without Fetch Metadata** (curl, scripts) and frames loading a
   path outside the version space get a redirect to
   `/__redrop/v/<current>/<path>`; ciphertext objects are at
