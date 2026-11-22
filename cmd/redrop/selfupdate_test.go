@@ -26,9 +26,31 @@ type fakeReleaseServer struct {
 	sums        string // overrides the generated SHA256SUMS when non-empty
 	noSumsAsset bool   // SHA256SUMS not listed in the release
 	assetURL    string // overrides the binary's browser_download_url
+	// redirect answers one kind of request ("api", "sums" or "binary") with
+	// a 302: to redirectLoopback (the same content under /mirror on this
+	// loopback server), redirectLoop (itself), or any other URL as given.
+	redirect map[string]string
 	// apiRequests and downloads record the paths served.
 	apiRequests []string
 	downloads   []string
+}
+
+const (
+	redirectLoopback = "loopback"
+	redirectLoop     = "loop"
+)
+
+// requestKind names what a path asks the fake release server for.
+func (f *fakeReleaseServer) requestKind(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/repos/"):
+		return "api"
+	case path == "/sums/SHA256SUMS":
+		return "sums"
+	case strings.HasPrefix(path, "/download/"):
+		return "binary"
+	}
+	return ""
 }
 
 func (f *fakeReleaseServer) assetName() string {
@@ -38,9 +60,20 @@ func (f *fakeReleaseServer) assetName() string {
 func (f *fakeReleaseServer) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		base := "http://" + r.Host
+		path, mirrored := strings.CutPrefix(r.URL.Path, "/mirror")
+		if target, ok := f.redirect[f.requestKind(path)]; ok && !mirrored {
+			switch target {
+			case redirectLoopback:
+				target = base + "/mirror" + path
+			case redirectLoop:
+				target = base + path
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/repos/"):
-			f.apiRequests = append(f.apiRequests, r.URL.Path)
+		case strings.HasPrefix(path, "/repos/"):
+			f.apiRequests = append(f.apiRequests, path)
 			var assets []map[string]string
 			if f.binary != nil {
 				u := f.assetURL
@@ -53,15 +86,15 @@ func (f *fakeReleaseServer) handler(t *testing.T) http.HandlerFunc {
 				assets = append(assets, map[string]string{"name": "SHA256SUMS", "browser_download_url": base + "/sums/SHA256SUMS"})
 			}
 			json.NewEncoder(w).Encode(map[string]any{"tag_name": f.tag, "assets": assets})
-		case r.URL.Path == "/sums/SHA256SUMS":
-			f.downloads = append(f.downloads, r.URL.Path)
+		case path == "/sums/SHA256SUMS":
+			f.downloads = append(f.downloads, path)
 			if f.sums != "" {
 				fmt.Fprint(w, f.sums)
 				return
 			}
 			fmt.Fprintf(w, "%x  %s\n", sha256.Sum256(f.binary), f.assetName())
-		case r.URL.Path == "/download/"+f.assetName() && f.binary != nil:
-			f.downloads = append(f.downloads, r.URL.Path)
+		case path == "/download/"+f.assetName() && f.binary != nil:
+			f.downloads = append(f.downloads, path)
 			w.Write(f.binary)
 		default:
 			http.NotFound(w, r)
@@ -516,6 +549,115 @@ func TestSelfUpdateRefusesNonHTTPSAsset(t *testing.T) {
 		t.Errorf("downloaded %v", f.downloads)
 	}
 	requireUntouched(t, o.exe, "old binary")
+}
+
+// m-2: the HTTPS rule holds through redirects. A release lookup, checksum
+// or binary request redirected to plain HTTP on another host is refused
+// before that host is contacted, with the binary untouched; a redirect that
+// stays on loopback is followed; a redirect loop stops at maxRedirects.
+func TestSelfUpdateRedirectPolicy(t *testing.T) {
+	const hostile = "http://release-mirror.invalid/redrop"
+	for _, tc := range []struct {
+		kind, target string
+		want         string // error substring; empty means the update succeeds
+		downloads    int    // downloads the fake served before the refusal
+	}{
+		{"api", hostile, "refusing redirect", 0},
+		{"sums", hostile, "refusing redirect", 0},
+		{"binary", hostile, "refusing redirect", 1}, // the sums came first
+		{"api", redirectLoopback, "", 2},
+		{"sums", redirectLoopback, "", 2},
+		{"binary", redirectLoopback, "", 2},
+		{"binary", redirectLoop, "stopped after 10 redirects", 1},
+	} {
+		t.Run(tc.kind+"->"+tc.target, func(t *testing.T) {
+			f := &fakeReleaseServer{tag: "v1.1.0", binary: []byte("new release"), redirect: map[string]string{tc.kind: tc.target}}
+			o := updateOpts(t, newFakeRelease(t, f))
+			mustWrite(t, o.exe, "old binary")
+			res, err := selfUpdate(context.Background(), o)
+			if len(f.downloads) != tc.downloads {
+				t.Errorf("downloads = %v, want %d", f.downloads, tc.downloads)
+			}
+			if tc.want == "" {
+				if err != nil || !res.Updated {
+					t.Fatalf("allowed redirect: %+v, %v", res, err)
+				}
+				got, _ := os.ReadFile(o.exe)
+				if string(got) != "new release" {
+					t.Fatalf("installed %q", got)
+				}
+				return
+			}
+			requireExitCode(t, err, exitGeneral)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			requireUntouched(t, o.exe, "old binary")
+		})
+	}
+}
+
+func TestCheckUpdateRedirect(t *testing.T) {
+	req := func(u string) *http.Request {
+		r, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	from := []*http.Request{req("https://api.github.com/repos/x/y/releases/latest")}
+	for u, ok := range map[string]bool{
+		"https://objects.githubusercontent.com/x": true,
+		"http://127.0.0.1:8080/x":                 true,
+		"http://objects.githubusercontent.com/x":  false,
+		"ftp://objects.githubusercontent.com/x":   false,
+	} {
+		if err := checkUpdateRedirect(req(u), from); (err == nil) != ok {
+			t.Errorf("redirect to %s: %v, want ok=%v", u, err, ok)
+		}
+	}
+	long := make([]*http.Request, maxRedirects)
+	for i := range long {
+		long[i] = from[0]
+	}
+	if err := checkUpdateRedirect(req("https://objects.githubusercontent.com/x"), long); err == nil {
+		t.Errorf("redirect %d was followed", maxRedirects+1)
+	}
+}
+
+// m-5: the downgrade warning goes to stderr in both output modes, and with
+// --json stdout stays exactly one JSON document.
+func TestReportSelfUpdateDowngradeWarning(t *testing.T) {
+	res := selfUpdateResult{Current: "1.0.0", Latest: "0.5.0", UpdateAvailable: true, Updated: true, Downgraded: true, Replacement: "/tmp/redrop"}
+	for _, jsonMode := range []bool{false, true} {
+		var err error
+		out, errOut := captureCLIOutput(t, func() {
+			g.json = jsonMode
+			err = reportSelfUpdate(os.Stderr, res)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if errOut != "warning: downgrading from 1.0.0 to 0.5.0\n" {
+			t.Errorf("json=%v: stderr = %q", jsonMode, errOut)
+		}
+		if jsonMode {
+			var got selfUpdateResult
+			if err := json.Unmarshal([]byte(out), &got); err != nil || !got.Downgraded {
+				t.Errorf("stdout is not the result JSON: %v\n%s", err, out)
+			}
+		} else if !strings.Contains(out, "updated /tmp/redrop: 1.0.0 -> 0.5.0") {
+			t.Errorf("text stdout = %q", out)
+		}
+	}
+	// No warning without a downgrade.
+	_, errOut := captureCLIOutput(t, func() {
+		g.json = true
+		reportSelfUpdate(os.Stderr, selfUpdateResult{Current: "1.0.0", Latest: "1.1.0", Updated: true})
+	})
+	if errOut != "" {
+		t.Errorf("stderr without a downgrade = %q", errOut)
+	}
 }
 
 func TestRequireHTTPS(t *testing.T) {

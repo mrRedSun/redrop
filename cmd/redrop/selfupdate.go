@@ -90,7 +90,7 @@ func fetchLatestRelease(ctx context.Context, apiBase, repo, tag string) (*releas
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := updateHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +227,25 @@ func requireHTTPS(u string) error {
 	return withCode(exitGeneral, "refusing non-HTTPS download from %s", u)
 }
 
+// maxRedirects bounds a redirect chain, as net/http's default policy does.
+const maxRedirects = 10
+
+// updateHTTP sends every self-update request (the release lookup, the
+// checksum file and the binary). Each redirect target must pass the same
+// HTTPS-or-loopback rule as the first URL, so an HTTPS response cannot hand
+// any part of the update to plain HTTP.
+var updateHTTP = &http.Client{CheckRedirect: checkUpdateRedirect}
+
+func checkUpdateRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return withCode(exitGeneral, "stopped after %d redirects", maxRedirects)
+	}
+	if requireHTTPS(req.URL.String()) != nil {
+		return withCode(exitGeneral, "refusing redirect from %s to non-HTTPS %s", via[len(via)-1].URL.Redacted(), req.URL.Redacted())
+	}
+	return nil
+}
+
 // httpGet starts a GET with a redrop user agent and fails on non-200. The
 // caller closes the body and bounds what it reads.
 func httpGet(ctx context.Context, url, ua string) (*http.Response, error) {
@@ -235,7 +254,7 @@ func httpGet(ctx context.Context, url, ua string) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", ua)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := updateHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -537,29 +556,35 @@ REDROP_GITHUB_API points the release lookup at another HTTPS API root.`,
 			if err != nil {
 				return mapErr(err)
 			}
-			if g.json {
-				return printJSON(res)
-			}
-			if res.Downgraded {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: downgrading from %s to %s\n", res.Current, res.Latest)
-			}
-			switch {
-			case res.Updated:
-				fmt.Printf("updated %s: %s -> %s\n", res.Replacement, res.Current, res.Latest)
-				if res.Old != "" {
-					fmt.Printf("the previous binary was left at %s (delete it once the new one works)\n", res.Old)
-				}
-			case res.MainBuild:
-				fmt.Printf("current: %s (a main build that matches its server)\nlatest release: %s\nto switch to it: redrop self-update --version v%s\n", res.Current, res.Latest, res.Latest)
-			case res.CheckOnly && res.UpdateAvailable:
-				fmt.Printf("current: %s\nlatest:  %s\nupdate available: %s\n", res.Current, res.Latest, res.URL)
-			default:
-				fmt.Printf("redrop %s is up to date (latest release %s)\n", res.Current, res.Latest)
-			}
-			return nil
+			return reportSelfUpdate(cmd.ErrOrStderr(), res)
 		},
 	}
 	cmd.Flags().StringVar(&versionFlag, "version", "", "install this release instead of the latest (vX.Y.Z)")
 	cmd.Flags().BoolVar(&checkFlag, "check", false, "only report the latest release and exit")
 	return cmd
+}
+
+// reportSelfUpdate prints the result: JSON or text on stdout, and a
+// downgrade warning on stderr in both modes, so stdout stays valid JSON.
+func reportSelfUpdate(stderr io.Writer, res selfUpdateResult) error {
+	if res.Downgraded {
+		fmt.Fprintf(stderr, "warning: downgrading from %s to %s\n", res.Current, res.Latest)
+	}
+	if g.json {
+		return printJSON(res)
+	}
+	switch {
+	case res.Updated:
+		fmt.Printf("updated %s: %s -> %s\n", res.Replacement, res.Current, res.Latest)
+		if res.Old != "" {
+			fmt.Printf("the previous binary was left at %s (delete it once the new one works)\n", res.Old)
+		}
+	case res.MainBuild:
+		fmt.Printf("current: %s (a main build that matches its server)\nlatest release: %s\nto switch to it: redrop self-update --version v%s\n", res.Current, res.Latest, res.Latest)
+	case res.CheckOnly && res.UpdateAvailable:
+		fmt.Printf("current: %s\nlatest:  %s\nupdate available: %s\n", res.Current, res.Latest, res.URL)
+	default:
+		fmt.Printf("redrop %s is up to date (latest release %s)\n", res.Current, res.Latest)
+	}
+	return nil
 }
