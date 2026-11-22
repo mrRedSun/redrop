@@ -217,8 +217,13 @@ func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // prefix. It matches the canonical path (empty and dot segments cleaned,
 // the prefix compared case-insensitively), so /api/v1//invites/<t> and
 // /API/v1/invites/<t> are redacted too, and logs a redacted path in that
-// canonical form.
+// canonical form. Everything from a "#" on is cut: a path holds one only
+// when a client sent a fragment encoded (%23), such as an end-to-end link's
+// #k= key pasted where an ID belongs, and that must never be logged.
 func redactPath(p string) string {
+	if before, _, found := strings.Cut(p, "#"); found {
+		p = before + "#…"
+	}
 	c := path.Clean("/" + p)
 	for _, pre := range dashpaths.SecretPrefixes {
 		if len(c) <= len(pre) || !strings.EqualFold(c[:len(pre)], pre) {

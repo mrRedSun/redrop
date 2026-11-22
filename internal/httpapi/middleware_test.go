@@ -113,6 +113,12 @@ func TestRedactPath(t *testing.T) {
 		"/Setup/abc/":                      "/setup/…",
 		"/invite/":                         "/invite/",
 		"/api/v1/artifacts//x":             "/api/v1/artifacts//x",
+		// Review 33 M2: a fragment that arrived as %23, such as an
+		// end-to-end link's key, is never logged.
+		"/api/v1/artifacts/x#k=SECRETKEY":        "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x#k=SECRETKEY/views":  "/api/v1/artifacts/x#…",
+		"/api/v1/invites/abc#k=SECRETKEY/accept": "/api/v1/invites/…",
+		"/#k=SECRETKEY":                          "/#…",
 	}
 	for in, want := range cases {
 		if got := redactPath(in); got != want {
