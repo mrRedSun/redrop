@@ -107,6 +107,8 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						w.Header().Set("Content-Type", "application/json")
 						switch {
+						case r.Method == http.MethodGet && r.URL.Path == "/api/v1/artifacts/artifact-id" && command == "update":
+							json.NewEncoder(w).Encode(api.Artifact{ID: "artifact-id"}) // plaintext: no key needed
 						case r.Method == http.MethodPost && r.URL.Path == "/api/v1/uploads":
 							json.NewEncoder(w).Encode(api.Upload{ID: "upload-id", ChunkSize: 1 << 20})
 						case r.Method == http.MethodPut && r.URL.Path == "/api/v1/uploads/upload-id":

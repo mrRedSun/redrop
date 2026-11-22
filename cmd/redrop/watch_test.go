@@ -194,9 +194,23 @@ func TestCLIProcess(t *testing.T) {
 	t.Fatal("missing CLI arguments")
 }
 
+// plaintextArtifact answers the artifact read that watch makes at startup
+// and before each publish (a plaintext artifact, so no key is needed) and
+// passes every other request to next.
+func plaintextArtifact(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/artifacts/artifact-id" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(api.Artifact{ID: "artifact-id"})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func TestWatchUnauthorizedExitCode(t *testing.T) {
 	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/uploads" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -277,7 +291,12 @@ func TestWatchLocalErrorExitCode(t *testing.T) {
 // reach the uploader, and an invalid mode is a usage error before any
 // network access.
 func TestWatchPassesRenderOptions(t *testing.T) {
-	t.Setenv("REDROP_URL", "http://redrop.example.com")
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	t.Setenv("REDROP_URL", srv.URL)
 	t.Setenv("REDROP_TOKEN", "rdp_test")
 	t.Setenv("REDROP_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
 	dir := t.TempDir()
@@ -418,10 +437,11 @@ func TestWatchRejectsBadSourceAtStartup(t *testing.T) {
 }
 
 // A valid source, or a folder that is empty for now, still starts the real
-// watcher and prints "watching"; nothing is published at startup.
+// watcher and prints "watching"; nothing is published at startup. The only
+// request is the artifact read that tells watch whether to encrypt.
 func TestWatchValidSourcePrintsWatching(t *testing.T) {
 	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -477,6 +497,6 @@ func TestWatchValidSourcePrintsWatching(t *testing.T) {
 		})
 	}
 	if got := requests.Load(); got != 0 {
-		t.Fatalf("starting watch made %d requests; want none", got)
+		t.Fatalf("starting watch made %d requests besides the artifact read; want none", got)
 	}
 }

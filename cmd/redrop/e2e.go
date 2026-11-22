@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -127,40 +129,48 @@ func forgetKey(server, id string) error {
 	})
 }
 
-// Lock file timing: a writer holds the lock for milliseconds; one older than
-// lockStale was left by a process that died.
+// A writer holds the key store's lock for milliseconds; lockWait only
+// bounds a wait behind a stuck process.
 const (
-	lockWait  = 10 * time.Second
-	lockPoll  = 50 * time.Millisecond
-	lockStale = 30 * time.Second
+	lockWait = 10 * time.Second
+	lockPoll = 50 * time.Millisecond
 )
 
-// lockFile takes an exclusive lock by creating p, so concurrent shares
-// don't lose each other's keys.
+// errLocked means another holder has the lock (tryLock, per platform).
+var errLocked = errors.New("locked")
+
+// lockFile takes an exclusive OS lock (flock, or LockFileEx on Windows) on
+// the file p, so concurrent shares don't lose each other's keys. The
+// operating system drops it when the holder exits, so a crashed writer
+// leaves no stale lock to take over. The file itself stays.
 func lockFile(p string) (func(), error) {
+	f, err := os.OpenFile(p, lockOpenFlags, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("the key store's lock %s: %w", p, err)
+	}
 	deadline := time.Now().Add(lockWait)
 	for {
-		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		err := tryLock(f)
 		if err == nil {
+			return func() {
+				unlock(f)
+				f.Close()
+			}, nil
+		}
+		if !errors.Is(err, errLocked) || time.Now().After(deadline) {
 			f.Close()
-			return func() { os.Remove(p) }, nil
-		}
-		if !errors.Is(err, fs.ErrExist) {
-			return nil, err
-		}
-		if info, serr := os.Lstat(p); serr == nil && time.Since(info.ModTime()) > lockStale {
-			os.Remove(p)
-			continue
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("the key store is locked by %s; remove it if no redrop command is running", p)
+			if errors.Is(err, errLocked) {
+				return nil, fmt.Errorf("the key store is locked by another redrop command (%s)", p)
+			}
+			return nil, fmt.Errorf("lock the key store: %w", err)
 		}
 		time.Sleep(lockPoll)
 	}
 }
 
 // writePrivateFile replaces p with data through a fresh 0600 file in the
-// same directory, never writing through a link at p.
+// same directory, never writing through a link at p. The config and the
+// key store are both written this way.
 func writePrivateFile(p string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".tmp-*")
 	if err != nil {
@@ -185,37 +195,79 @@ func writePrivateFile(p string, data []byte) error {
 	return os.Rename(f.Name(), p)
 }
 
-// e2eKeyFor returns the key of artifact id: from the link given as ID|URL,
-// else from the key store.
-func e2eKeyFor(c *client.Client, arg, id string) (client.E2EKey, error) {
+// e2eKeyFor returns the key of artifact id and where it came from: the
+// full link given as ID|URL, else the key store.
+func e2eKeyFor(c *client.Client, arg, id string) (client.E2EKey, string, error) {
 	key, ok, err := client.E2EKeyFromLink(arg)
 	if err != nil {
-		return key, withCode(exitUsage, "%v", err)
+		return key, "", withCode(exitUsage, "%v", err)
 	}
 	if ok {
-		return key, nil
+		return key, "its link", nil
 	}
 	key, ok, err = storedKey(c.BaseURL, id)
 	if err != nil {
-		return key, err
+		return key, "", err
 	}
 	if !ok {
-		return key, withCode(exitUsage, "no key for end-to-end encrypted artifact %s on this machine: pass its full link (with #k=…) instead of the ID", id)
+		return key, "", withCode(exitUsage, "artifact %s is end-to-end encrypted and this machine has no key for it, so nothing was uploaded: "+
+			"pass its full link on stdin (redrop update - PATH < link.txt) or publish from the machine that shared it", id)
 	}
-	return key, nil
+	return key, "this machine's key store", nil
 }
 
-// checkE2EArtifact stops update --e2e and watch --e2e before any upload
-// when the artifact isn't end-to-end encrypted.
-func checkE2EArtifact(ctx context.Context, c *client.Client, id string) (*api.Artifact, error) {
+// versionKey reads artifact id before update or watch prepares anything,
+// so plaintext never leaves this machine for an end-to-end encrypted
+// artifact. For such an artifact it returns its key, from the full link in
+// arg or the key store, checked against the artifact; without one it
+// refuses. --e2e (flag) only insists that the artifact is encrypted.
+func versionKey(ctx context.Context, c *client.Client, arg, id string, flag bool) (*client.E2EKey, error) {
 	a, err := c.GetArtifact(ctx, id)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	if !a.E2E {
-		return nil, withCode(exitUsage, "artifact %s is not end-to-end encrypted: publish it without --e2e", id)
+		if flag {
+			return nil, withCode(exitUsage, "artifact %s is not end-to-end encrypted: publish it without --e2e", id)
+		}
+		return nil, nil
 	}
-	return a, nil
+	key, from, err := e2eKeyFor(c, arg, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := client.CheckE2EKey(a, key); err != nil {
+		return nil, mapErr(err)
+	}
+	if !flag {
+		fmt.Fprintf(os.Stderr, "redrop: artifact %s is end-to-end encrypted: encrypting with the key from %s\n", id, from)
+	}
+	rememberKey(c, id, key)
+	return &key, nil
+}
+
+// linkFromStdin reads ID|URL from stdin when the argument is "-", so a full
+// link's key stays off the command line (shell history, process lists).
+func linkFromStdin(arg string) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+	if err != nil {
+		return "", withCode(exitUsage, "read the link from stdin: %v", err)
+	}
+	link := strings.TrimSpace(string(b))
+	if link == "" || strings.ContainsAny(link, "\n\r") {
+		return "", withCode(exitUsage, "stdin must hold one artifact ID or link")
+	}
+	return link, nil
+}
+
+// withoutFragment cuts an ID or link at "#": a #k= key stays on this
+// machine and never goes into an API path.
+func withoutFragment(arg string) string {
+	before, _, _ := strings.Cut(arg, "#")
+	return before
 }
 
 // withKeyLink returns a for printing: an end-to-end artifact's url is its

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -107,8 +108,10 @@ func readSecretFile(p string) (string, error) {
 	return strings.TrimRight(string(b), "\r\n"), nil
 }
 
-// resolveID accepts an artifact ID, its link, or the link's slug.
+// resolveID accepts an artifact ID, its link, or the link's slug. A #k= key
+// (or any fragment) is cut off first: it never reaches the server.
 func resolveID(ctx context.Context, c *client.Client, arg string) (string, error) {
+	arg = withoutFragment(arg)
 	slug, err := artifactSlug(arg)
 	if err != nil || slug == "" {
 		return strings.TrimSpace(arg), err
@@ -477,7 +480,7 @@ func updateCmd() *cobra.Command {
 	var vf viewerFlags
 	var e2e bool
 	cmd := &cobra.Command{
-		Use:   "update ID|URL PATH",
+		Use:   "update ID|URL|- PATH",
 		Short: "Publish a new version of an artifact at the same link",
 		Long: `Upload PATH as a new version of an existing artifact. The link, expiry,
 password, and view limit stay the same; previous versions are kept and can be
@@ -485,19 +488,29 @@ restored with "redrop rollback". --info / --no-info, --old-versions /
 --no-old-versions and --feedback / --no-feedback also change those viewer
 settings; they are saved before the upload.
 
-An end-to-end encrypted artifact needs --e2e: the new version is encrypted
-with the artifact's key, taken from its full link (ID|URL with #k=…) or from
-this machine's key store, so the link keeps working.`,
+An end-to-end encrypted artifact's new version is always encrypted with its
+key, from this machine's key store or the artifact's full link, so the link
+keeps working; without a key, nothing is uploaded and update exits 2.
+--e2e insists that the artifact is encrypted. Pass "-" as ID|URL to read
+the full link from stdin, which keeps its key out of shell history and
+process lists.`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
   redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
-  redrop update 'https://amber-otter-quilt-river.usercontent.example/#k=…' report.html --e2e`,
+  redrop update - report.html < link.txt    # the full link, key included, on stdin`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if args[0] == "-" && args[1] == "-" {
+				return withCode(exitUsage, "stdin cannot provide both the link and the content")
+			}
 			c, err := newClient()
 			if err != nil {
 				return err
 			}
-			id, err := resolveID(cmd.Context(), c, args[0])
+			ref, err := linkFromStdin(args[0])
+			if err != nil {
+				return err
+			}
+			id, err := resolveID(cmd.Context(), c, ref)
 			if err != nil {
 				return err
 			}
@@ -510,23 +523,32 @@ this machine's key store, so the link keeps working.`,
 				return err
 			}
 			// The settings are saved before the upload (see UpdateWithOptions).
-			// Without --e2e, the server refuses a plaintext version of an
-			// end-to-end artifact and names the flag.
 			vo := client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}
-			var a *api.Artifact
+			var key *client.E2EKey
 			if e2e {
-				if _, err := checkE2EArtifact(cmd.Context(), c, id); err != nil {
+				if key, err = versionKey(cmd.Context(), c, ref, id, true); err != nil {
 					return err
 				}
-				key, err := e2eKeyFor(c, args[0], id)
-				if err != nil {
-					return err
+			}
+			var a *api.Artifact
+			if key == nil {
+				// A plaintext publish reads the artifact after preparing and
+				// before uploading: an end-to-end encrypted artifact stops it
+				// with nothing sent, and its key, if available, encrypts.
+				a, err = c.UpdateWithOptions(cmd.Context(), id, src, vo, progressFn())
+				if errors.Is(err, client.ErrEncryptedArtifact) {
+					if key, err = versionKey(cmd.Context(), c, ref, id, false); err != nil {
+						return err
+					}
+					if key == nil {
+						return withCode(exitGeneral, "artifact %s changed while publishing; try again", id)
+					}
 				}
-				if a, err = c.UpdateE2E(cmd.Context(), id, key, src, vo, progressFn()); err != nil {
-					return mapErr(err)
-				}
-				rememberKey(c, id, key)
-			} else if a, err = c.UpdateWithOptions(cmd.Context(), id, src, vo, progressFn()); err != nil {
+			}
+			if key != nil {
+				a, err = c.UpdateE2E(cmd.Context(), id, *key, src, vo, progressFn())
+			}
+			if err != nil {
 				return mapErr(err)
 			}
 			warnFeedbackClosed(a, info, fb)
@@ -594,7 +616,7 @@ func listCmd() *cobra.Command {
 
 func infoCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "info ID|URL",
+		Use:     "info ID|URL|-",
 		Aliases: []string{"show", "get"},
 		Short:   "Show details of an artifact",
 		Args:    cobra.ExactArgs(1),
@@ -603,7 +625,11 @@ func infoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			id, err := resolveID(cmd.Context(), c, args[0])
+			ref, err := linkFromStdin(args[0])
+			if err != nil {
+				return err
+			}
+			id, err := resolveID(cmd.Context(), c, ref)
 			if err != nil {
 				return err
 			}
