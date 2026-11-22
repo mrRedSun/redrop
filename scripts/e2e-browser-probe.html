@@ -1,13 +1,47 @@
 <!doctype html><meta charset="utf-8"><title>Probe page</title>
 <!-- An e2e artifact for scripts/e2e-browser.mjs: its own script looks for
      the link's key everywhere a same-origin page can (review 33 B-2), and
-     records what it found in data attributes the driver reads. -->
+     records what it found in data attributes the driver reads. From then
+     on it watches the viewer's window, by events and by polling, for
+     anything key-like (k=), through a same-tab reopen of the full link and
+     a back/forward cache restore (the re-check of review 33, B-2a). What it
+     sees goes to localStorage, which outlives this document. -->
 <h1 id="h">probe-4471</h1>
 <p><a id="rel" href="docs/two.html#sec">two</a> <a id="abs" href="/docs/two.html">abs</a></p>
 <script>
 (async () => {
   const d = document.body.dataset
   const read = (f) => { try { const v = f(); return typeof v === 'string' ? v : JSON.stringify(v) } catch (e) { return 'ERR ' + e.name } }
+  const seen = (where, v) => {
+    try {
+      if (String(v).includes('k=')) localStorage.setItem('rd-probe-stolen', (localStorage.getItem('rd-probe-stolen') || '') + where + ': ' + v + '\n')
+    } catch (e) {}
+  }
+  const look = (where) => {
+    seen(where + ' parent.location', read(() => parent.location.href))
+    seen(where + ' parent.document.URL', read(() => parent.document.URL))
+    seen(where + ' navigation entries', read(() => parent.navigation && parent.navigation.entries().map((e) => e.url)))
+    seen(where + ' current entry', read(() => parent.navigation && parent.navigation.currentEntry && parent.navigation.currentEntry.url))
+    seen(where + ' timing', read(() => parent.performance.getEntries().map((e) => e.name)))
+    seen(where + ' history state', read(() => parent.history.state))
+    seen(where + ' own location', location.href)
+  }
+  const restored = (e) => { if (e.persisted) try { localStorage.setItem('rd-probe-restored', String(Date.now())) } catch (x) {} }
+  for (const w of [window, parent]) {
+    try {
+      w.addEventListener('hashchange', (e) => { seen('hashchange', e.newURL + ' ' + e.oldURL); look('hashchange') })
+      w.addEventListener('popstate', (e) => { seen('popstate', read(() => e.state)); look('popstate') })
+      w.addEventListener('pagehide', () => look('pagehide'))
+      w.addEventListener('pageshow', (e) => { restored(e); look('pageshow') })
+      w.addEventListener('message', (e) => seen('message', read(() => e.data)))
+      if (w.navigation) {
+        w.navigation.addEventListener('navigate', (e) => { seen('navigate', e.destination.url); look('navigate') })
+        w.navigation.addEventListener('currententrychange', () => look('currententrychange'))
+        w.navigation.addEventListener('navigatesuccess', () => look('navigatesuccess'))
+      }
+    } catch (e) {}
+  }
+  setInterval(() => look('poll'), 10)
   d.ownSession = read(() => Object.entries(sessionStorage))
   d.parentSession = read(() => Object.entries(parent.sessionStorage))
   d.local = read(() => Object.entries(localStorage))

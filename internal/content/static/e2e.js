@@ -57,15 +57,17 @@
 
   // splitFragment splits a link fragment (without "#") into the key text
   // and the rest: "k=<43 characters>", optionally followed by "&" and the
-  // rest. Without a key, the whole fragment is the rest.
+  // rest. Without "k=", the whole fragment is the rest. A fragment that
+  // starts with "k=" is always a key attempt: damaged (a character missing,
+  // punctuation or an encoded space after it), it gives {damaged: true} and
+  // no rest, so no part of it can reach the frame (review 33 re-check B-2b).
   function splitFragment(fragment) {
-    var none = { key: null, rest: fragment }
-    if (fragment.indexOf('k=') !== 0 || fragment.length < 2 + KEY_TEXT) return none
+    if (fragment.indexOf('k=') !== 0) return { key: null, rest: fragment, damaged: false }
     var key = fragment.slice(2, 2 + KEY_TEXT), rest = fragment.slice(2 + KEY_TEXT)
-    if (!KEY_CHARS.test(key)) return none
-    if (rest === '') return { key: key, rest: '' }
-    if (rest.charAt(0) === '&') return { key: key, rest: rest.slice(1) }
-    return none
+    if (key.length === KEY_TEXT && KEY_CHARS.test(key) && (rest === '' || rest.charAt(0) === '&')) {
+      return { key: key, rest: rest.slice(1), damaged: false }
+    }
+    return { key: null, rest: '', damaged: true }
   }
 
   // importKey turns a key in its link form into a non-extractable HKDF key.

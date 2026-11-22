@@ -19,7 +19,7 @@ export type RedropE2E = {
     get(artifact: string, now: number): Promise<CryptoKey | null>
     remove(artifact: string): Promise<void>
   }
-  splitFragment(f: string): { key: string | null; rest: string }
+  splitFragment(f: string): { key: string | null; rest: string; damaged: boolean }
   importKey(text: string): Promise<CryptoKey>
   keyCheck(key: CryptoKey, artifact: string): Promise<string>
   manifestBinding(artifact: string, version: number): Binding
@@ -187,13 +187,19 @@ await test('keys: only 43 canonical base64url characters', async () => {
 
 await test('fragments: the key, then & and the page or the artifact\'s own fragment', () => {
   const key = 'A'.repeat(43)
-  assert.deepEqual({ ...E.splitFragment(`k=${key}`) }, { key, rest: '' })
-  assert.deepEqual({ ...E.splitFragment(`k=${key}&/docs/a.html?x=1#part`) }, { key, rest: '/docs/a.html?x=1#part' })
-  assert.deepEqual({ ...E.splitFragment(`k=${key}&part`) }, { key, rest: 'part' })
-  assert.deepEqual({ ...E.splitFragment('/docs/a.html#part') }, { key: null, rest: '/docs/a.html#part' })
-  assert.deepEqual({ ...E.splitFragment('k=short') }, { key: null, rest: 'k=short' })
-  assert.deepEqual({ ...E.splitFragment(`k=${key}x`) }, { key: null, rest: `k=${key}x` })
-  assert.deepEqual({ ...E.splitFragment(`k=${'!'.repeat(43)}`) }, { key: null, rest: `k=${'!'.repeat(43)}` })
+  const ok = (rest: string) => ({ key, rest, damaged: false })
+  assert.deepEqual({ ...E.splitFragment(`k=${key}`) }, ok(''))
+  assert.deepEqual({ ...E.splitFragment(`k=${key}&/docs/a.html?x=1#part`) }, ok('/docs/a.html?x=1#part'))
+  assert.deepEqual({ ...E.splitFragment(`k=${key}&part`) }, ok('part'))
+  assert.deepEqual({ ...E.splitFragment('/docs/a.html#part') }, { key: null, rest: '/docs/a.html#part', damaged: false })
+  assert.deepEqual({ ...E.splitFragment('part') }, { key: null, rest: 'part', damaged: false })
+  assert.deepEqual({ ...E.splitFragment('') }, { key: null, rest: '', damaged: false })
+  // Any fragment that starts with k= is a key attempt (the re-check of
+  // review 33, B-2b): a damaged one is never handed on as the artifact's own.
+  for (const f of ['k=', 'k=short', `k=${key}x`, `k=${key}.`, `k=${key})`, `k=${key}%20`, `k=${key.slice(0, 42)}`,
+    `k=${'!'.repeat(43)}`, `k=${key.slice(0, 42)}+`, `k=${key}#part`]) {
+    assert.deepEqual({ ...E.splitFragment(f) }, { key: null, rest: '', damaged: true }, f)
+  }
 })
 
 const object = (c: string) => c.repeat(26)

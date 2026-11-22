@@ -225,6 +225,24 @@ func TestE2EShareStoresAndServesOnlyCiphertext(t *testing.T) {
 		}
 	}
 
+	// The live viewer's marker (review 33 re-check B-2a) is the viewer's
+	// alone: never in the frame's address or a redirect into the version
+	// space, while the artifact's own query is kept.
+	for path, want := range map[string]string{
+		"/?redrop-e2e=1":                   "/__redrop/v/1/",
+		"/docs/notes.txt?q=1&redrop-e2e=1": "/__redrop/v/1/docs/notes.txt?q=1",
+		"/?redrop-e2e=1&redrop-version=1":  "/__redrop/v/1/",
+	} {
+		page := body(h.fetchContent(a.URL, path, nil, docHeaders...))
+		if got := viewerAttr(t, page, "src"); got != want {
+			t.Fatalf("frame page for %s: %q, want %q", path, got, want)
+		}
+		r := h.fetchContent(a.URL, path, nil, frameHeaders...)
+		if r.StatusCode != 303 || r.Header.Get("Location") != want {
+			t.Fatalf("frame request for %s: %d %q, want %q", path, r.StatusCode, r.Header.Get("Location"), want)
+		}
+	}
+
 	// Frames and clients without Fetch Metadata go to the version space;
 	// a top-level load of a version path goes to the viewer form.
 	r := h.fetchContent(a.URL, "/docs/notes.txt?x=1", nil, frameHeaders...)

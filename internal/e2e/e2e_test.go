@@ -221,9 +221,13 @@ func TestFragments(t *testing.T) {
 		"k=" + key + "&":               {key, "", "true"},
 		"/docs/a.html":                 {"", "/docs/a.html", "false"},
 		"section-2":                    {"", "section-2", "false"},
-		"k=short":                      {"", "k=short", "false"},
-		"k=" + key + "x":               {"", "k=" + key + "x", "false"},
-		"k=" + strings.Repeat("!", 43): {"", "k=" + strings.Repeat("!", 43), "false"},
+		// A damaged key attempt passes nothing on (review 33 re-check B-2b).
+		"k=short":                      {"", "", "false"},
+		"k=" + key + "x":               {"", "", "false"},
+		"k=" + key + ".":               {"", "", "false"},
+		"k=" + key + "%20":             {"", "", "false"},
+		"k=" + key[:42]:                {"", "", "false"},
+		"k=" + strings.Repeat("!", 43): {"", "", "false"},
 		"":                             {"", "", "false"},
 	} {
 		k, rest, ok := SplitFragment(frag)

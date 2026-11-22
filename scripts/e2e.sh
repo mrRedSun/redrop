@@ -549,9 +549,9 @@ out = {n: {k: json.loads(raw)[k] for k in ("id", "url")} for n, raw in zip(names
 out["password"]["password"] = pw
 print(json.dumps(out))
 PY
-  CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
+  CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" E2E_ELSEWHERE="$BASE/healthz" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
   sed 's/^/    /' "$B/out.txt"
-  pass "e2e: in Chromium, no script in the artifact can read the key; gates keep it; SVG files are inert; revocation stops an open page"
+  pass "e2e: in Chromium, no script in the artifact can read the key, also through a same-tab reopen or a bfcache restore; damaged keys open nothing; gates keep it; SVG files are inert; revocation stops an open page"
 else
   printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi

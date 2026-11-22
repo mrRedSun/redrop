@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // End-to-end encrypted links in a real browser (headless Chromium over the
 // DevTools protocol, no packages), for scripts/e2e.sh. DESIGN.md
-// "End-to-end encrypted links"; review 33 B-2, M1 and m-A.
+// "End-to-end encrypted links"; review 33 B-2, M1 and m-A, and its re-check
+// (B-2a, B-2b).
 //
 //   node scripts/e2e-browser.mjs links.json
 //
@@ -10,6 +11,8 @@
 // shared as a folder with docs/two.html. Set REDROP_CLI (with REDROP_CONFIG)
 // to also check that revoking stops an open page. Each check prints ok or
 // FAIL; the exit code is 1 when any failed. Links stay out of the output.
+// Set E2E_ELSEWHERE to a page on another origin (the API's /healthz) for the
+// back/forward cache case.
 // Plain-HTTP content origins are marked secure for this browser only
 // (--unsafely-treat-insecure-origin-as-secure), since browsers give WebCrypto
 // and service workers to secure contexts alone.
@@ -21,7 +24,9 @@ import { join } from 'node:path'
 const links = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 const keyOf = (l) => l.split('#k=')[1]
 const secrets = Object.values(links).map((l) => keyOf(l.url)).filter(Boolean)
-const hide = (s) => secrets.reduce((t, k) => t.replaceAll(k, '<KEY>'), String(s))
+// hide masks keys in the output, and damaged ones (any run of key
+// characters that starts like a key).
+const hide = (s) => secrets.reduce((t, k) => t.replaceAll(k, '<KEY>').replace(new RegExp(k.slice(0, 12) + '[A-Za-z0-9_-]*', 'g'), '<KEY>'), String(s))
 const origins = [...new Set(Object.values(links).map((l) => new URL(l.url).origin))]
   .filter((o) => o.startsWith('http:') && !/\/\/(localhost|[^/]*\.localhost)(:|$)/.test(o))
 const profile = mkdtempSync(join(tmpdir(), 'redrop-e2e-chromium-'))
@@ -60,8 +65,10 @@ async function visitor() {
   const p = connect(`ws://127.0.0.1:${port}/devtools/page/${targetId}`)
   await p.ready
   const requests = []
+  const notCached = []
   p.on((msg) => {
     if (msg.method === 'Network.requestWillBeSent') requests.push(msg.params.request.url + ' ' + (msg.params.request.headers.Referer ?? ''))
+    if (msg.method === 'Page.backForwardCacheNotUsed') notCached.push(...msg.params.notRestoredExplanations.map((e) => e.reason))
   })
   await p.send('Page.enable')
   await p.send('Runtime.enable')
@@ -72,11 +79,21 @@ async function visitor() {
     for (let t = 0; t < ms; t += 200) { if (await evaluate(expression)) return true; await sleep(200) }
     return false
   }
-  return { ...p, evaluate, waitFor, requests, close: () => b.send('Target.disposeBrowserContext', { browserContextId: ctx }) }
+  // open navigates the tab like the address bar and waits for the new
+  // document (a mark on the old window is gone) to satisfy until.
+  const open = async (url, until, ms) => {
+    await evaluate('window.rdOld = 1')
+    await p.send('Page.navigate', { url })
+    return waitFor(`window.rdOld === undefined && (${until})`, ms)
+  }
+  return { ...p, evaluate, waitFor, open, requests, notCached, close: () => b.send('Target.disposeBrowserContext', { browserContextId: ctx }) }
 }
 const frameText = `(() => { try { return document.getElementById('rd-frame').contentDocument.body.innerText } catch (e) { return '' } })()`
 const frameData = `(() => { try { return JSON.stringify(document.getElementById('rd-frame').contentDocument.body.dataset) } catch (e) { return '{}' } })()`
 const pageText = `document.body ? document.body.innerText : ''`
+const probeDone = `${frameText}.includes('probe-4471') && JSON.parse(${frameData}).done === '1'`
+// What the probe artifact saw that looked like a key, from any document.
+const stolen = `(() => { try { return localStorage.getItem('rd-probe-stolen') || '' } catch (e) { return 'ERR ' + e.name } })()`
 
 try {
   browserWS = await new Promise((resolve, reject) => {
@@ -91,7 +108,7 @@ try {
     const key = keyOf(links.probe.url)
     const v = await visitor()
     await v.send('Page.navigate', { url: links.probe.url })
-    check('the probe page decrypts in the frame', await v.waitFor(`${frameText}.includes('probe-4471') && JSON.parse(${frameData}).done === '1'`))
+    check('the probe page decrypts in the frame', await v.waitFor(probeDone))
     const found = JSON.parse((await v.evaluate(frameData)) || '{}')
     for (const [route, value] of Object.entries(found)) {
       if (route === 'done') continue
@@ -100,7 +117,7 @@ try {
     check('the stored key is a non-extractable CryptoKey', /^\[\{"type":"secret","extractable":false,"algorithm":"HKDF"\}\]$/.test(found.storedKeys ?? ''), found.storedKeys)
     check('the artifact can\'t export the stored key', String(found.exportKey).startsWith('refused'), found.exportKey)
     const href = await v.evaluate('location.href')
-    check('the address bar has no key', !href.includes(key) && href.endsWith('/#/'), href)
+    check('the address bar has no key and the live viewer\'s marker', !href.includes(key) && new URL(href).search === '?redrop-e2e=1' && new URL(href).hash === '#/', href)
     await v.evaluate(`document.getElementById('rd-frame').contentDocument.getElementById('rel').click()`)
     check('a relative link opens the next decrypted page', await v.waitFor(`${frameText}.includes('two-8842')`))
     await v.waitFor(`location.hash === '#/docs/two.html#sec'`, 5000)
@@ -109,7 +126,49 @@ try {
     check('a reload opens the same page with the stored key', await v.waitFor(`${frameText}.includes('two-8842')`))
     await v.send('Page.reload', { ignoreCache: true })
     check('a hard reload too', await v.waitFor(`${frameText}.includes('two-8842')`))
-    const leaked = v.requests.filter((r) => r.includes(key) || r.includes('#k='))
+
+    // The full link again in the same tab (re-check B-2a), while the probe
+    // runs in the frame: a new document, never a fragment change the open
+    // artifact could watch.
+    check('the full link opened in the same tab decrypts', await v.open(links.probe.url, probeDone))
+    check('the open artifact saw no key before the reopen', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
+    check('the full link reopened over the running probe decrypts', await v.open(links.probe.url, probeDone))
+    await sleep(500)
+    check('the open artifact saw no key in the same-tab reopen', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
+
+    // Away and back: the viewer comes back from the back/forward cache with
+    // the artifact running, then the full link is opened over it.
+    if (process.env.E2E_ELSEWHERE) {
+      await v.evaluate(`localStorage.removeItem('rd-probe-restored'); window.rdLive = 1`)
+      await v.send('Page.navigate', { url: process.env.E2E_ELSEWHERE })
+      await v.waitFor(`location.href.startsWith(${JSON.stringify(process.env.E2E_ELSEWHERE)})`)
+      const history = (await v.send('Page.getNavigationHistory')).result
+      v.notCached.length = 0
+      await v.send('Page.navigateToHistoryEntry', { entryId: history.entries[history.currentIndex - 1].id })
+      check('back restores the live viewer from the back/forward cache', await v.waitFor(`window.rdLive === 1 && !!localStorage.getItem('rd-probe-restored') && ${probeDone}`, 15000), v.notCached.join(', '))
+      check('the full link opened over the restored viewer decrypts', await v.open(links.probe.url, probeDone))
+      await sleep(500)
+      check('the restored artifact saw no key', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
+    } else {
+      check('E2E_ELSEWHERE is set for the back/forward cache case', false)
+    }
+
+    // Damaged links after a good visit (re-check B-2b): any fragment that
+    // starts with k= is a key attempt; a damaged one frames nothing, even
+    // with the key stored, and leaves the address bar.
+    const base = links.probe.url.split('#')[0]
+    for (const [name, bad] of [['a trailing .', key + '.'], ['a trailing )', key + ')'], ['a trailing %20', key + '%20'], ['its last character cut', key.slice(0, -1)]]) {
+      check(`the good link opens before the one with ${name}`, await v.open(links.probe.url, probeDone))
+      const shown = await v.open(`${base}#k=${bad}`, `!document.getElementById('rd-e2e-msg').hidden`, 15000)
+      const state = JSON.parse((await v.evaluate(`JSON.stringify({ msg: document.getElementById('rd-e2e-msg').textContent, src: document.getElementById('rd-frame').src, href: location.href })`)) || '{}')
+      check(`a key with ${name}, after a good visit, says the link is damaged`, shown && /damaged/.test(state.msg ?? ''), state.msg)
+      check(`  and frames nothing`, state.src === '', state.src)
+      check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes('k=') && !state.href.includes(key.slice(0, 20)), state.href)
+    }
+    check('the artifact saw no key, whole or damaged, at any point', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
+    check('a good link still opens after the damaged ones', await v.open(links.probe.url, probeDone))
+
+    const leaked = v.requests.filter((r) => r.includes(key) || r.includes('#k=') || r.includes(key.slice(0, 20)))
     check('no request carried the key in its URL or Referer', leaked.length === 0, `${leaked.length} of ${v.requests.length}`)
     await v.close()
   }

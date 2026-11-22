@@ -314,15 +314,21 @@ func Link(artifactURL string, k Key) string {
 
 // SplitFragment splits a link fragment (without "#") into the key text and
 // the rest (DESIGN.md "Keys and links"): "k=<43 characters>", optionally
-// followed by "&" and the rest. Without a key the whole fragment is the rest.
+// followed by "&" and the rest. Without "k=" the whole fragment is the rest.
+// A fragment that starts with "k=" is always a key attempt: if it doesn't
+// parse, ok is false and rest is empty, so no part of a damaged key is
+// passed on as the artifact's own fragment.
 func SplitFragment(fragment string) (key, rest string, ok bool) {
-	if !strings.HasPrefix(fragment, "k=") || len(fragment) < 2+KeyTextLen {
+	if !strings.HasPrefix(fragment, "k=") {
 		return "", fragment, false
+	}
+	if len(fragment) < 2+KeyTextLen {
+		return "", "", false
 	}
 	key, rest = fragment[2:2+KeyTextLen], fragment[2+KeyTextLen:]
 	for _, c := range key {
 		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return "", fragment, false
+			return "", "", false
 		}
 	}
 	switch {
@@ -331,7 +337,7 @@ func SplitFragment(fragment string) (key, rest string, ok bool) {
 	case rest[0] == '&':
 		return key, rest[1:], true
 	}
-	return "", fragment, false
+	return "", "", false
 }
 
 // KeyFromLink returns the key in a link's fragment. ok is false when the

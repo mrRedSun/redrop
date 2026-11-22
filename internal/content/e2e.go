@@ -25,6 +25,10 @@ var e2eFS embed.FS
 const (
 	e2eJS         = reservedPrefix + "e2e.js"    // the decryptor, on every content host like viewer.js
 	e2eWorkerPath = reservedPrefix + "e2e-sw.js" // the worker, on end-to-end artifacts' hosts only
+	// paramE2E marks the live viewer's address (viewer.js keeps it), so a
+	// full link differs from it by more than the fragment. It is never part
+	// of the artifact's own page.
+	paramE2E = "redrop-e2e"
 )
 
 // e2eWorker is the service worker script: the decryptor, then the worker.
@@ -64,7 +68,7 @@ func (h *Handler) e2eWorkerScript(w http.ResponseWriter, r *http.Request, a *sto
 func (h *Handler) serveE2E(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, d sharing.Decision, direct bool) {
 	w.Header().Add("Vary", "Sec-Fetch-Dest")
 	if !wantsViewer(r) {
-		redirect(w, r, versionBase(snap.Version)+withoutParams(r.URL, paramVersion, paramInfo), http.StatusSeeOther)
+		redirect(w, r, versionBase(snap.Version)+withoutParams(r.URL, paramVersion, paramInfo, paramE2E), http.StatusSeeOther)
 		return
 	}
 	h.countView(w, r, a, d)
@@ -119,7 +123,7 @@ type e2eViewerData struct {
 // key. With the info button off, or a direct-view choice, it has no panel;
 // there is no direct view of ciphertext.
 func (h *Handler) e2eViewer(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, direct bool) {
-	page := withoutParams(r.URL, paramVersion, paramInfo)
+	page := withoutParams(r.URL, paramVersion, paramInfo, paramE2E)
 	data := viewerData{
 		FrameSrc: selfRef(versionBase(snap.Version) + page),
 		Latest:   withoutParams(r.URL, paramVersion),

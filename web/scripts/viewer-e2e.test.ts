@@ -49,8 +49,11 @@ const newBrowser = (): Browser => ({ keys: new Map(), session: new Map() })
 function page(browser: Browser, opts: { start: string; secure?: boolean; manifest?: (b: Uint8Array) => Uint8Array }) {
   const top = new URL(opts.start, ORIGIN)
   const location = { origin: ORIGIN, pathname: top.pathname, search: top.search, hash: top.hash }
+  // The server's frame address never holds the live viewer's marker.
+  const own = new URLSearchParams(top.search)
+  own.delete('redrop-e2e')
   const frame = new El({
-    'data-e2e': '', 'data-src': `/__redrop/v/3${top.pathname}${top.search}`, 'data-artifact': vectors.artifact,
+    'data-e2e': '', 'data-src': `/__redrop/v/3${top.pathname}${own.size ? '?' + own : ''}`, 'data-artifact': vectors.artifact,
     'data-version': '3', 'data-current': '3', 'data-key-check': vectors.key_check,
   })
   let frameWin: { location: URL } | null = null
@@ -168,7 +171,7 @@ await test('the key becomes a non-extractable CryptoKey and leaves the address b
   const browser = newBrowser()
   const { first, second } = await open(browser, `/#k=${vectors.key}`)
   // First load: nothing framed, nothing registered, nothing fetched.
-  assert.deepEqual(first.replaced, ['/'])
+  assert.deepEqual(first.replaced, ['/?redrop-e2e=1'])
   assert.deepEqual(first.frame.srcs, [])
   assert.deepEqual(first.registered, [])
   assert.deepEqual(first.fetched, [])
@@ -195,18 +198,40 @@ await test('the key becomes a non-extractable CryptoKey and leaves the address b
 
 await test('a page in the fragment opens in the frame; the artifact\'s own fragment is handed on', async () => {
   const deep = await open(newBrowser(), `/#k=${vectors.key}&/docs/a.html?x=1#part`)
-  assert.deepEqual(deep.first.replaced, ['/#/docs/a.html?x=1#part'])
+  assert.deepEqual(deep.first.replaced, ['/?redrop-e2e=1#/docs/a.html?x=1#part'])
   assert.deepEqual(deep.second.frame.srcs, ['/__redrop/v/3/docs/a.html?x=1#part'])
   const own = await open(newBrowser(), `/report.html#k=${vectors.key}&totals`)
-  assert.deepEqual(own.first.replaced, ['/report.html#totals'])
+  assert.deepEqual(own.first.replaced, ['/report.html?redrop-e2e=1#totals'])
   assert.deepEqual(own.second.frame.srcs, ['/__redrop/v/3/report.html#totals'])
+  const query = await open(newBrowser(), `/report.html?q=1#k=${vectors.key}`)
+  assert.deepEqual(query.first.replaced, ['/report.html?q=1&redrop-e2e=1'])
+  assert.deepEqual(query.second.frame.srcs, ['/__redrop/v/3/report.html?q=1'])
 })
 
 await test('the address bar keeps the frame\'s page in the fragment, so the server sees only "/"', async () => {
   const { second } = await open(newBrowser(), `/#k=${vectors.key}`)
   second.load('/__redrop/v/3/docs/a.html?x=1#part')
   second.load('/__redrop/v/2/old.html')
-  assert.deepEqual(second.replaced, ['/#/docs/a.html?x=1#part', '/?redrop-version=2#/old.html'])
+  assert.deepEqual(second.replaced, ['/?redrop-e2e=1#/docs/a.html?x=1#part', '/?redrop-e2e=1&redrop-version=2#/old.html'])
+})
+
+// The re-check of review 33, B-2a: the live viewer's address always has the
+// marker a full link never has, so opening the full link in the same tab is
+// a new document, never a fragment change the open artifact could watch.
+await test('the live viewer is always at an address a full link reaches only by loading a new page', async () => {
+  const browser = newBrowser()
+  const { second } = await open(browser, `/#k=${vectors.key}`)
+  assert.equal(second.href, '/?redrop-e2e=1')
+  for (const start of ['/', '/#/docs/a.html', '/?redrop-version=2#/old.html']) {
+    const p = page(browser, { start })
+    await p.settled()
+    assert.equal(p.note.hidden, true, p.note.textContent)
+    assert.equal(p.replaced.length, 1)
+    assert.match(p.href, /^\/\?(.*&)?redrop-e2e=1(&|#|$)/, start)
+    assert.ok(!p.frame.srcs.some((s) => s.includes('redrop-e2e')), 'the marker is never the artifact\'s')
+  }
+  second.load('/__redrop/v/3/docs/a.html')
+  assert.ok(second.href.startsWith('/?redrop-e2e=1#'))
 })
 
 await test('without a key, with another key, damaged content or no storage, nothing is framed', async () => {
@@ -239,6 +264,28 @@ await test('without a key, with another key, damaged content or no storage, noth
     assert.ok(!anyKey(p.href), 'the key left the address bar anyway')
   }
   for (const p of [wrong, malformed, insecure, noStorage]) assert.deepEqual(p.fetched, [], 'caught before any fetch')
+})
+
+// The re-check of review 33, B-2b: a fragment that starts with k= is a key
+// attempt. A damaged one, even with a good key stored from an earlier
+// visit, frames nothing, hands no part of itself on, and leaves the
+// address bar.
+await test('a damaged key after a good visit opens nothing and leaves the address bar', async () => {
+  const browser = newBrowser()
+  await open(browser, `/#k=${vectors.key}`)
+  assert.equal(browser.keys.size, 1)
+  for (const frag of [`k=${vectors.key}.`, `k=${vectors.key})`, `k=${vectors.key}%20`, `k=${vectors.key.slice(0, 42)}`, `k=${vectors.key}x&/docs/a.html`]) {
+    const p = page(browser, { start: `/#${frag}` })
+    await p.settled()
+    assert.match(p.note.textContent, /damaged/, frag)
+    assert.equal(p.note.hidden, false)
+    assert.deepEqual(p.frame.srcs, [], frag)
+    assert.deepEqual(p.registered, [], frag)
+    assert.deepEqual(p.fetched, [], frag)
+    assert.deepEqual(p.reloads, [], frag)
+    assert.deepEqual(p.replaced, ['/?redrop-e2e=1'], frag)
+    assert.ok(!p.href.includes('k='), frag)
+  }
 })
 
 await test('a stored key that no longer matches is forgotten', async () => {

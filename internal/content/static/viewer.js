@@ -190,14 +190,25 @@
   // replaceState, never pushState: the frame owns the history entries.
   if (!frame) return
   var POLL_MS = 250
+  var E2E_MARK = 'redrop-e2e'
+  // marked is search with the live viewer's E2E_MARK query.
+  function marked(search) {
+    var q = new URLSearchParams(search)
+    q.set(E2E_MARK, '1')
+    return '?' + q.toString()
+  }
   // addressFor is the address bar for the frame's location. An end-to-end
   // encrypted link keeps the page in the fragment (/#/docs/a.html#part),
-  // so a reload sends the server only "/" and the paths stay private.
+  // so a reload sends the server only "/" and the paths stay private, and
+  // always keeps the E2E_MARK query: a full link (/#k=…) then differs from
+  // the live viewer's address by more than its fragment, so opening it in
+  // this tab loads a new document instead of handing the key to this one
+  // (review 33 re-check B-2a).
   function addressFor(loc) {
     if (!e2e) return barURL(loc)
     var m = loc.origin === location.origin && OLD.exec(loc.pathname)
     if (!m) return null
-    return '/' + (m[1] !== e2e.current ? '?redrop-version=' + m[1] : '') + '#' + m[2] + loc.search + loc.hash
+    return '/?' + E2E_MARK + '=1' + (m[1] !== e2e.current ? '&redrop-version=' + m[1] : '') + '#' + m[2] + loc.search + loc.hash
   }
   function sync() {
     try {
@@ -280,8 +291,12 @@
     var E = window.RedropE2E
     var note = doc.getElementById('rd-e2e-msg')
     var hash = location.hash.slice(1)
-    var parts = E ? E.splitFragment(hash) : { key: null, rest: hash }
+    // Any fragment that starts with k= is a key attempt: a good key, or a
+    // damaged one whose text must go nowhere (review 33 re-check B-2b).
+    var parts = E ? E.splitFragment(hash) : { key: null, rest: hash.indexOf('k=') === 0 ? '' : hash, damaged: false }
     var rest = parts.rest, key = null
+    // The address without the key, at the live viewer's marked URL.
+    var clean = location.pathname + marked(location.search) + (rest ? '#' + rest : '')
     var secure = window.isSecureContext && window.crypto && crypto.subtle && navigator.serviceWorker
     function show(text) {
       note.textContent = text
@@ -309,37 +324,44 @@
     // fires none), so a hashchange is the visitor's: a pasted full link or
     // an edited page. Start over with it.
     window.addEventListener('hashchange', function () { location.reload() })
+    if (!E) {
+      // The decryptor didn't load: nothing can open, and a key leaves the
+      // address bar all the same.
+      history.replaceState(history.state, '', clean)
+      failed(coded('unavailable'))
+      return
+    }
+    if (parts.damaged) {
+      // A key attempt that doesn't parse: no part of it goes anywhere, and
+      // a key stored from an earlier visit doesn't open the page through it.
+      history.replaceState(history.state, '', clean)
+      failed(coded('key'))
+      return
+    }
     if (parts.key) {
-      // The link's key: keep it as a CryptoKey, then reload without it.
-      var clean = location.pathname + location.search + (rest ? '#' + rest : '')
-      if (!E || !secure) {
-        history.replaceState(history.state, '', clean)
+      // The link's key: off the address bar at once, then kept as a
+      // CryptoKey, then a reload without it.
+      var text = parts.key
+      history.replaceState(history.state, '', clean)
+      if (!secure) {
         show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
         return
       }
-      E.importKey(parts.key).then(function (k) {
+      E.importKey(text).then(function (k) {
         return E.keyCheck(k, e2e.artifact).then(function (check) {
           if (check !== e2e.check) throw coded('wrongkey')
           return E.keys.put(e2e.artifact, k, Date.now())
         })
-      }).then(function () {
-        history.replaceState(history.state, '', clean)
-        location.reload()
-      }, function (err) {
-        history.replaceState(history.state, '', clean)
-        failed(err)
-      })
+      }).then(function () { location.reload() }, failed)
       return
     }
+    // The live viewer: always at its marked address before a frame exists.
+    if (location.search !== marked(location.search)) history.replaceState(history.state, '', clean)
     // The frame's first page: a page in the fragment, else this path with
     // the artifact's own fragment.
     var target = rest.charAt(0) === '/'
       ? '/__redrop/v/' + e2e.version + rest
       : frame.getAttribute('data-src') + (rest ? '#' + rest : '')
-    if (!E) {
-      failed(coded('missing'))
-      return
-    }
     if (!secure) {
       show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
       return
