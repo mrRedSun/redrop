@@ -372,6 +372,22 @@ func vectors(t *testing.T) vectorFile {
 		t.Fatal(err)
 	}
 	add("manifest", ManifestBinding(artifact, 3), mb)
+
+	// Version 4: a file artifact that is an SVG with a script, which a
+	// viewer must show inertly.
+	svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script>parent.document.title='svg-ran'</script></svg>`)
+	name, err := NewObjectName(rnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m4 := Manifest{Format: FormatVersion, Kind: "file", Title: "logo.svg", Entry: "logo.svg",
+		Files: []ManifestFile{{Path: "logo.svg", Object: name, Type: "image/svg+xml; charset=utf-8", Size: int64(len(svg))}}}
+	add("file artifact: an SVG", FileBinding(artifact, 4, "logo.svg"), svg)
+	mb4, err := m4.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	add("manifest of the file artifact", ManifestBinding(artifact, 4), mb4)
 	return vf
 }
 

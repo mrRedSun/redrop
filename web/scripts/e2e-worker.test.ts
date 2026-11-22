@@ -25,14 +25,17 @@ const SECURITY = {
 type Listener = (e: unknown) => void
 type Client = { type: string; frameType: string; url?: string; posted?: unknown[]; postMessage?: (m: unknown) => void }
 
-// The stored objects of version 3: the manifest and the vector files, under
-// the object names the manifest gives them.
+// The stored objects of every vector version, by "<version>/<name>": each
+// manifest and its files, under the object names the manifest gives them.
 function storedObjects(): Map<string, Uint8Array> {
   const bytes = (b64: string) => Uint8Array.from(Buffer.from(b64, 'base64'))
-  const manifest = vectors.objects.find((o) => o.type === 1)!
-  const out = new Map([['manifest', bytes(manifest.object)]])
-  const m = JSON.parse(Buffer.from(manifest.plaintext!, 'base64').toString('utf8')) as { files: Array<{ path: string; object: string }> }
-  for (const f of m.files) out.set(f.object, bytes(vectors.objects.find((o) => o.path === f.path)!.object))
+  const out = new Map<string, Uint8Array>()
+  for (const manifest of vectors.objects.filter((o) => o.type === 1)) {
+    const v = manifest.version
+    out.set(`${v}/manifest`, bytes(manifest.object))
+    const m = JSON.parse(Buffer.from(manifest.plaintext!, 'base64').toString('utf8')) as { files: Array<{ path: string; object: string }> }
+    for (const f of m.files) out.set(`${v}/${f.object}`, bytes(vectors.objects.find((o) => o.version === v && o.path === f.path)!.object))
+  }
   return out
 }
 
@@ -57,8 +60,8 @@ async function worker(opts: { serve?: (path: string) => Response | null; clients
       fetched.push(path)
       const custom = opts.serve?.(path)
       if (custom) return custom
-      const m = /^\/__redrop\/v\/3\/(.+)$/.exec(path)
-      const body = m && objects.get(m[1])
+      const m = /^\/__redrop\/v\/([0-9]+)\/(.+)$/.exec(path)
+      const body = m && objects.get(`${m[1]}/${m[2]}`)
       if (!body) return new Response('Not found', { status: 404 })
       return new Response(body as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Type': 'application/octet-stream', ...SECURITY } })
     },
@@ -172,15 +175,36 @@ await test('the server\'s gates decide: a miss or an ended visit is passed on', 
 })
 
 await test('a worker without a key asks the open viewer pages, and only top-level ones are believed', async () => {
+  let asked: () => void = () => {}
+  const askedOnce = new Promise<void>((resolve) => { asked = resolve })
   const viewer: Client = { type: 'window', frameType: 'top-level', posted: [] }
-  viewer.postMessage = (m) => viewer.posted!.push(m)
+  viewer.postMessage = (m) => { viewer.posted!.push(m); asked() }
   const w = await worker({ clients: [viewer] })
   // A key from a frame (the artifact itself) is ignored.
   w.giveKey({ type: 'window', frameType: 'nested' }, 'aaaaaaaaaaaaaaaa')
   const pending = w.request('/__redrop/v/3/index.html')
-  await new Promise((resolve) => setTimeout(resolve, 10))
+  await askedOnce
   assert.deepEqual(JSON.parse(JSON.stringify(viewer.posted)), [{ type: 'redrop-e2e-need-key' }])
   w.giveKey(viewer)
   const r = (await pending)!
   assert.equal(await text(r), plainOf('index.html'))
+})
+
+await test('a file artifact that is an image is shown in an <img>, where an SVG\'s script can\'t run', async () => {
+  const w = await worker()
+  w.giveKey()
+  const page = (await w.request('/__redrop/v/4/', { mode: 'navigate', destination: 'iframe' }))!
+  assert.equal(page.status, 200)
+  assert.match(page.headers.get('content-type')!, /^text\/html/)
+  assert.match(page.headers.get('content-security-policy')!, /^default-src 'none'; img-src 'self'/)
+  const html = await text(page)
+  assert.match(html, /<img src="\/__redrop\/v\/4\/" alt="logo.svg">/)
+  assert.ok(!html.includes('<script'), 'the wrapper runs nothing')
+  assert.ok(!w.fetched.some((p) => /[a-z2-7]{26}$/.test(p)), 'the SVG is not fetched for the page')
+  // The <img> request gets the file itself; a download gets it as an attachment.
+  const img = (await w.request('/__redrop/v/4/', { destination: 'image' }))!
+  assert.equal(img.headers.get('content-type'), 'image/svg+xml; charset=utf-8')
+  assert.match(await text(img), /<svg/)
+  const dl = (await w.request('/__redrop/v/4/logo.svg?download', { mode: 'navigate', destination: 'iframe' }))!
+  assert.match(dl.headers.get('content-disposition')!, /^attachment/)
 })

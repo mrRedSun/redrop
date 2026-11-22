@@ -85,6 +85,27 @@
     })
   }
 
+  // imagePage is redrop's page for a file artifact that is an image, as the
+  // plain file page shows one: in an <img>, where an SVG's scripts don't
+  // run. The <img> request (destination "image") gets the file itself.
+  function imagePage(f, url) {
+    var name = escapeHTML(f.path.slice(f.path.lastIndexOf('/') + 1))
+    var body = '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>' + name + '</title><style>html,body{margin:0;height:100%}body{display:grid;place-items:center;background:#f4f4f5}' +
+      '@media(prefers-color-scheme:dark){body{background:#18181b}}img{max-width:100%;max-height:100vh}</style>' +
+      '<img src="' + escapeHTML(url.pathname) + '" alt="' + name + '">'
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'",
+        'Cache-Control': 'no-store',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    })
+  }
+
   function httpProblem(status) {
     if (status === 403) return problemError(403, 'Your access to this link has ended. Reload the page to open it again.')
     if (status === 429) return problemError(429, 'Too many requests. Wait a minute and reload the page.')
@@ -161,6 +182,9 @@
           : 'Not found')
       }
       var f = r.file
+      if (m.kind === 'file' && /^image\//.test(f.type) && req.mode === 'navigate' && !url.searchParams.has('download')) {
+        return imagePage(f, url)
+      }
       return fetchObject(n, f.object).then(function (res) {
         var headers = headersFor(res, m, f, url)
         var b = E.fileBinding(s.artifact, n, f.path)

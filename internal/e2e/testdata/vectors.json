@@ -62,6 +62,26 @@
       "plaintext_sha256": "d06d8c4b2e90197e5c96d02aaba412edbc210df2494fb60d3069683630172658",
       "plaintext": "eyJmb3JtYXQiOjEsImtpbmQiOiJidW5kbGUiLCJ0aXRsZSI6IlZlY3RvciIsImVudHJ5IjoiaW5kZXguaHRtbCIsImZpbGVzIjpbeyJwYXRoIjoiZW1wdHkudHh0Iiwib2JqZWN0IjoieWY3eGFyeG81aW1oN2VnN2dlZnljZHVkcXUiLCJ0eXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIiwic2l6ZSI6MH0seyJwYXRoIjoiaW5kZXguaHRtbCIsIm9iamVjdCI6ImtrNmJhNGlmczdlYjZkbGd4YWw0amd0MzVpIiwidHlwZSI6ImFwcGxpY2F0aW9uL29jdGV0LXN0cmVhbSIsInNpemUiOjYxfSx7InBhdGgiOiJkb2NzL2NhZsOpIG5vdGVzLm1kIiwib2JqZWN0IjoiZWFmb2xmcDJmbWpmaGYydnN3Z2lvNW9ydm0iLCJ0eXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIiwic2l6ZSI6MjV9LHsicGF0aCI6ImRhdGEvZnVsbC5iaW4iLCJvYmplY3QiOiJlcHdiYXB6M2JsbWgzb2xyZTYyYjZkbTY1cSIsInR5cGUiOiJhcHBsaWNhdGlvbi9vY3RldC1zdHJlYW0iLCJzaXplIjo2NTUzNn0seyJwYXRoIjoiZGF0YS90d28uYmluIiwib2JqZWN0IjoiZWptZG1mdTNoNXg3ajQyejdsNGd6YWg2YWkiLCJ0eXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIiwic2l6ZSI6NjU1NDF9XX0=",
       "object": "UkRFAcsvPMyRaj5asCbY8X6yx6/wUZX9xcCaH9e12PHIHfvZC32tMnaCZNhubadcJct8wIVcRrM2tF1CdD5cZw1Qu7nS5WF8SgghMcBopIzyGJMIqjlNwd1mXLMEYqEluJTGBKdcHue1HqzC779OjHO3YlXBMCsgbHUwzV4N0YWhPNXpGg7nNxjFrBc1fLAWZ/2zqFUIhUEuAcIBQ7nalREJkYwhH+7baV2+zaLXPiPpjvZxsauarazQkAJN8giy5TLlTAkX+sWoE1XskCV+a90kga8QLgQE1vfrrNAqEczfwok+ylx0EH/KGISJA17d9EHcpkHzOkiYB4B+vMqw9JnFV2B6Lf90DHobuU4/Xa3kQ8UP6TQAuZRpIKbOwi3LKElETPQGcdIUyx5132d0zTRwM9Jn63vcCVnmmMgmAd1MSV87ZL1e035SoSwuUBxRVKvWAEld0+Mtq02DJcs/Qom8YT98bp3dgc4WbBUGHKA/tHuSg+hVx6Srt9Lgkl3jMWPqBZ5k9Y73nUmW7O4ILESuWydbE7UMY/SSSMX8JFj2pBnBQT1g3MPqoIcagdVBHqNwstYCownYm0n/5wvxdBojR8/Oi0U8eliGmiDPDXYkGBlvyPiC9E1DPu82ChlrUZ0bZHjMJ0It2M5B4RXJRCXWSMJ1I1pcrYOXiTGIk7RaVMUzc0lUU+6yfI46l1WX9GDe3gFjhevCg+qqNvhBIFVcY2kzaeb1YiibfuolGLL6ryAWByjX28ZUIlSuDRn1c0RHDOKC3yTO32yYvXWys2tUaqK+mp6LUCELeOBKCuN2DYmkuko+mwYGpoA4/RM0k4t3sscfW5TjcrrPWwJ1e7Sz8qlTCiNVJf0="
+    },
+    {
+      "name": "file artifact: an SVG",
+      "type": 2,
+      "version": 4,
+      "path": "logo.svg",
+      "plaintext_len": 117,
+      "plaintext_sha256": "87a27fdb6c1db8d310cc60db59970bf3c4d8eea382ef4c4fd601f53f8072fdf2",
+      "plaintext": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMCIgaGVpZ2h0PSIxMCI+PHNjcmlwdD5wYXJlbnQuZG9jdW1lbnQudGl0bGU9J3N2Zy1yYW4nPC9zY3JpcHQ+PC9zdmc+",
+      "object": "UkRFAWNVWNTQGzFGXAiLAigGpx8IhP4hyCXJDOOvBs6cS9oXEf8Mb4nZ/gOAfbFkVCU9lCrYbubAXOUC/okGLKOPxn4soeNYw3BTxfJ66L69zi+5Mck01rqlSktB8atBedFc7G09s4AqFVAw4UxfNuNR7G475LC5Fph3wkxE0MTuzzcLRVibqZTyRd9DPjNT2lC2qMw0AZtI"
+    },
+    {
+      "name": "manifest of the file artifact",
+      "type": 1,
+      "version": 4,
+      "path": "",
+      "plaintext_len": 181,
+      "plaintext_sha256": "7ba99c619c1c6f3f7b9cab7638d7985783eb738a05b82ae3d7c26da6a34522ca",
+      "plaintext": "eyJmb3JtYXQiOjEsImtpbmQiOiJmaWxlIiwidGl0bGUiOiJsb2dvLnN2ZyIsImVudHJ5IjoibG9nby5zdmciLCJmaWxlcyI6W3sicGF0aCI6ImxvZ28uc3ZnIiwib2JqZWN0IjoiMmlzbnozdHljb3l6bHk1ZWh2amptM2JxNWkiLCJ0eXBlIjoiaW1hZ2Uvc3ZnK3htbDsgY2hhcnNldD11dGYtOCIsInNpemUiOjExN31dfQ==",
+      "object": "UkRFAYrk2E8gipFXNXHyF5xKgasNL1/M6Wx8XXLHgyh+thQsbSm+69I/7JtU0DIQfjoG9E5uO4s4JuzTXmN/LjKIHQHBjulsvl0aOB68dslJEObuBvrwWvgQUZl8O+0Gx/dC1TLERfvO+o/7NGdNRiDOt2E5bUSy12cC/0ITaosaWln7HJg0ZxGPDFTAVDe/uL9vW9PcsYdzJmmm0mP7gS86Fq0SAIA1kiKFLFpVuoqP0Gt/h0Yhi7pHVBBuhEDAefRnQyGbuRajf6kZ6O8D729yfc6dNSqJew=="
     }
   ]
 }
