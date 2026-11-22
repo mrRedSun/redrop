@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,6 +81,28 @@ func TestKeyStoreRefusesSymlinks(t *testing.T) {
 	requireExitCode(t, saveKey(testServer, "aaaaaaaaaaaaaaaa", newTestKey(t)), exitUsage)
 	if b, _ := os.ReadFile(target); string(b) != `{"version":1,"keys":{}}` {
 		t.Fatalf("the link's target was written: %s", b)
+	}
+}
+
+// The re-check of review 33 (n-2): a link at the lock's path is refused,
+// and nothing is created where it points, by checks that hold on every
+// platform (Unix also opens with O_NOFOLLOW).
+func TestKeyStoreLockRefusesSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	dir := t.TempDir()
+	useConfigPath(t, filepath.Join(dir, "config.json"))
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.Symlink(target, keysPath()+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	requireExitCode(t, saveKey(testServer, "aaaaaaaaaaaaaaaa", newTestKey(t)), exitUsage)
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the lock created the link's target: %v", err)
+	}
+	if _, err := os.Lstat(keysPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a key was saved without the lock: %v", err)
 	}
 }
 

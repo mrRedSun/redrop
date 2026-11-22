@@ -146,11 +146,25 @@ var errLocked = errors.New("locked")
 // lockFile takes an exclusive OS lock (flock, or LockFileEx on Windows) on
 // the file p, so concurrent shares don't lose each other's keys. The
 // operating system drops it when the holder exits, so a crashed writer
-// leaves no stale lock to take over. The file itself stays.
+// leaves no stale lock to take over. The file itself stays. A link at p is
+// refused, so the lock never creates or holds a file the link names: Unix
+// opens with O_NOFOLLOW, and the checks around the open hold everywhere.
 func lockFile(p string) (func(), error) {
+	refuse := func() error {
+		return withCode(exitUsage, "the key store's lock %s is not a regular file; remove it", p)
+	}
+	if fi, err := os.Lstat(p); err == nil && !fi.Mode().IsRegular() {
+		return nil, refuse()
+	}
 	f, err := os.OpenFile(p, lockOpenFlags, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("the key store's lock %s: %w", p, err)
+	}
+	opened, err := f.Stat()
+	named, lerr := os.Lstat(p)
+	if err != nil || lerr != nil || !named.Mode().IsRegular() || !os.SameFile(opened, named) {
+		f.Close()
+		return nil, refuse()
 	}
 	deadline := time.Now().Add(lockWait)
 	for {
