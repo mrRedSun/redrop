@@ -13,6 +13,12 @@ type Manifest = { kind: string; title: string; entry: string; byPath: Record<str
 type Resolved = { file?: { path: string }; redirect?: string; notFound?: boolean; listing?: boolean }
 export type RedropE2E = {
   BUFFER_LIMIT: number
+  KEY_TTL_MS: number
+  keys: {
+    put(artifact: string, key: CryptoKey, now: number): Promise<void>
+    get(artifact: string, now: number): Promise<CryptoKey | null>
+    remove(artifact: string): Promise<void>
+  }
   splitFragment(f: string): { key: string | null; rest: string }
   importKey(text: string): Promise<CryptoKey>
   keyCheck(key: CryptoKey, artifact: string): Promise<string>
@@ -31,10 +37,54 @@ const vectors = JSON.parse(readFileSync(new URL('../../internal/e2e/testdata/vec
 }
 
 /** Loads e2e.js into a fresh context, as a browser or worker would. */
-export function loadE2E(): RedropE2E {
-  const context = vm.createContext({ crypto: globalThis.crypto, TextEncoder, TextDecoder, atob, btoa, ReadableStream })
+export function loadE2E(extra: Record<string, unknown> = {}): RedropE2E {
+  const context = vm.createContext({ crypto: globalThis.crypto, CryptoKey: globalThis.CryptoKey, TextEncoder, TextDecoder, atob, btoa, ReadableStream, ...extra })
   vm.runInContext(lib, context)
   return context.RedropE2E as RedropE2E
+}
+
+type Req = { result?: unknown; onsuccess?: () => void; onerror?: () => void; onupgradeneeded?: () => void }
+type Tx = { oncomplete?: () => void; onerror?: () => void; onabort?: () => void; objectStore(n: string): unknown }
+
+// A minimal IndexedDB: one database, requests answered asynchronously,
+// transactions complete once their requests have.
+function fakeIndexedDB() {
+  const stores = new Map<string, Map<string, unknown>>()
+  return {
+    stores,
+    open() {
+      const req: Req = {}
+      queueMicrotask(() => {
+        const db = {
+          createObjectStore(n: string) { stores.set(n, new Map()) },
+          close() {},
+          transaction(n: string) {
+            const data = stores.get(n)!
+            const tx: Tx = { objectStore: () => store }
+            let pending = 0
+            const settle = () => queueMicrotask(() => { if (pending === 0) tx.oncomplete?.() })
+            const request = (run: () => unknown) => {
+              const r: Req = {}
+              pending++
+              queueMicrotask(() => { r.result = run(); r.onsuccess?.(); pending--; settle() })
+              return r
+            }
+            const store = {
+              put: (v: unknown, k: string) => request(() => void data.set(k, v)),
+              get: (k: string) => request(() => data.get(k)),
+              delete: (k: string) => request(() => void data.delete(k)),
+            }
+            settle()
+            return tx
+          },
+        }
+        req.result = db
+        if (!stores.has('keys')) req.onupgradeneeded?.()
+        req.onsuccess?.()
+      })
+      return req
+    },
+  }
 }
 
 const E = loadE2E()
@@ -62,7 +112,7 @@ await test('every Go vector decrypts to its plaintext', async () => {
   const m = E.parseManifest(await E.openBytes(bytes(manifest.object), key, binding(manifest)))
   assert.equal(m.entry, 'index.html')
   assert.equal(m.title, 'Vector')
-  assert.deepEqual(Object.keys(m.byPath).sort(), vectors.objects.filter((v) => v.type === 2).map((v) => v.path).sort())
+  assert.deepEqual(Object.keys(m.byPath).sort(), vectors.objects.filter((v) => v.type === 2 && v.version === manifest.version).map((v) => v.path).sort())
 })
 
 await test('streamed decryption yields the same bytes, in segments', async () => {
@@ -187,4 +237,24 @@ await test('manifests are checked before use', () => {
   ]
   for (const [name, m] of bad) assert.throws(() => manifestOf(m), (e: { code?: string }) => e.code === 'manifest', name)
   assert.throws(() => E.parseManifest(new Uint8Array([0xff, 0xfe])), (e: { code?: string }) => e.code === 'manifest', 'not UTF-8 JSON')
+})
+
+await test('the browser key store keeps only CryptoKeys, and only while fresh', async () => {
+  const idb = fakeIndexedDB()
+  const K = loadE2E({ indexedDB: idb })
+  const key = await K.importKey(vectors.key)
+  const t0 = 1_000_000
+  await K.keys.put(vectors.artifact, key, t0)
+  assert.equal(await K.keys.get(vectors.artifact, t0 + K.KEY_TTL_MS - 1), key)
+  assert.equal(await K.keys.get('other', t0), null)
+  assert.equal(await K.keys.get(vectors.artifact, t0 + K.KEY_TTL_MS), null, 'expired')
+  assert.equal(idb.stores.get('keys')!.size, 0, 'an expired key is forgotten')
+  await K.keys.put(vectors.artifact, key, t0)
+  assert.equal(await K.keys.get(vectors.artifact, t0 - 1), null, 'a clock that went back')
+  idb.stores.get('keys')!.set(vectors.artifact, { key: vectors.key, at: t0 })
+  assert.equal(await K.keys.get(vectors.artifact, t0), null, 'key text is never accepted')
+  await K.keys.put(vectors.artifact, key, t0)
+  await K.keys.remove(vectors.artifact)
+  assert.equal(await K.keys.get(vectors.artifact, t0), null)
+  await assert.rejects(loadE2E().keys.get(vectors.artifact, t0), (e: { code?: string }) => e.code === 'storage', 'no IndexedDB')
 })

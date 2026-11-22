@@ -269,50 +269,80 @@
 
   // ---- end-to-end encrypted links ----
   // The key comes from the link's fragment (#k=<key>, optionally followed
-  // by & and the page or the artifact's own fragment). It leaves the
-  // address bar at once and stays in this tab's sessionStorage, so reloads
-  // and the viewer's own links keep working. The frame never gets it: the
-  // worker gets a non-extractable CryptoKey, and only then is the frame
-  // pointed at the version path it decrypts.
+  // by & and the page or the artifact's own fragment). The artifact runs
+  // on this origin and could read anything this page keeps, so the key's
+  // text is never kept: it is imported as a non-extractable CryptoKey,
+  // checked, and stored as that in IndexedDB; the fragment leaves the
+  // address bar; and the page reloads, so its navigation records (the
+  // Performance and Navigation APIs) never held the key either. Only that
+  // reloaded page, which reads the CryptoKey back, creates the frame.
   function bootE2E() {
     var E = window.RedropE2E
-    var KEY_ITEM = 'redrop-e2e-key'
     var note = doc.getElementById('rd-e2e-msg')
     var hash = location.hash.slice(1)
     var parts = E ? E.splitFragment(hash) : { key: null, rest: hash }
-    var keyText = parts.key, rest = parts.rest, key = null
+    var rest = parts.rest, key = null
+    var secure = window.isSecureContext && window.crypto && crypto.subtle && navigator.serviceWorker
     function show(text) {
       note.textContent = text
       note.hidden = false
-    }
-    // The viewer never changes the fragment with an event (replaceState
-    // fires none), so a hashchange is the visitor's: a pasted full link or
-    // an edited page. Start over with it.
-    window.addEventListener('hashchange', function () { location.reload() })
-    if (keyText) {
-      try { sessionStorage.setItem(KEY_ITEM, keyText) } catch (e) { /* storage off: this page still opens */ }
-      history.replaceState(history.state, '', location.pathname + location.search + (rest ? '#' + rest : ''))
-    } else {
-      try { keyText = sessionStorage.getItem(KEY_ITEM) } catch (e) { keyText = null }
-    }
-    // The frame's first page: a page in the fragment, else this path with
-    // the artifact's own fragment.
-    var target = rest.charAt(0) === '/'
-      ? '/__redrop/v/' + e2e.version + rest
-      : frame.getAttribute('data-src') + (rest ? '#' + rest : '')
-    if (!E || !keyText) {
-      show('This page is end-to-end encrypted, and the key is missing from the link. Open the complete link you were given, including the part after #.')
-      return
-    }
-    if (!window.isSecureContext || !window.crypto || !crypto.subtle || !navigator.serviceWorker) {
-      show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
-      return
     }
     function coded(code, status) {
       var e = new Error(code)
       e.code = code
       e.status = status
       return e
+    }
+    function failed(err) {
+      var code = err && err.code
+      if (code === 'missing') show('This page is end-to-end encrypted, and the key is missing from the link. Open the complete link you were given, including the part after #.')
+      else if (code === 'wrongkey') show('This link\'s key doesn\'t open this page. Check that you have the complete link, including the part after #.')
+      else if (code === 'key') show('This link\'s key is damaged. Open the complete link you were given, including the part after #.')
+      else if (code === 'storage') show('This browser doesn\'t let the viewer keep the key while it opens the page (some private windows block site storage), so it can\'t be opened here.')
+      else if (code === 'auth' || code === 'format' || code === 'manifest') show('This page failed its integrity check: its content was changed, or it belongs to another link. Nothing of it is shown.')
+      else if (code === 'http' && err.status === 403) show('Your access to this link has ended. Reload the page to open it again.')
+      else if (code === 'http' && err.status === 404) show('This link doesn\'t exist, or it has expired.')
+      else if (code === 'worker') show('Your browser could not start the decryption worker. Allow this site to use service workers (some private windows block them) and reload.')
+      else show('This page could not be opened. Reload to try again.')
+    }
+    // The viewer never changes the fragment with an event (replaceState
+    // fires none), so a hashchange is the visitor's: a pasted full link or
+    // an edited page. Start over with it.
+    window.addEventListener('hashchange', function () { location.reload() })
+    if (parts.key) {
+      // The link's key: keep it as a CryptoKey, then reload without it.
+      var clean = location.pathname + location.search + (rest ? '#' + rest : '')
+      if (!E || !secure) {
+        history.replaceState(history.state, '', clean)
+        show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
+        return
+      }
+      E.importKey(parts.key).then(function (k) {
+        return E.keyCheck(k, e2e.artifact).then(function (check) {
+          if (check !== e2e.check) throw coded('wrongkey')
+          return E.keys.put(e2e.artifact, k, Date.now())
+        })
+      }).then(function () {
+        history.replaceState(history.state, '', clean)
+        location.reload()
+      }, function (err) {
+        history.replaceState(history.state, '', clean)
+        failed(err)
+      })
+      return
+    }
+    // The frame's first page: a page in the fragment, else this path with
+    // the artifact's own fragment.
+    var target = rest.charAt(0) === '/'
+      ? '/__redrop/v/' + e2e.version + rest
+      : frame.getAttribute('data-src') + (rest ? '#' + rest : '')
+    if (!E) {
+      failed(coded('missing'))
+      return
+    }
+    if (!secure) {
+      show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
+      return
     }
     function object(name) {
       return fetch('/__redrop/v/' + e2e.version + '/' + name, { credentials: 'same-origin', cache: 'no-store' }).then(function (res) {
@@ -373,11 +403,15 @@
       })
       button.hidden = false
     }
-    E.importKey(keyText).then(function (k) {
+    E.keys.get(e2e.artifact, Date.now()).then(function (k) {
+      if (!k) throw coded('missing')
       key = k
       return E.keyCheck(k, e2e.artifact)
     }).then(function (check) {
-      if (check !== e2e.check) throw coded('wrongkey')
+      if (check !== e2e.check) {
+        E.keys.remove(e2e.artifact)
+        throw coded('wrongkey')
+      }
       // Decrypting the manifest checks the content before anything is framed.
       return object('manifest')
     }).then(function (bytes) {
@@ -394,15 +428,6 @@
     }).then(function (worker) {
       sendKey(worker)
       frame.src = target
-    }).catch(function (err) {
-      var code = err && err.code
-      if (code === 'wrongkey') show('This link\'s key doesn\'t open this page. Check that you have the complete link, including the part after #.')
-      else if (code === 'key') show('This link\'s key is damaged. Open the complete link you were given, including the part after #.')
-      else if (code === 'auth' || code === 'format' || code === 'manifest') show('This page failed its integrity check: its content was changed, or it belongs to another link. Nothing of it is shown.')
-      else if (code === 'http' && err.status === 403) show('Your access to this link has ended. Reload the page to open it again.')
-      else if (code === 'http' && err.status === 404) show('This link doesn\'t exist, or it has expired.')
-      else if (code === 'worker') show('Your browser could not start the decryption worker. Allow this site to use service workers (some private windows block them) and reload.')
-      else show('This page could not be opened. Reload to try again.')
-    })
+    }).catch(failed)
   }
 })()

@@ -279,8 +279,56 @@
     return { notFound: true }
   }
 
+  // ---- the browser's key store ----
+  // The viewer keeps an artifact's key only as a non-extractable CryptoKey,
+  // in IndexedDB, so it survives the viewer's own reload and the visitor's
+  // reloads for KEY_TTL_MS after the full link was last opened. A
+  // same-origin script can use such a key while it runs, but can't read its
+  // bytes (DESIGN.md "End-to-end encrypted links", "Keys and links").
+  var KEY_DB = 'redrop-e2e', KEY_STORE = 'keys'
+  var KEY_TTL_MS = 12 * 60 * 60 * 1000
+  function keyTx(mode, run) {
+    return new Promise(function (resolve, reject) {
+      var idb = root.indexedDB
+      if (!idb) { reject(fail('storage', 'IndexedDB is not available')); return }
+      var open
+      try { open = idb.open(KEY_DB, 1) } catch (e) { reject(fail('storage', 'IndexedDB is not available')); return }
+      open.onupgradeneeded = function () { open.result.createObjectStore(KEY_STORE) }
+      open.onerror = function () { reject(fail('storage', 'IndexedDB refused')) }
+      open.onsuccess = function () {
+        var db = open.result, out
+        var tx = db.transaction(KEY_STORE, mode)
+        run(tx.objectStore(KEY_STORE), function (v) { out = v })
+        tx.oncomplete = function () { db.close(); resolve(out) }
+        tx.onerror = tx.onabort = function () { db.close(); reject(fail('storage', 'IndexedDB refused')) }
+      }
+    })
+  }
+  var keys = {
+    // put keeps key for artifact from now on.
+    put: function (artifact, key, now) {
+      return keyTx('readwrite', function (s) { s.put({ key: key, at: now }, artifact) })
+    },
+    // get returns artifact's key while it is fresh, else null (and forgets it).
+    get: function (artifact, now) {
+      return keyTx('readwrite', function (s, set) {
+        var r = s.get(artifact)
+        r.onsuccess = function () {
+          var v = r.result
+          if (v && v.key instanceof CryptoKey && now >= v.at && now - v.at < KEY_TTL_MS) set(v.key)
+          else if (v) s.delete(artifact)
+        }
+      }).then(function (k) { return k || null })
+    },
+    remove: function (artifact) {
+      return keyTx('readwrite', function (s) { s.delete(artifact) })
+    },
+  }
+
   var api = {
     BUFFER_LIMIT: BUFFER_LIMIT,
+    KEY_TTL_MS: KEY_TTL_MS,
+    keys: keys,
     splitFragment: splitFragment,
     importKey: importKey,
     keyCheck: keyCheck,
