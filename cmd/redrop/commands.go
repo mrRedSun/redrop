@@ -1038,30 +1038,3 @@ func whoamiCmd() *cobra.Command {
 		},
 	}
 }
-
-func versionCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Print the CLI version (and the server version when configured)",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			out := map[string]string{"cli": version}
-			if c, err := newClient(); err == nil {
-				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
-				defer cancel()
-				if ac, err := c.AuthConfig(ctx); err == nil {
-					out["server"] = ac.Version
-					out["url"] = c.BaseURL
-				}
-			}
-			if g.json {
-				return printJSON(out)
-			}
-			fmt.Printf("redrop %s\n", version)
-			if s, ok := out["server"]; ok {
-				fmt.Printf("server %s (%s)\n", s, out["url"])
-			}
-			return nil
-		},
-	}
-}
