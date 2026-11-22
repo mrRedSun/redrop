@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -28,9 +29,11 @@ const (
 // TunnelRequest describes one proxied request for --log: never headers,
 // bodies or the query string.
 type TunnelRequest struct {
-	Method   string
+	Method string
+	// Path is percent-encoded as on the wire, so a visitor can't put control
+	// characters (terminal escapes, line breaks) into the owner's terminal.
 	Path     string
-	Status   int
+	Status   int // the final status, never a 1xx
 	Duration time.Duration
 }
 
@@ -48,7 +51,7 @@ func ServeTunnelSession(ctx context.Context, conn net.Conn, target *TunnelTarget
 		conn.Close()
 		return err
 	}
-	var h http.Handler = target.proxy()
+	var h http.Handler = unblockWhenCancelled(target.proxy())
 	if onRequest != nil {
 		h = logTunnelRequests(h, onRequest)
 	}
@@ -60,13 +63,43 @@ func ServeTunnelSession(ctx context.Context, conn net.Conn, target *TunnelTarget
 	}
 	stop := context.AfterFunc(ctx, func() { sess.Close() })
 	defer stop()
-	err = srv.Serve(sess)
+	err = srv.Serve(streamListener{sess})
 	srv.Close()
 	sess.Close()
 	if ctx.Err() != nil || errors.Is(err, yamux.ErrSessionShutdown) || errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
+}
+
+// streamListener hands the server's streams to the HTTP server.
+type streamListener struct{ *yamux.Session }
+
+func (l streamListener) Accept() (net.Conn, error) {
+	c, err := l.Session.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &serverStream{Conn: c}, nil
+}
+
+// serverStream closes itself when the server closes its end. The server
+// never half-closes a stream it still uses: its end of file means the
+// request is over (the visitor left, access changed), so whatever this side
+// was still sending, a WebSocket's data included, has no reader, and a
+// write blocked on a full window must end now. ReverseProxy would otherwise
+// keep a WebSocket's other direction open after the half-close.
+type serverStream struct {
+	net.Conn
+	once sync.Once
+}
+
+func (s *serverStream) Read(b []byte) (int, error) {
+	n, err := s.Conn.Read(b)
+	if err == io.EOF {
+		s.once.Do(func() { s.Conn.Close() })
+	}
+	return n, err
 }
 
 // proxy forwards a stream's request to the pinned target. Only the target's
@@ -144,6 +177,19 @@ func (t *TunnelTarget) relativeLocation(resp *http.Response) error {
 	return nil
 }
 
+// unblockWhenCancelled ends a write to the server that can't make progress
+// once the server has given the request up (the visitor left): a write
+// blocked on a full stream window would otherwise hold the request, its
+// goroutine and its connection to the app. The server also resets such
+// streams; this is the CLI's own guard.
+func unblockWhenCancelled(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stop := context.AfterFunc(r.Context(), func() { http.NewResponseController(w).SetWriteDeadline(time.Now()) })
+		defer stop()
+		next.ServeHTTP(w, r)
+	})
+}
+
 // logTunnelRequests reports each request once it has finished.
 func logTunnelRequests(next http.Handler, report func(TunnelRequest)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +203,7 @@ func logTunnelRequests(next http.Handler, report func(TunnelRequest)) http.Handl
 		case status == 0:
 			status = http.StatusOK
 		}
-		report(TunnelRequest{Method: r.Method, Path: r.URL.Path, Status: status, Duration: time.Since(start)})
+		report(TunnelRequest{Method: r.Method, Path: r.URL.EscapedPath(), Status: status, Duration: time.Since(start)})
 	})
 }
 
@@ -166,8 +212,10 @@ type statusWriter struct {
 	status int
 }
 
+// WriteHeader records the final status; an informational one (103 Early
+// Hints) comes before it and is not the answer.
 func (w *statusWriter) WriteHeader(code int) {
-	if w.status == 0 {
+	if w.status == 0 && code >= 200 {
 		w.status = code
 	}
 	w.ResponseWriter.WriteHeader(code)

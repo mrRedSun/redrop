@@ -50,7 +50,9 @@ func ResolveTunnelTarget(ctx context.Context, raw string, allowRemote bool, r Re
 	if err != nil {
 		return nil, &UsageError{Message: err.Error(), Cause: err}
 	}
-	t := &TunnelTarget{Host: net.JoinHostPort(host, strconv.Itoa(int(port)))}
+	// The Host header has no IPv6 zone; the dialed addresses keep it.
+	hostOnly, _, _ := strings.Cut(host, "%")
+	t := &TunnelTarget{Host: net.JoinHostPort(hostOnly, strconv.Itoa(int(port)))}
 	var addrs []netip.Addr
 	switch lower := strings.ToLower(strings.TrimSuffix(host, ".")); {
 	case lower == "localhost" || strings.HasSuffix(lower, ".localhost"):
@@ -68,7 +70,7 @@ func ResolveTunnelTarget(ctx context.Context, raw string, allowRemote bool, r Re
 		}
 	}
 	for i, a := range addrs {
-		a = a.Unmap().WithZone("")
+		a = a.Unmap() // a link-local address keeps its zone, or it can't be dialed
 		c, err := classOf(a)
 		if err != nil {
 			return nil, usageErrorf("the tunnel target %s: %v", t.Host, err)

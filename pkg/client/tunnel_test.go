@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -283,5 +284,54 @@ func TestRunTunnelStopsWithTheContext(t *testing.T) {
 		}})
 	if err != nil {
 		t.Fatalf("cancelled: %v, want nil", err)
+	}
+}
+
+// TestTunnelLogShowsTheFinalStatusAndASafePath: --log reports the final
+// status (not a 103 before it), and the path as it was on the wire, so a
+// visitor can't write terminal escapes or fake lines to the owner's
+// terminal.
+func TestTunnelLogShowsTheFinalStatusAndASafePath(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", "</app.css>; rel=preload")
+		w.WriteHeader(http.StatusEarlyHints)
+		io.WriteString(w, "ok")
+	}))
+	defer app.Close()
+	tg, err := ResolveTunnelTarget(context.Background(), strings.TrimPrefix(app.URL, "http://"), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := make(chan TunnelRequest, 1)
+	srv := httptest.NewServer(logTunnelRequests(tg.proxy(), func(r TunnelRequest) { logged <- r }))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/x%1b%5d0;PWNED%07%1b%5b2J%0aGET%20/fake%20200")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := <-logged
+	if resp.StatusCode != 200 || got.Status != 200 {
+		t.Fatalf("visitor got %d; --log recorded %d", resp.StatusCode, got.Status)
+	}
+	for _, r := range got.Path {
+		if r < 0x20 || r == 0x7f || r > 0x7e {
+			t.Fatalf("--log path %q holds %U", got.Path, r)
+		}
+	}
+	if !strings.Contains(got.Path, "%1B") && !strings.Contains(got.Path, "%1b") {
+		t.Fatalf("--log path %q: want the escape percent-encoded", got.Path)
+	}
+}
+
+// TestLinkLocalTargetKeepsItsZone: a link-local IPv6 address can only be
+// dialed with its zone; the Host header has none.
+func TestLinkLocalTargetKeepsItsZone(t *testing.T) {
+	tg, err := ResolveTunnelTarget(context.Background(), "[fe80::1%lo]:3000", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z := tg.Addrs[0].Addr().Zone(); z != "lo" || tg.Host != "[fe80::1]:3000" || tg.Class != ClassPrivate {
+		t.Fatalf("pinned %s (zone %q), host %q, class %q", tg.Addrs[0], z, tg.Host, tg.Class)
 	}
 }
