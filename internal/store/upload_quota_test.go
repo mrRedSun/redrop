@@ -26,7 +26,7 @@ func quotaStore(t *testing.T, quota int64) (*Store, string) {
 
 func quotaUpload(t *testing.T, db *Store, user string, size int64) *Upload {
 	t.Helper()
-	u, err := db.CreateUpload(context.Background(), user, size, time.Hour, 0, 20)
+	u, err := db.CreateUpload(context.Background(), user, size, UploadTarget{}, time.Hour, 0, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestSixMBFileCommitsWithinTenMBQuota(t *testing.T) {
 			if err := db.DeleteUpload(ctx, u.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.CreateUpload(ctx, user, 1, time.Hour, 18*quotaMB, 20); !errors.Is(err, ErrQuota) {
+			if _, err := db.CreateUpload(ctx, user, 1, UploadTarget{}, time.Hour, 18*quotaMB, 20); !errors.Is(err, ErrQuota) {
 				t.Fatalf("other upload's max(size, materialized) was not retained: %v", err)
 			}
 		})
@@ -174,13 +174,13 @@ func TestServerQuotaCountsStagingAndMaterialization(t *testing.T) {
 	if _, err := db.CreateArtifact(ctx, &NewArtifact{UserID: user}, quotaFile(u.ID, 6*quotaMB), 12*quotaMB); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateUpload(ctx, user, 1, time.Hour, 12*quotaMB, 20); !errors.Is(err, ErrQuota) {
+	if _, err := db.CreateUpload(ctx, user, 1, UploadTarget{}, time.Hour, 12*quotaMB, 20); !errors.Is(err, ErrQuota) {
 		t.Fatalf("commit released staging before deletion: %v", err)
 	}
 	if err := db.DeleteUpload(ctx, u.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateUpload(ctx, user, 6*quotaMB, time.Hour, 12*quotaMB, 20); err != nil {
+	if _, err := db.CreateUpload(ctx, user, 6*quotaMB, UploadTarget{}, time.Hour, 12*quotaMB, 20); err != nil {
 		t.Fatalf("deleted staging still charged: %v", err)
 	}
 }
@@ -212,7 +212,7 @@ func TestQuotaCapsSerializeConcurrentReservations(t *testing.T) {
 						if operation == "materialization" {
 							results <- db.ReserveMaterialization(ctx, user, uploads[i].ID, 60, total)
 						} else {
-							_, err := db.CreateUpload(ctx, user, 60, time.Hour, total, 20)
+							_, err := db.CreateUpload(ctx, user, 60, UploadTarget{}, time.Hour, total, 20)
 							results <- err
 						}
 					}()

@@ -74,19 +74,54 @@ func checkE2EContent(c Content) error {
 
 var errE2ESPA = apperr.Invalid("SPA fallback is not available for end-to-end encrypted artifacts")
 
-// checkE2EVersion keeps every version of a on one side: a plaintext version
-// can't join an end-to-end artifact or the reverse, and an end-to-end
-// version must use the artifact's key.
-func checkE2EVersion(a *store.Artifact, c Content) error {
+// checkE2ETarget keeps every version of a on one side: plaintext can't be
+// uploaded or published for an end-to-end artifact, nor the reverse.
+func checkE2ETarget(a *store.Artifact, encrypted bool) error {
 	switch {
-	case a.E2E && c.E2E == nil:
-		return apperr.Invalid("this artifact is end-to-end encrypted; publish new versions with --e2e (redrop update --e2e, redrop watch --e2e)")
-	case !a.E2E && c.E2E != nil:
-		return apperr.Invalid("this artifact is not end-to-end encrypted; publish its new version without encryption")
-	case c.E2E != nil && c.E2E.KeyCheck != a.E2EKeyCheck:
+	case a.E2E && !encrypted:
+		return apperr.Invalid("artifact %s is end-to-end encrypted; encrypt its new versions before upload (redrop update and watch do when they have its key)", a.ID)
+	case !a.E2E && encrypted:
+		return apperr.Invalid("artifact %s is not end-to-end encrypted; publish its new version without encryption", a.ID)
+	}
+	return nil
+}
+
+// checkE2EVersion keeps every version of a on one side and makes an
+// end-to-end version use the artifact's key.
+func checkE2EVersion(a *store.Artifact, c Content) error {
+	if err := checkE2ETarget(a, c.E2E != nil); err != nil {
+		return err
+	}
+	if c.E2E != nil && c.E2E.KeyCheck != a.E2EKeyCheck {
 		return apperr.Invalid("the content was encrypted with a different key than this artifact's; use the artifact's link or its saved key")
 	}
 	return nil
+}
+
+// checkUploadTarget holds a publication to what its upload was declared
+// for: an upload declared for one artifact can't become another's version
+// or a new artifact, encrypted and plaintext content can't be swapped, and
+// an end-to-end artifact's versions come only from uploads declared for it
+// (target is nil for a new artifact).
+func checkUploadTarget(up *store.Upload, target *store.Artifact, c Content) error {
+	switch {
+	case up.E2E != (c.E2E != nil):
+		return apperr.Invalid("the upload was declared %s but published %s; start a new upload", encryptedWord(up.E2E), encryptedWord(c.E2E != nil))
+	case target == nil && up.ArtifactID != "":
+		return apperr.Invalid("the upload was started for a version of artifact %s; start a new upload", up.ArtifactID)
+	case target != nil && up.ArtifactID != "" && up.ArtifactID != target.ID:
+		return apperr.Invalid("the upload was started for a version of artifact %s; start a new upload", up.ArtifactID)
+	case target != nil && target.E2E && up.ArtifactID != target.ID:
+		return apperr.Invalid("a version of an end-to-end encrypted artifact needs an upload declared for it (artifact_id and e2e on POST /uploads)")
+	}
+	return nil
+}
+
+func encryptedWord(e2e bool) string {
+	if e2e {
+		return "end-to-end encrypted"
+	}
+	return "plaintext"
 }
 
 // e2eFiles checks a materialized end-to-end version's layout: exactly one

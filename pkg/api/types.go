@@ -134,6 +134,11 @@ type CreatedToken struct {
 
 type CreateUploadRequest struct {
 	Size int64 `json:"size" validate:"gte=0"`
+	// ArtifactID and E2E declare what the upload is for. An end-to-end
+	// encrypted artifact's versions need both, and the server refuses a
+	// plaintext upload declared for one before any byte is sent.
+	ArtifactID string `json:"artifact_id,omitempty" description:"The artifact this upload is a new version of; required for end-to-end encrypted artifacts"`
+	E2E        bool   `json:"e2e,omitempty" description:"The content is end-to-end encrypted; must match the artifact"`
 }
 
 type Upload struct {

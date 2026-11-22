@@ -19,7 +19,7 @@ func (a *API) createUpload(c fuego.ContextWithBody[api.CreateUploadRequest]) (ap
 	if err != nil {
 		return api.Upload{}, err
 	}
-	u, err := a.sharing.CreateUpload(c.Context(), actorFrom(c.Context()), body.Size)
+	u, err := a.sharing.CreateUpload(c.Context(), actorFrom(c.Context()), body.Size, sharing.UploadTarget{ArtifactID: body.ArtifactID, E2E: body.E2E})
 	if err != nil {
 		return api.Upload{}, err
 	}

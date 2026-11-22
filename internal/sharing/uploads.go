@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/store"
 )
 
 const uploadTTL = time.Hour // renewed after each successful nonempty chunk
@@ -20,10 +21,32 @@ func (s *Service) maxUploadBytes() int64 {
 	return s.cfg.MaxVersionBytes + s.cfg.MaxVersionBytes/10 + 10<<20
 }
 
-// CreateUpload reserves a staged upload of the declared size.
-func (s *Service) CreateUpload(ctx context.Context, actor Actor, size int64) (*Upload, error) {
+// UploadTarget is what an upload is for, declared when it starts.
+type UploadTarget struct {
+	// ArtifactID is the artifact the upload is a new version of; "" for a
+	// new artifact. Undeclared uploads can't become versions of end-to-end
+	// encrypted artifacts.
+	ArtifactID string
+	// E2E: the content is end-to-end encrypted.
+	E2E bool
+}
+
+// CreateUpload reserves a staged upload of the declared size. An upload
+// declared for an end-to-end encrypted artifact must be declared encrypted,
+// and the reverse, so plaintext meant for such an artifact is refused
+// before any byte of it arrives (DESIGN.md "End-to-end encrypted links").
+func (s *Service) CreateUpload(ctx context.Context, actor Actor, size int64, target UploadTarget) (*Upload, error) {
 	if size < 0 {
 		return nil, apperr.Invalid("size must be >= 0")
+	}
+	if target.ArtifactID != "" {
+		a, err := s.owned(ctx, actor, target.ArtifactID)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkE2ETarget(a, target.E2E); err != nil {
+			return nil, err
+		}
 	}
 	if size > s.maxUploadBytes() {
 		return nil, apperr.TooLarge("upload exceeds the %s per-version limit", humanBytes(s.cfg.MaxVersionBytes))
@@ -32,7 +55,7 @@ func (s *Service) CreateUpload(ctx context.Context, actor Actor, size int64) (*U
 	if maxOpen == 0 {
 		maxOpen = 8
 	}
-	u, err := s.db.CreateUpload(ctx, actor.UserID, size, uploadTTL, s.cfg.MaxTotalBytes, maxOpen)
+	u, err := s.db.CreateUpload(ctx, actor.UserID, size, store.UploadTarget{ArtifactID: target.ArtifactID, E2E: target.E2E}, uploadTTL, s.cfg.MaxTotalBytes, maxOpen)
 	if err != nil {
 		return nil, mapStore(err)
 	}

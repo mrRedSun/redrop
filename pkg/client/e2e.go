@@ -51,6 +51,25 @@ func E2EKeyFromLink(link string) (key E2EKey, ok bool, err error) { return e2e.K
 // ErrE2EKeyMismatch means a key is not the artifact's.
 var ErrE2EKeyMismatch = errors.New("this key does not belong to the artifact; use its full link (with #k=…) or the key saved when it was shared")
 
+// ErrEncryptedArtifact means a plaintext version was about to be published
+// to an end-to-end encrypted artifact. Nothing was uploaded: publish it
+// with the artifact's key (UpdateE2E, E2EUploader).
+var ErrEncryptedArtifact = errors.New("the artifact is end-to-end encrypted; its new versions must be encrypted with its key")
+
+// checkPlaintextTarget reads the artifact before a plaintext version is
+// uploaded, so plaintext meant for an end-to-end encrypted artifact never
+// leaves this machine. The server refuses it at upload creation too.
+func (c *Client) checkPlaintextTarget(ctx context.Context, artifactID string) error {
+	a, err := c.GetArtifact(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	if a.E2E {
+		return &UsageError{Message: fmt.Sprintf("artifact %s is end-to-end encrypted: publish with its key (redrop update and watch use the key from its full link or this machine's key store); nothing was uploaded", a.ID), Cause: ErrEncryptedArtifact}
+	}
+	return nil
+}
+
 // e2eAttempts bounds encrypting again after another version took the
 // number the content was encrypted for.
 const e2eAttempts = 3
@@ -86,7 +105,7 @@ func (c *Client) ShareE2E(ctx context.Context, src *Source, opts PublishOptions,
 		}
 	}
 	u, err := retrySourceChange(func() (*upload, error) {
-		return c.prepareEncryptAndUpload(ctx, src, key, res.ID, 1, progress, nil)
+		return c.prepareEncryptAndUpload(ctx, src, key, res.ID, 1, UploadTarget{E2E: true}, progress, nil)
 	})
 	if err != nil {
 		return nil, key, err
@@ -162,7 +181,7 @@ func (c *Client) publishE2E(ctx context.Context, artifactID string, key E2EKey, 
 			return "", nil, err
 		}
 		step := func() (*upload, error) {
-			return c.prepareEncryptAndUpload(ctx, src, key, a.ID, a.NextVersion, progress, before)
+			return c.prepareEncryptAndUpload(ctx, src, key, a.ID, a.NextVersion, UploadTarget{ArtifactID: a.ID, E2E: true}, progress, before)
 		}
 		var u *upload
 		if retrySource {
@@ -195,7 +214,7 @@ func (u *upload) e2eRequest(src *Source, key E2EKey, artifactID string, version 
 
 // prepareEncryptAndUpload is prepareAndUpload with the prepared files
 // encrypted for (artifactID, version) before the upload.
-func (c *Client) prepareEncryptAndUpload(ctx context.Context, src *Source, key E2EKey, artifactID string, version int, progress Progress, beforeUpload func() error) (*upload, error) {
+func (c *Client) prepareEncryptAndUpload(ctx context.Context, src *Source, key E2EKey, artifactID string, version int, target UploadTarget, progress Progress, beforeUpload func() error) (*upload, error) {
 	p, err := Prepare(src)
 	if err != nil {
 		return nil, err
@@ -211,7 +230,7 @@ func (c *Client) prepareEncryptAndUpload(ctx context.Context, src *Source, key E
 			return nil, err
 		}
 	}
-	id, blobSum, err := c.UploadFile(ctx, enc.file, progress)
+	id, blobSum, err := c.UploadFileFor(ctx, enc.file, target, progress)
 	if err != nil {
 		return nil, err
 	}

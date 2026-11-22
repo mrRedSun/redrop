@@ -307,10 +307,8 @@ func TestE2EVersionsKeepTheLinkAndTheRules(t *testing.T) {
 		t.Fatalf("watch digest %s, want the source's %s", digest, want)
 	}
 
-	// Plaintext versions can't join, nor encrypted ones a plaintext artifact.
-	if _, err := c.Update(ctx, a.ID, &client.Source{Path: page}, nil); client.StatusOf(err) != 400 {
-		t.Fatalf("plaintext version on an e2e artifact: %v", err)
-	}
+	// Plaintext versions can't join (TestE2EPlaintextNeverUploaded covers
+	// that), nor encrypted ones a plaintext artifact.
 	plain, err := c.Share(ctx, &client.Source{Path: page}, client.PublishOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -323,14 +321,11 @@ func TestE2EVersionsKeepTheLinkAndTheRules(t *testing.T) {
 		t.Fatalf("wrong key, client side: %v", err)
 	}
 
-	// The server's checks, for clients that skip their own.
-	upload := func(content string) (string, string) {
+	// The server's checks, for clients that skip their own. Each upload is
+	// declared for the artifact it is published to.
+	upload := func(content string, target client.UploadTarget) (string, string, error) {
 		f := writeFile(t, dir, "raw.bin", content)
-		id, sum, err := c.UploadFile(ctx, f, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return id, sum
+		return c.UploadFileFor(ctx, f, target, nil)
 	}
 	encrypted := encryptedBundle(t, key, a.ID, 4)
 	publish := func(id string, req api.PublishRequest) error {
@@ -345,15 +340,17 @@ func TestE2EVersionsKeepTheLinkAndTheRules(t *testing.T) {
 		status  int
 		title   string
 	}{
-		"e2e version on a plaintext artifact": {plain.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(plain.ID), Version: 2}, false, 400, ""},
-		"another key's check":                 {a.ID, encrypted, &api.E2EPublish{KeyCheck: other.Check(a.ID), Version: 4}, false, 400, ""},
-		"a taken version number":              {a.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 3}, false, 409, api.CodeVersionConflict},
-		"a future version number":             {a.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 9}, false, 409, api.CodeVersionConflict},
-		"SPA fallback":                        {a.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 4}, true, 400, ""},
-		"plaintext labelled e2e":              {a.ID, plainBundle(t), &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 4}, false, 400, ""},
+		"another key's check":     {a.ID, encrypted, &api.E2EPublish{KeyCheck: other.Check(a.ID), Version: 4}, false, 400, ""},
+		"a taken version number":  {a.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 3}, false, 409, api.CodeVersionConflict},
+		"a future version number": {a.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 9}, false, 409, api.CodeVersionConflict},
+		"SPA fallback":            {a.ID, encrypted, &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 4}, true, 400, ""},
+		"plaintext labelled e2e":  {a.ID, plainBundle(t), &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 4}, false, 400, ""},
 	} {
-		id, sum := upload(tc.content)
-		err := publish(tc.id, api.PublishRequest{UploadID: id, SHA256: sum, Kind: api.KindBundle, SPA: tc.spa, E2E: tc.e2e})
+		id, sum, err := upload(tc.content, client.UploadTarget{ArtifactID: tc.id, E2E: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = publish(tc.id, api.PublishRequest{UploadID: id, SHA256: sum, Kind: api.KindBundle, SPA: tc.spa, E2E: tc.e2e})
 		var e *client.Error
 		if !errors.As(err, &e) || e.Status != tc.status || (tc.title != "" && e.Title != tc.title) {
 			t.Errorf("%s: %v", name, err)
@@ -363,7 +360,14 @@ func TestE2EVersionsKeepTheLinkAndTheRules(t *testing.T) {
 			t.Errorf("%s: upload kept (status %d)", name, got)
 		}
 	}
-	id, sum := upload(encrypted)
+	// An encrypted upload for a plaintext artifact is refused when declared.
+	if _, _, err := upload(encrypted, client.UploadTarget{ArtifactID: plain.ID, E2E: true}); client.StatusOf(err) != 400 {
+		t.Fatalf("e2e upload declared for a plaintext artifact: %v", err)
+	}
+	id, sum, err := upload(encrypted, client.UploadTarget{ArtifactID: a.ID, E2E: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := publish(a.ID, api.PublishRequest{UploadID: id, SHA256: sum, Kind: api.KindBundle, E2E: &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 4}}); err != nil {
 		t.Fatalf("a correct raw publication: %v", err)
 	}
@@ -389,7 +393,7 @@ func TestE2EVersionsKeepTheLinkAndTheRules(t *testing.T) {
 		"forged": {c, res.Token[:len(res.Token)-4] + "AAAA"}, "empty": {c, ""}, "another user's": {bob, res.Token},
 	} {
 		f := writeFile(t, dir, "raw.bin", encryptedBundle(t, key, res.ID, 1))
-		id, sum, err := tc.c.UploadFile(ctx, f, nil)
+		id, sum, err := tc.c.UploadFileFor(ctx, f, client.UploadTarget{E2E: true}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -474,6 +478,13 @@ type recordingTransport struct {
 	n    atomic.Int64
 }
 
+// String is everything recorded so far.
+func (rt *recordingTransport) String() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.sent.String()
+}
+
 func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var b []byte
 	if req.Body != nil {
@@ -494,10 +505,7 @@ func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 // (paths, queries, headers, bodies, uploads) nor in any server log line.
 func TestE2EKeyNeverReachesTheServer(t *testing.T) {
 	var logs syncBuffer
-	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	h := newHarnessWith(t, log, Options{})
+	h := newHarnessWith(t, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), Options{})
 	c := client.New(h.srv.URL, h.setupAdmin())
 	rt := &recordingTransport{}
 	c.HTTP = &http.Client{Transport: rt}
@@ -577,3 +585,115 @@ func TestE2EUpdateRetriesAVersionConflict(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// B-1 of review 33: plaintext meant for an end-to-end encrypted artifact
+// never leaves the client, and the server refuses it before any byte of it
+// arrives, for clients that don't check.
+func TestE2EPlaintextNeverUploaded(t *testing.T) {
+	h := newHarness(t)
+	token := h.setupAdmin()
+	c := client.New(h.srv.URL, token)
+	rt := &recordingTransport{}
+	ctx := context.Background()
+	dir := t.TempDir()
+	page := writeFile(t, dir, "page.html", "<p>encrypted one</p>")
+	a, key, err := c.ShareE2E(ctx, &client.Source{Path: page}, client.PublishOptions{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.HTTP = &http.Client{Transport: rt}
+	writeFile(t, dir, "page.html", "<p>"+e2eSecret+"</p>")
+	off := false
+	if _, err := c.UpdateWithOptions(ctx, a.ID, &client.Source{Path: page}, client.VersionOptions{InfoButton: &off}, nil); !errors.Is(err, client.ErrEncryptedArtifact) {
+		t.Fatalf("plaintext update of an e2e artifact: %v", err)
+	}
+	if _, _, err := c.UpdateDigest(ctx, a.ID, &client.Source{Path: page}, nil); !errors.Is(err, client.ErrEncryptedArtifact) {
+		t.Fatalf("plaintext watch publish of an e2e artifact: %v", err)
+	}
+	rt.mu.Lock()
+	sent := rt.sent.String()
+	rt.mu.Unlock()
+	if strings.Contains(sent, "/api/v1/uploads") || strings.Contains(sent, e2eSecret) || strings.Contains(sent, "PATCH") {
+		t.Fatalf("the client sent an upload, plaintext or a settings change:\n%s", sent)
+	}
+	if got, err := c.GetArtifact(ctx, a.ID); err != nil || got.Version != 1 || !got.InfoButton {
+		t.Fatalf("artifact changed: %+v %v", got, err)
+	}
+
+	// A client that skips the check: the upload is refused when it is
+	// created for the artifact, and an undeclared one can't be published to it.
+	raw := writeFile(t, dir, "raw.html", "<p>"+e2eSecret+"</p>")
+	if _, _, err := c.UploadFileFor(ctx, raw, client.UploadTarget{ArtifactID: a.ID}, nil); client.StatusOf(err) != 400 {
+		t.Fatalf("plaintext upload declared for an e2e artifact: %v", err)
+	}
+	if !strings.Contains(rt.String(), `"artifact_id":"`+a.ID+`"`) || strings.Contains(rt.String(), "PUT /api/v1/uploads") {
+		t.Fatal("the refused upload sent bytes")
+	}
+	id, sum, err := c.UploadFile(ctx, raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateVersion(ctx, a.ID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: api.KindHTML}); client.StatusOf(err) != 400 {
+		t.Fatalf("an undeclared plaintext upload published to an e2e artifact: %v", err)
+	}
+	// Undeclared, it can't pose as encrypted content either.
+	enc := writeFile(t, dir, "enc.bin", encryptedBundle(t, key, a.ID, 2))
+	id, sum, err = c.UploadFile(ctx, enc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateVersion(ctx, a.ID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: api.KindBundle,
+		E2E: &api.E2EPublish{KeyCheck: key.Check(a.ID), Version: 2}}); client.StatusOf(err) != 400 {
+		t.Fatalf("an undeclared upload published as an e2e version: %v", err)
+	}
+	// The key's holder still publishes, declared.
+	if _, err := c.UpdateE2E(ctx, a.ID, key, &client.Source{Path: page}, client.VersionOptions{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rt.String(), `"artifact_id":"`+a.ID+`","e2e":true`) {
+		t.Fatal("the encrypted upload was not declared for the artifact")
+	}
+	// Plaintext artifacts: updates declare their artifact, and old clients'
+	// undeclared uploads still publish.
+	plain, err := c.Share(ctx, &client.Source{Path: page}, client.PublishOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Update(ctx, plain.ID, &client.Source{Path: page}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rt.String(), `"artifact_id":"`+plain.ID+`"}`) {
+		t.Fatal("a plaintext update did not declare its artifact")
+	}
+	id, sum, err = c.UploadFile(ctx, raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateVersion(ctx, plain.ID, &api.PublishRequest{UploadID: id, SHA256: sum, Kind: api.KindHTML}); err != nil {
+		t.Fatalf("an undeclared upload for a plaintext artifact: %v", err)
+	}
+}
+
+// M2 of review 33: a fragment a client sent encoded in a path (an
+// end-to-end key pasted where an ID belongs) never reaches the log.
+func TestE2EFragmentsAreNeverLogged(t *testing.T) {
+	var logs syncBuffer
+	h := newHarnessWith(t, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), Options{})
+	token := h.setupAdmin()
+	const secret = "SecretKeyText0123456789abcdefghijklmnopqrs"
+	for _, p := range []string{"/api/v1/artifacts/k2j4m9qx7d4abcde%23k=" + secret, "/api/v1/artifacts/k2j4m9qx7d4abcde%23k=" + secret + "/versions", "/no/such%23k=" + secret} {
+		req, _ := http.NewRequest(http.MethodGet, h.srv.URL+p, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := h.srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if !strings.Contains(logs.String(), "/api/v1/artifacts/k2j4m9qx7d4abcde#…") {
+		t.Fatalf("the requests were not logged:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "%23") {
+		t.Fatalf("a fragment was logged:\n%s", logs.String())
+	}
+}

@@ -112,10 +112,14 @@ func hashArtifactPassword(pw string) (string, error) {
 
 // materialize verifies a completed upload and stores it as version files.
 // It returns the version and a suggested title.
-func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attempt *publication) (*store.NewVersion, string, error) {
+// target is the artifact the version is for, nil for a new artifact.
+func (s *Service) materialize(ctx context.Context, actor Actor, c Content, target *store.Artifact, attempt *publication) (*store.NewVersion, string, error) {
 	up, err := s.db.UploadByID(ctx, actor.UserID, c.UploadID)
 	if err != nil {
 		return nil, "", apperr.NotFound("upload not found or expired")
+	}
+	if err := checkUploadTarget(up, target, c); err != nil {
+		return nil, "", err
 	}
 	if up.Received != up.Size {
 		return nil, "", apperr.Conflict("upload incomplete: %d of %d bytes received", up.Received, up.Size)
@@ -276,7 +280,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 	if err := attempt.admit(); err != nil {
 		return Artifact{}, err
 	}
-	v, title, err := s.materialize(ctx, actor, c, attempt)
+	v, title, err := s.materialize(ctx, actor, c, nil, attempt)
 	if err != nil {
 		return Artifact{}, err
 	}
@@ -380,7 +384,7 @@ func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Cont
 	if err := attempt.admit(); err != nil {
 		return Artifact{}, err
 	}
-	v, _, err := s.materialize(ctx, actor, c, attempt)
+	v, _, err := s.materialize(ctx, actor, c, a, attempt)
 	if err != nil {
 		return Artifact{}, err
 	}

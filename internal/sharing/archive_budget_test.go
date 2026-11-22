@@ -41,7 +41,7 @@ func (r *heldChunkReader) Read(p []byte) (int, error) {
 func TestUploadExpiryWaitsForActiveChunk(t *testing.T) {
 	s, a := budgetService(t, 100, 100)
 	ctx := context.Background()
-	up, err := s.CreateUpload(ctx, a, 100)
+	up, err := s.CreateUpload(ctx, a, 100, UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestUploadExpiryWaitsForActiveChunk(t *testing.T) {
 	if !s.db.UploadExists(ctx, up.ID) {
 		t.Error("expiry released disk budget while a chunk still held its file open")
 	}
-	if _, err := s.CreateUpload(ctx, a, 1); err == nil {
+	if _, err := s.CreateUpload(ctx, a, 1, UploadTarget{}); err == nil {
 		t.Error("active upload reservation was released")
 	}
 	release()

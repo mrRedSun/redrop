@@ -613,13 +613,20 @@ type Upload struct {
 	Received     int64
 	Materialized int64 // private in-flight or failed-cleanup reservation
 	ExpiresAt    time.Time
+	UploadTarget
+}
+
+// UploadTarget is what an upload was declared for when it started.
+type UploadTarget struct {
+	ArtifactID string // the artifact it is a new version of; "" when undeclared
+	E2E        bool   // end-to-end encrypted content
 }
 
 var ErrUploadLimit = errors.New("too many open uploads")
 
-func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl time.Duration, maxTotal int64, maxOpen int) (*Upload, error) {
+func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, target UploadTarget, ttl time.Duration, maxTotal int64, maxOpen int) (*Upload, error) {
 	n := now()
-	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: ts(n + int64(ttl/time.Second))}
+	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: ts(n + int64(ttl/time.Second)), UploadTarget: target}
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM uploads WHERE user_id = ?`, userID).Scan(&count); err != nil {
@@ -631,7 +638,7 @@ func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl
 		if err := checkQuota(ctx, tx, userID, "", size, size, maxTotal); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, n, u.ExpiresAt.Unix())
+		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at, artifact_id, e2e) VALUES (?,?,?,?,?,?,?)`, u.ID, userID, size, n, u.ExpiresAt.Unix(), target.ArtifactID, target.E2E)
 		return err
 	})
 	return u, err
@@ -682,8 +689,8 @@ func (s *Store) ResetMaterialization(ctx context.Context, userID, id string) err
 func (s *Store) UploadByID(ctx context.Context, userID, id string) (*Upload, error) {
 	var u Upload
 	var exp int64
-	err := s.DB.QueryRowContext(ctx, `SELECT id, user_id, size, received, materialized, expires_at FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now()).
-		Scan(&u.ID, &u.UserID, &u.Size, &u.Received, &u.Materialized, &exp)
+	err := s.DB.QueryRowContext(ctx, `SELECT id, user_id, size, received, materialized, expires_at, artifact_id, e2e FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now()).
+		Scan(&u.ID, &u.UserID, &u.Size, &u.Received, &u.Materialized, &exp, &u.ArtifactID, &u.E2E)
 	if err != nil {
 		return nil, notFound(err)
 	}

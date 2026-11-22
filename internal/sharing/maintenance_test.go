@@ -19,7 +19,7 @@ func TestSweepReleasesSafeUploadsWhenBlobGCFails(t *testing.T) {
 	s.log = slog.New(slog.NewTextHandler(&logs, nil))
 	newUpload := func() string {
 		t.Helper()
-		u, err := s.CreateUpload(ctx, actor, 100)
+		u, err := s.CreateUpload(ctx, actor, 100, UploadTarget{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -103,7 +103,7 @@ func TestSweepReleasesSafeUploadsWhenBlobGCFails(t *testing.T) {
 func TestSweepReleasesSafeUploadsWhenReferenceLookupFails(t *testing.T) {
 	s, actor := budgetService(t, 10000, 10000)
 	ctx := context.Background()
-	u, err := s.CreateUpload(ctx, actor, 100)
+	u, err := s.CreateUpload(ctx, actor, 100, UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestSweepReleasesSafeUploadsWhenReferenceLookupFails(t *testing.T) {
 func TestSweepRetainsUploadWhenStagingRemovalFails(t *testing.T) {
 	s, actor := budgetService(t, 10000, 10000)
 	ctx := context.Background()
-	u, err := s.CreateUpload(ctx, actor, 100)
+	u, err := s.CreateUpload(ctx, actor, 100, UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
