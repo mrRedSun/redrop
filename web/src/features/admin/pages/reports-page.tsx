@@ -13,7 +13,7 @@ import { formatDate, relativeTime } from '@/lib/format'
 import { useKeepPrevious } from '@/runtime/use-keep-previous'
 import { statusLabel } from '@/features/artifacts/schemas'
 import * as admin from '../atoms'
-import { reportFilterFromSearch, reportedLink, type Report } from '../schemas'
+import { reportFilterFromSearch, reportSearch, reportedLink, type Report, type ReportFilter } from '../schemas'
 
 const filters = ['open', 'resolved', 'dismissed', 'all'] as const
 
@@ -25,31 +25,48 @@ const filters = ['open', 'resolved', 'dismissed', 'all'] as const
 export function Component() {
   const [search, setSearch] = useSearchParams()
   const filter = reportFilterFromSearch(search)
-  const result = useKeepPrevious(useAtomValue(admin.reports(filter)))
-  const setFilter = (f: string) => setSearch((p) => (f === 'open' ? p.delete('status') : p.set('status', f), p), { replace: true })
+  const result = useKeepPrevious(useAtomValue(admin.reports(admin.reportsKey(filter))))
+  const setFilter = (patch: Partial<ReportFilter>) => setSearch((p) => reportSearch(p, patch), { replace: true })
   return (
     <>
-      <Tabs value={filter} onValueChange={setFilter} className="mb-4">
-        <TabsList>
-          {filters.map((f) => <TabsTrigger key={f} value={f} className="capitalize">{f}</TabsTrigger>)}
-        </TabsList>
-      </Tabs>
+      <div className="mb-4 flex flex-wrap gap-3">
+        <Tabs value={filter.status} onValueChange={(status) => setFilter({ status: status as ReportFilter['status'] })}>
+          <TabsList aria-label="Report status">
+            {filters.map((f) => <TabsTrigger key={f} value={f} className="capitalize">{f}</TabsTrigger>)}
+          </TabsList>
+        </Tabs>
+        <Tabs value={filter.source} onValueChange={(source) => setFilter({ source: source as ReportFilter['source'] })}>
+          <TabsList aria-label="Report source">
+            <TabsTrigger value="all">All sources</TabsTrigger>
+            <TabsTrigger value="visitor">Visitors</TabsTrigger>
+            <TabsTrigger value="system">Upload checks</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
       <AsyncResultView result={result}>
-        {(items) =>
-          items.length === 0 ? (
-            <EmptyState icon={Flag} title={filter === 'open' ? 'No open reports' : 'No reports'} hint="Visitors report pages from the link on gate pages and in the info panel. Uploads with a password form posting elsewhere, or with executables, are flagged here too." />
-          ) : (
-            <div className="space-y-4">
-              {items.map((r) => <ReportCard key={r.id} report={r} />)}
+        {(page, waiting) => (
+          <div className="space-y-4" aria-busy={waiting}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-muted-foreground text-sm" role="status">
+                {waiting ? 'Loading reports...' : page.items.length === 0 ? `0 shown of ${page.total} reports` : `Showing ${(page.page - 1) * page.page_size + 1} to ${(page.page - 1) * page.page_size + page.items.length} of ${page.total} reports`}
+              </p>
+              <nav aria-label="Report pages" className="flex items-center gap-2">
+                <Button variant="outline" size="sm" disabled={waiting || page.page <= 1} onClick={() => setFilter({ page: page.page - 1 })}>Previous</Button>
+                <span className="text-muted-foreground text-sm">Page {page.page} of {Math.max(1, Math.ceil(page.total / page.page_size))}</span>
+                <Button variant="outline" size="sm" disabled={waiting || page.page * page.page_size >= page.total} onClick={() => setFilter({ page: page.page + 1 })}>Next</Button>
+              </nav>
             </div>
-          )
-        }
+            {page.items.length === 0 ? (
+              <EmptyState icon={Flag} title={filter.status === 'open' ? 'No open reports on this page' : 'No reports on this page'} hint="Visitors report pages from the link on gate pages and in the info panel. Uploads with a password form posting elsewhere, or with executables, are flagged here too." />
+            ) : page.items.map((r) => <ReportCard key={r.id} report={r} waiting={waiting} />)}
+          </div>
+        )}
       </AsyncResultView>
     </>
   )
 }
 
-function ReportCard({ report: r }: { report: Report }) {
+function ReportCard({ report: r, waiting }: { report: Report; waiting: boolean }) {
   const link = reportedLink(r)
   const a = r.artifact
   return (
@@ -110,7 +127,7 @@ function ReportCard({ report: r }: { report: Report }) {
             ))}
           </ol>
         )}
-        <ReportActions report={r} />
+        {!waiting && <ReportActions report={r} />}
       </CardContent>
     </Card>
   )

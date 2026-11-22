@@ -87,7 +87,12 @@ func scanFiles(ctx context.Context, files []store.File, host string, open func(b
 		if form && exe {
 			break
 		}
-		if ctx.Err() != nil || budget <= 0 {
+		select {
+		case <-ctx.Done():
+			return found, false
+		default:
+		}
+		if budget <= 0 {
 			return found, false
 		}
 		if !exe {
@@ -108,7 +113,7 @@ func scanFiles(ctx context.Context, files []store.File, host string, open func(b
 		if n <= 0 {
 			continue
 		}
-		head, err := readHead(open, f.Blob, n)
+		head, err := readHead(ctx, open, f.Blob, n)
 		budget -= n
 		if err != nil {
 			return found, false
@@ -129,13 +134,26 @@ func scanFiles(ctx context.Context, files []store.File, host string, open func(b
 	return found, true
 }
 
-func readHead(open func(string) (io.ReadCloser, error), blob string, n int64) ([]byte, error) {
+func readHead(ctx context.Context, open func(string) (io.ReadCloser, error), blob string, n int64) ([]byte, error) {
 	rc, err := open(blob)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
-	return io.ReadAll(io.LimitReader(rc, n))
+	done := make(chan struct{})
+	var head []byte
+	var readErr error
+	go func() {
+		head, readErr = io.ReadAll(io.LimitReader(rc, n))
+		close(done)
+	}()
+	select {
+	case <-done:
+		rc.Close()
+		return head, readErr
+	case <-ctx.Done():
+		go rc.Close() // does not block the scan on a stuck reader
+		return nil, ctx.Err()
+	}
 }
 
 // findingPath is a file path as a finding shows it: one cleaned line,
@@ -209,12 +227,15 @@ func credentialForm(r io.Reader, host string) string {
 		targets  []string
 	}
 	var cur *form
+	// The first <base href> wins, as in browsers; relative form actions
+	// resolve against it. nil until one is seen.
+	var base *url.URL
 	check := func() string {
 		if cur == nil || !cur.password {
 			return ""
 		}
 		for _, t := range cur.targets {
-			if h := foreignHost(t, host); h != "" {
+			if h := foreignHost(t, host, base); h != "" {
 				return h
 			}
 		}
@@ -228,7 +249,7 @@ func credentialForm(r io.Reader, host string) string {
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, more := z.TagName()
 			tag := string(name)
-			if tag != "form" && (cur == nil || (tag != "input" && tag != "button")) {
+			if tag != "form" && tag != "base" && (cur == nil || (tag != "input" && tag != "button")) {
 				continue
 			}
 			attrs := map[string]string{}
@@ -240,13 +261,23 @@ func credentialForm(r io.Reader, host string) string {
 				}
 			}
 			switch tag {
-			case "form":
-				if h := check(); h != "" {
-					return h
+			case "base":
+				// Only the first <base href> counts, and only outside an open
+				// form: the HTML parser drops one in a form.
+				if cur == nil && base == nil {
+					if u, err := url.Parse(cleanURL(attrs["href"])); err == nil && u.IsAbs() {
+						base = u
+					}
 				}
-				cur = &form{targets: []string{attrs["action"]}}
+			case "form":
+				// A <form> start tag while a form is open is ignored by the
+				// HTML parser; the password counts against the enclosing
+				// form's action, as in the browser.
+				if cur == nil {
+					cur = &form{targets: []string{attrs["action"]}}
+				}
 			default:
-				if tag == "input" && strings.EqualFold(strings.TrimSpace(attrs["type"]), "password") {
+				if tag == "input" && strings.EqualFold(attrs["type"], "password") {
 					cur.password = true
 				}
 				if fa, ok := attrs["formaction"]; ok {
@@ -266,11 +297,20 @@ func credentialForm(r io.Reader, host string) string {
 
 // foreignHost returns the host of target, a form action, when it is an
 // http(s) URL on a host other than own; "" otherwise (relative, same host,
-// or another scheme).
-func foreignHost(target, own string) string {
-	t := strings.ReplaceAll(strings.TrimSpace(target), `\`, "/") // browsers read \ as / in http(s) URLs
+// or another scheme). A relative target resolves against base when the
+// document declared one with <base href>.
+func foreignHost(target, own string, base *url.URL) string {
+	t := cleanURL(strings.ReplaceAll(strings.TrimSpace(target), `\`, "/")) // browsers read \ as / in http(s) URLs
 	u, err := url.Parse(t)
-	if err != nil || u.Host == "" || (u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil {
+		return ""
+	}
+	if u.Host == "" && base != nil {
+		if ref, err := base.Parse(t); err == nil {
+			u = ref
+		}
+	}
+	if u.Host == "" || (u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https") {
 		return ""
 	}
 	h := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
@@ -278,4 +318,17 @@ func foreignHost(target, own string) string {
 		return ""
 	}
 	return findingPath(h)
+}
+
+// cleanURL readies a URL for parsing the way browsers do: ASCII tab, CR and
+// LF are removed and leading/trailing C0 controls and spaces are trimmed
+// (URL Standard, "write a URL").
+func cleanURL(raw string) string {
+	s := strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, raw)
+	return strings.Trim(s, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f ")
 }

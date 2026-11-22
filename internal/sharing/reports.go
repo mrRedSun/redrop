@@ -18,6 +18,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/notify"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 // Abuse reports (DESIGN.md "Abuse handling"): anyone may report a link
@@ -41,7 +42,7 @@ const (
 	maxReportURL     = 2048
 	maxReportDetails = 2000
 	maxReportContact = 200
-	maxReportList    = 500
+	maxReportList    = 50 // one page of the admin queue
 )
 
 // ReportInput is a report as a visitor files it. Every field is untrusted.
@@ -88,6 +89,13 @@ func (s *Service) SubmitReport(ctx context.Context, network string, in ReportInp
 	a, err := s.Lookup(ctx, slug)
 	if err != nil {
 		return nil // unknown link: dropped, answered like a stored report
+	}
+	// Only artifacts the content host would serve can be reported: a revoked,
+	// expired or exhausted link is already unavailable to visitors, and
+	// storing (or refusing) a report for one would turn the form into an
+	// oracle for which hidden links still exist.
+	if a.Status(time.Now()) != api.StatusActive {
+		return nil
 	}
 	r := &store.Report{ArtifactID: a.ID, OwnerID: a.UserID, URL: link, Category: in.Category, Details: details, Contact: contact, Network: s.networkKey(network)}
 	stored, err := s.db.AddVisitorReport(ctx, r, s.cfg.ReportsMaxOpen, s.cfg.ReportsMaxOpenPerArtifact)
@@ -196,9 +204,20 @@ type AuditEntry struct {
 	Detail string
 }
 
-// Reports lists the queue: status is open (the default), resolved,
-// dismissed or all. Newest first, at most maxReportList.
-func (m *Moderation) Reports(ctx context.Context, status string) ([]AdminReport, error) {
+// ReportListPage is one page of the admin queue.
+type ReportListPage struct {
+	Reports  []AdminReport
+	Total    int // for the active status and source filter
+	Page     int // 1-based
+	PageSize int
+}
+
+// Reports lists one page of the queue: status is open (the default),
+// resolved, dismissed or all; source is visitor, system or all (the
+// default). With both sources shown, visitor reports come first, then
+// newest first within each source, so a flood of upload flags cannot bury
+// a visitor's report. page is 1-based; out-of-range pages are empty.
+func (m *Moderation) Reports(ctx context.Context, status, source string, page int) (ReportListPage, error) {
 	switch status {
 	case "":
 		status = store.ReportOpen
@@ -206,28 +225,40 @@ func (m *Moderation) Reports(ctx context.Context, status string) ([]AdminReport,
 		status = ""
 	case store.ReportOpen, store.ReportResolved, store.ReportDismissed:
 	default:
-		return nil, apperr.Invalid("status must be open, resolved, dismissed or all")
+		return ReportListPage{}, apperr.Invalid("status must be open, resolved, dismissed or all")
 	}
-	rows, err := m.s.db.ListReports(ctx, status, maxReportList)
+	switch source {
+	case "", "all":
+		source = ""
+	case store.ReportVisitor, store.ReportSystem:
+	default:
+		return ReportListPage{}, apperr.Invalid("source must be visitor, system or all")
+	}
+	if page < 1 {
+		page = 1
+	}
+	rows, total, err := m.s.db.ListReports(ctx, status, source, maxReportList, (page-1)*maxReportList)
 	if err != nil {
-		return nil, apperr.Internal(err)
+		return ReportListPage{}, apperr.Internal(err)
 	}
-	return m.reportViews(ctx, rows)
+	views, err := m.reportViews(ctx, rows)
+	if err != nil {
+		return ReportListPage{}, err
+	}
+	return ReportListPage{Reports: views, Total: total, Page: page, PageSize: maxReportList}, nil
 }
 
 func (m *Moderation) reportViews(ctx context.Context, rows []store.Report) ([]AdminReport, error) {
 	artifactIDs := make([]string, 0, len(rows))
-	reportIDs := make([]string, 0, len(rows))
 	for _, r := range rows {
 		artifactIDs = append(artifactIDs, r.ArtifactID)
-		reportIDs = append(reportIDs, r.ID)
 	}
 	slices.Sort(artifactIDs)
 	arts, err := m.s.db.ArtifactsByIDs(ctx, slices.Compact(artifactIDs))
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
-	hist, err := m.s.db.AuditFor(ctx, reportIDs)
+	hist, err := m.s.db.AuditFor(ctx, rows)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}

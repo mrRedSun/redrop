@@ -414,7 +414,10 @@ type ReportAction struct {
 }
 
 type ReportList struct {
-	Items []Report `json:"items"`
+	Items    []Report `json:"items"`
+	Total    int      `json:"total" description:"Reports matching the status and source filter, across all pages"`
+	Page     int      `json:"page" description:"1-based page number"`
+	PageSize int      `json:"page_size" description:"Reports per page"`
 }
 
 // ReportStatusUpdate resolves, dismisses or reopens a report.

@@ -43,8 +43,8 @@ func TestReportsMigration(t *testing.T) {
 	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != len(migrations) {
 		t.Fatalf("user_version %d (%v)", v, err)
 	}
-	if list, err := db.ListReports(ctx, "", 10); err != nil || len(list) != 0 {
-		t.Fatalf("reports after migration: %v %v", list, err)
+	if list, total, err := db.ListReports(ctx, "", "", 10, 0); err != nil || len(list) != 0 || total != 0 {
+		t.Fatalf("reports after migration: %v %d %v", list, total, err)
 	}
 	if a, err := db.ArtifactByID(ctx, "a"); err != nil || !a.AdminRevoked || a.Title != "old" {
 		t.Fatalf("artifact after migration: %+v %v", a, err)
@@ -131,7 +131,7 @@ func TestSystemReportsDeduplicate(t *testing.T) {
 	if !add("executable", 1) || add("executable", 2) || !add("form", 2) {
 		t.Fatal("one open system report per artifact and kind")
 	}
-	list, _ := db.ListReports(ctx, ReportOpen, 10)
+	list, _, _ := db.ListReports(ctx, ReportOpen, ReportSystem, 10, 0)
 	for _, r := range list {
 		if r.Kind == "executable" {
 			if err := db.SetReportStatus(ctx, r.ID, ReportResolved, "admin"); err != nil {
@@ -145,6 +145,98 @@ func TestSystemReportsDeduplicate(t *testing.T) {
 	// Visitor reports don't count against system ones, or the other way.
 	if n, _ := db.CountOpenReports(ctx, ReportVisitor); n != 0 {
 		t.Fatalf("visitor count %d", n)
+	}
+}
+
+// One open system report per owner and kind: a second artifact by the same
+// owner is not flagged again until the first is closed. This is the flood
+// bound (M1): one account cannot fill the queue with upload flags.
+func TestSystemReportPerOwnerCap(t *testing.T) {
+	db, _, owner := reportStore(t)
+	ctx := context.Background()
+	first, _ := db.CreateArtifact(ctx, &NewArtifact{UserID: owner}, &NewVersion{Kind: "html"}, 0)
+	second, _ := db.CreateArtifact(ctx, &NewArtifact{UserID: owner}, &NewVersion{Kind: "html"}, 0)
+	other, _ := db.CreateArtifact(ctx, &NewArtifact{UserID: "adm"}, &NewVersion{Kind: "html"}, 0)
+	add := func(artifact, oid, kind string) bool {
+		ok, err := db.AddSystemReport(ctx, &Report{ArtifactID: artifact, OwnerID: oid, Kind: kind, Category: "malware", Version: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if !add(first, owner, "executable") {
+		t.Fatal("first flag not stored")
+	}
+	if add(second, owner, "executable") {
+		t.Fatal("second artifact by the same owner flagged for the same kind")
+	}
+	if !add(other, "adm", "executable") {
+		t.Fatal("another owner's artifact refused")
+	}
+	if !add(second, owner, "form") {
+		t.Fatal("a different kind on the same owner's artifact refused")
+	}
+	// Closing the owner's first executable flag lets the next one in.
+	list, _, _ := db.ListReports(ctx, ReportOpen, ReportSystem, 10, 0)
+	for _, r := range list {
+		if r.OwnerID == owner && r.Kind == "executable" {
+			db.SetReportStatus(ctx, r.ID, ReportResolved, "admin")
+		}
+	}
+	if !add(second, owner, "executable") {
+		t.Fatal("flag after the first was closed refused")
+	}
+}
+
+// TestReportPagingAndSources: paging reaches every report, the total
+// counts the filter, visitor reports sort before system ones, and the
+// source filter selects one source.
+func TestReportPagingAndSources(t *testing.T) {
+	db, id, owner := reportStore(t)
+	ctx := context.Background()
+	// 12 visitor reports, then one system report: whatever the sort, the
+	// system report may not push visitor rows out of reach.
+	for i := 0; i < 12; i++ {
+		a, _ := db.CreateArtifact(ctx, &NewArtifact{UserID: owner}, &NewVersion{Kind: "html"}, 0)
+		db.AddVisitorReport(ctx, &Report{ArtifactID: a, OwnerID: owner, Category: "spam", Network: "net" + itoa(i)}, 100, 100)
+	}
+	db.AddSystemReport(ctx, &Report{ArtifactID: id, OwnerID: owner, Kind: "form", Category: "phishing", Version: 1})
+
+	page1, total, err := db.ListReports(ctx, ReportOpen, "", 5, 0)
+	if err != nil || total != 13 {
+		t.Fatalf("page1: %d %v", total, err)
+	}
+	if page1[0].Source != ReportVisitor {
+		t.Fatalf("first row is %s, want visitor first", page1[0].Source)
+	}
+	// Every page is reachable and the last one holds the remainder.
+	seen := 0
+	for page := 1; ; page++ {
+		rows, _, err := db.ListReports(ctx, ReportOpen, "", 5, (page-1)*5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		seen += len(rows)
+	}
+	if seen != 13 {
+		t.Fatalf("paging saw %d of 13 reports", seen)
+	}
+	// The source filter counts and selects one source.
+	visitors, vtotal, _ := db.ListReports(ctx, ReportOpen, ReportVisitor, 50, 0)
+	if len(visitors) != 12 || vtotal != 12 {
+		t.Fatalf("visitor filter: %d rows, total %d", len(visitors), vtotal)
+	}
+	system, stotal, _ := db.ListReports(ctx, ReportOpen, ReportSystem, 50, 0)
+	if len(system) != 1 || stotal != 1 {
+		t.Fatalf("system filter: %d rows, total %d", len(system), stotal)
+	}
+	// A page past the end is empty, not an error, with the same total.
+	past, pastTotal, _ := db.ListReports(ctx, ReportOpen, "", 5, 1000)
+	if len(past) != 0 || pastTotal != 13 {
+		t.Fatalf("past the end: %d rows, total %d", len(past), pastTotal)
 	}
 }
 
@@ -169,7 +261,7 @@ func TestReportStatusAudit(t *testing.T) {
 	if got.Status != ReportOpen || got.ClosedBy != "" || got.ClosedAt != nil {
 		t.Fatalf("reopened: %+v", got)
 	}
-	hist, _ := db.AuditFor(ctx, []string{r.ID})
+	hist, _ := db.AuditFor(ctx, []Report{*got})
 	if h := hist[r.ID]; len(h) != 2 || h[0].Action != "report.dismissed" || h[1].Action != "report.open" || h[0].Actor != "root" || h[0].ArtifactID != id || h[0].UserID != owner {
 		t.Fatalf("audit: %+v", h)
 	}
@@ -229,9 +321,42 @@ func TestSuspendReported(t *testing.T) {
 	if a, _ := db.ArtifactByID(ctx, late); !a.AdminRevoked {
 		t.Fatal("artifact created after the suspension is live")
 	}
-	hist, _ := db.AuditFor(ctx, []string{r.ID, onMine.ID})
+	hist, _ := db.AuditFor(ctx, []Report{*r, *onMine})
 	if len(hist[r.ID]) != 1 || hist[r.ID][0].Action != "user.suspend" || len(hist[onMine.ID]) != 0 {
 		t.Fatalf("audit: %+v", hist)
+	}
+}
+
+// Undoing a queue action (an artifact restored from the Artifacts page, an
+// owner unsuspended from the Users page) writes an audit row with no
+// report_id, and the affected report's history shows it (m-C).
+func TestUndoActionsAppearInReportHistory(t *testing.T) {
+	db, id, owner := reportStore(t)
+	ctx := context.Background()
+	r := &Report{ArtifactID: id, OwnerID: owner, Category: "spam", Network: "a"}
+	db.AddVisitorReport(ctx, r, 10, 10)
+	db.SuspendReported(ctx, r.ID, "root")
+
+	if err := db.WriteAudit(ctx, AuditEntry{Actor: "root", Action: "artifact.restore", ArtifactID: id, UserID: owner, Detail: "restored the artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WriteAudit(ctx, AuditEntry{Actor: "root", Action: "user.unsuspend", UserID: owner, Detail: "enabled the account"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.ReportByID(ctx, r.ID)
+	hist, _ := db.AuditFor(ctx, []Report{*got})
+	actions := make([]string, 0, 3)
+	for _, e := range hist[r.ID] {
+		actions = append(actions, e.Action)
+	}
+	want := []string{"user.suspend", "artifact.restore", "user.unsuspend"}
+	if len(actions) != len(want) {
+		t.Fatalf("history actions %v, want %v", actions, want)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("history actions %v, want %v", actions, want)
+		}
 	}
 }
 
@@ -255,7 +380,7 @@ func TestRevokeReportedDeletedArtifact(t *testing.T) {
 	if arts, _ := db.ArtifactsByIDs(ctx, []string{id}); len(arts) != 0 {
 		t.Fatal("deleted artifact listed")
 	}
-	if hist, _ := db.AuditFor(ctx, []string{r.ID}); len(hist[r.ID]) != 0 {
+	if hist, _ := db.AuditFor(ctx, []Report{*got}); len(hist[r.ID]) != 0 {
 		t.Fatalf("audit after a failed action: %+v", hist)
 	}
 }

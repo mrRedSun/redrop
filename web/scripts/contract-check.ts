@@ -108,14 +108,21 @@ const program = Effect.gen(function* () {
     if (first) {
       const link = (yield* artifacts.get(first.id)).url
       yield* reports.submit({ url: link, category: 'other', details: 'contract-check' })
-      const queued = (yield* admin.reports('open')).find((r) => r.artifact_id === first.id && r.details === 'contract-check')
+      const visitors = yield* admin.reports('open', 'visitor')
+      check('report queue has filtered paging metadata', visitors.total >= 1 && visitors.page === 1 && visitors.page_size === 50 && visitors.items.every((r) => r.source === 'visitor' && r.status === 'open'))
+      const queued = visitors.items.find((r) => r.artifact_id === first.id && r.details === 'contract-check')
       check('report reaches the admin queue', queued !== undefined && queued.reported_url === link && queued.artifact !== null && !('url' in queued.artifact))
       if (queued) {
         const dismissed = yield* admin.setReportStatus(queued.id, { status: 'dismissed' })
         check('report dismissal is audited', dismissed.status === 'dismissed' && (dismissed.history ?? []).some((e) => e.action === 'report.dismissed'))
       }
     }
-    check('admin report queue decodes', Array.isArray(yield* admin.reports('all')))
+    const reportQueue = yield* admin.reports('all')
+    check('admin report queue decodes', Array.isArray(reportQueue.items) && reportQueue.total >= reportQueue.items.length)
+    const beyondQueue = yield* admin.reports('all', 'all', Math.floor(reportQueue.total / reportQueue.page_size) + 2)
+    check('report paging reaches an empty page without losing the total', beyondQueue.items.length === 0 && beyondQueue.total === reportQueue.total)
+    const systemQueue = yield* admin.reports('all', 'system')
+    check('system report filter excludes visitors', systemQueue.items.every((r) => r.source === 'system'))
     const all = yield* admin.artifacts('', 'all')
     check('admin artifacts decode without links', all.every((a) => !('url' in a)))
     // An administrator's revocation: the owner sees it and cannot undo it.

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/go-fuego/fuego"
 
@@ -12,8 +13,8 @@ import (
 // Abuse reports (DESIGN.md "Abuse handling").
 
 // maxReportBody bounds a report: a 2048-byte URL and 2,200 characters of
-// text, with room for JSON escaping.
-const maxReportBody = 8 << 10
+// text, which are up to 4 bytes each in UTF-8, plus the JSON envelope.
+const maxReportBody = 12 << 10
 
 // submitReport files a visitor's report. The answer is the same whether or
 // not the link exists; see sharing.SubmitReport.
@@ -50,11 +51,19 @@ func (a *API) sameOriginOnly(next http.Handler) http.Handler {
 func (a *API) reportBody(next http.Handler) http.Handler { return jsonBody(next, maxReportBody) }
 
 func (h adminAPI) listReports(c fuego.ContextNoBody) (api.ReportList, error) {
-	list, err := h.moderation.Reports(c.Context(), c.QueryParam("status"))
+	page := 1
+	if raw := c.QueryParam("page"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return api.ReportList{}, apperr.Invalid("page must be a positive integer")
+		}
+		page = n
+	}
+	list, err := h.moderation.Reports(c.Context(), c.QueryParam("status"), c.QueryParam("source"), page)
 	if err != nil {
 		return api.ReportList{}, err
 	}
-	return api.ReportList{Items: mapItems(list, reportDTO)}, nil
+	return api.ReportList{Items: mapItems(list.Reports, reportDTO), Total: list.Total, Page: list.Page, PageSize: list.PageSize}, nil
 }
 
 func (h adminAPI) updateReport(c fuego.ContextWithBody[api.ReportStatusUpdate]) (api.Report, error) {

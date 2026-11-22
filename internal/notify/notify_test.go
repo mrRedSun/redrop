@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -123,8 +125,8 @@ func TestGivesUpAfterFourAttempts(t *testing.T) {
 	}
 }
 
-func TestPermanentFailuresAndRedirectsAreNotRetried(t *testing.T) {
-	for _, status := range []int{400, 401, 404, 302} {
+func TestPermanentFailuresAreNotRetried(t *testing.T) {
+	for _, status := range []int{400, 401, 404} {
 		f := newFake(t, status)
 		w := newWebhook(f.srv.URL, "tok", slog.New(slog.DiscardHandler), httpClient(), quick)
 		w.Notify(msg)
@@ -140,6 +142,122 @@ func TestPermanentFailuresAndRedirectsAreNotRetried(t *testing.T) {
 		}
 		w.Close()
 	}
+}
+
+// A redirect is a refusal, not something to follow: with a Location header
+// present, the client must still send the token only to the configured URL.
+func TestRedirectWithLocationIsNotFollowed(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	requests := make(chan *http.Request, 4)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r
+		http.Redirect(w, r, target.URL+"/collect", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(source.Close)
+
+	w := newWebhook(source.URL, "tok", slog.New(slog.DiscardHandler), httpClient(), quick)
+	t.Cleanup(w.Close)
+	first := msg
+	first.Key = "first"
+	second := msg
+	second.Key = "second"
+	w.Notify(first)
+	w.Notify(second)
+	// Each message gets exactly one attempt: two requests to the configured
+	// URL, none to the Location target.
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-requests:
+			if r.Header.Get("Authorization") != "Bearer tok" {
+				t.Fatalf("attempt %d sent Authorization %q", i, r.Header.Get("Authorization"))
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("no redirect request")
+		}
+	}
+	w.Close()
+	if n := redirected.Load(); n != 0 {
+		t.Fatalf("the redirect target was hit %d times", n)
+	}
+}
+
+// roundTripFunc turns a function into an http.RoundTripper, so tests can
+// answer without a real server (synctest cannot fast-forward real sockets).
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func resp(status int) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}
+}
+
+// The production schedule (1, 4, 16 s), under a fake clock so the waits are
+// not real. A stub transport answers; only the backoff takes time.
+func TestProductionBackoffSchedule(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var attempts atomic.Int32
+		at := make(chan time.Time, 4)
+		rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			at <- time.Now()
+			if n := attempts.Add(1); n >= 4 {
+				return resp(http.StatusOK), nil
+			}
+			return resp(http.StatusInternalServerError), nil
+		})
+		w := newWebhook("http://hook.test/hook", "tok", slog.New(slog.DiscardHandler), &http.Client{Transport: rt}, Backoff)
+		defer w.Close()
+		w.Notify(msg)
+		for attempts.Load() < 4 {
+			time.Sleep(time.Millisecond)
+		}
+		first := <-at
+		var gaps []time.Duration
+		for range 3 {
+			next := <-at
+			gaps = append(gaps, next.Sub(first))
+		}
+		// Each gap is the sum of the backoffs before it, within the poll sleep.
+		cumulative := time.Duration(0)
+		for i, b := range Backoff {
+			cumulative += b
+			if gaps[i] < cumulative || gaps[i] > cumulative+50*time.Millisecond {
+				t.Fatalf("attempt %d gap %v, want %v (backoff %v)", i+2, gaps[i], cumulative, Backoff)
+			}
+		}
+	})
+}
+
+// A receiver that never answers is abandoned after AttemptTimeout per
+// attempt, also under the fake clock.
+func TestAttemptTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var attempts atomic.Int32
+		done := make(chan time.Time, 2)
+		rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			<-r.Context().Done() // hang until the attempt's deadline
+			done <- time.Now()
+			return nil, r.Context().Err()
+		})
+		w := newWebhook("http://hook.test/hook", "tok", slog.New(slog.DiscardHandler), &http.Client{Transport: rt}, []time.Duration{time.Millisecond})
+		defer w.Close()
+		start := time.Now()
+		w.Notify(msg)
+		for attempts.Load() < 1 {
+			time.Sleep(time.Millisecond)
+		}
+		abandoned := <-done
+		// The first attempt was abandoned by its timeout, not by Close:
+		// the deadline elapsed while the request still hung.
+		if got := abandoned.Sub(start); got < AttemptTimeout || got > AttemptTimeout+50*time.Millisecond {
+			t.Fatalf("attempt abandoned after %v, want %v", got, AttemptTimeout)
+		}
+	})
 }
 
 func TestNotifyNeverBlocks(t *testing.T) {

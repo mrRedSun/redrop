@@ -36,9 +36,32 @@ func (h *harness) report(network string, req api.ReportRequest, header ...string
 
 func (h *harness) reports(status string) []api.Report {
 	h.t.Helper()
-	r := h.do("GET", "/api/v1/admin/reports?status="+status, nil, false)
+	return h.reportsPage(status, "all", 1).Items
+}
+
+func (h *harness) reportsPage(status, source string, page int) api.ReportList {
+	h.t.Helper()
+	r := h.do("GET", fmt.Sprintf("/api/v1/admin/reports?status=%s&source=%s&page=%d", status, source, page), nil, false)
 	expectStatus(h.t, r, 200, "list reports")
-	return decode[api.ReportList](h.t, r).Items
+	return decode[api.ReportList](h.t, r)
+}
+
+// waitReports polls the queue until keep returns true, with a bound that
+// only a real hang hits. Upload checks run on a background worker, so a
+// flag can land just after the publish response.
+func (h *harness) waitReports(status string, keep func([]api.Report) bool) []api.Report {
+	h.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		list := h.reports(status)
+		if keep(list) {
+			return list
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("reports never matched: %+v", list)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func phishing(link string) api.ReportRequest {
@@ -69,8 +92,8 @@ func TestReportFormChecks(t *testing.T) {
 	// Bodies: JSON only, 8 KiB.
 	expectStatus(t, h.raw("POST", "/api/v1/reports", "application/x-www-form-urlencoded", strings.NewReader("url=x"), "Origin", appOrigin, "X-Forwarded-For", "192.0.2.1"), 415, "form post")
 	big := phishing(a.URL)
-	big.Details = strings.Repeat("a", 9<<10)
-	expectStatus(t, h.report("192.0.2.1", big), 413, "9 KiB body")
+	big.Details = strings.Repeat("a", 13<<10)
+	expectStatus(t, h.report("192.0.2.1", big), 413, "13 KiB body")
 	if n := len(h.reports("all")); n != 0 {
 		t.Fatalf("%d reports stored from refused requests", n)
 	}
@@ -103,11 +126,26 @@ func TestReportFormChecks(t *testing.T) {
 	if stored.StatusCode != 202 || unknown.StatusCode != 202 || body(unknown) != storedBody || storedBody != `{"ok":true}`+"\n" {
 		t.Fatalf("stored %d %q, unknown link %d", stored.StatusCode, storedBody, unknown.StatusCode)
 	}
-	list := h.reports("")
-	if len(list) != 1 {
-		t.Fatalf("%d open reports, want 1", len(list))
+	// A maximum-length report is accepted: 2,000 emoji details plus a
+	// 200-emoji contact are up to 4 bytes a character (m-E).
+	max := api.ReportRequest{URL: a.URL, Category: "other", Details: strings.Repeat("😀", 2000), Contact: strings.Repeat("😀", 200)}
+	expectStatus(t, h.report("192.0.2.102", max), 202, "maximum-length report")
+	// A revoked link is dropped exactly like an unknown one, even with the
+	// queue one short of full: the form is not an oracle (m-B).
+	revoked := h.share(c, "gone", client.PublishOptions{})
+	yes := true
+	if _, err := c.UpdateArtifact(context.Background(), revoked.ID, &api.UpdateArtifactRequest{Revoked: &yes}); err != nil {
+		t.Fatal(err)
 	}
-	got := list[0]
+	expectStatus(t, h.report("192.0.2.103", phishing(revoked.URL)), 202, "revoked link")
+	if list := h.reports("all"); len(list) != 2 {
+		t.Fatalf("stored a report on a revoked artifact: %+v", list)
+	}
+	list := h.reports("")
+	if len(list) != 2 {
+		t.Fatalf("%d open reports, want 2", len(list))
+	}
+	got := list[1] // the phishing report; the emoji one is newer
 	if got.Source != "visitor" || got.Category != "phishing" || got.ReportedURL != a.URL+"page.html?x=1" || got.Details != ok.Details || got.Contact != ok.Contact ||
 		got.ArtifactID != a.ID || got.Artifact == nil || got.Artifact.URL != "" || got.OwnerUsername != "admin" || got.Status != "open" {
 		t.Fatalf("stored report: %+v", got)
@@ -168,6 +206,50 @@ func TestReportLimitsAndCaps(t *testing.T) {
 	if n := len(h.reports("")); n != 4 {
 		t.Fatalf("after dismissing one: %d open", n)
 	}
+}
+
+// TestVisitorReportNotBuriedByFlags: the review's M1 scenario. Five hundred
+// flagged uploads from one owner must not hide a visitor's report: the
+// per-owner system-report cap keeps the flood to two rows, visitor reports
+// sort first, and paging plus a total keep the queue honest.
+func TestVisitorReportNotBuriedByFlags(t *testing.T) {
+	h := newHarness(t)
+	client.New(h.srv.URL, h.setupAdmin()) // sign the admin in: the queue needs a session
+	erin := client.New(h.srv.URL, h.tokenFor(h.inviteUser("erin")))
+	ctx := context.Background()
+
+	// A visitor reports erin's page.
+	target := h.share(erin, "target", client.PublishOptions{})
+	expectStatus(t, h.report("192.0.2.9", phishing(target.URL)), 202, "visitor report")
+	h.waitReports("", func(list []api.Report) bool { return len(list) == 1 })
+
+	// erin floods: 500 one-file .exe publications.
+	exe := filepath.Join(t.TempDir(), "x.exe")
+	os.WriteFile(exe, []byte("not really an exe"), 0o600)
+	for i := 0; i < 500; i++ {
+		if _, err := erin.Share(ctx, &client.Source{Path: exe}, client.PublishOptions{}, nil); err != nil {
+			t.Fatalf("flood publish %d: %v", i, err)
+		}
+	}
+
+	// The visitor's report is still the first row of the default queue.
+	list := h.reports("")
+	if len(list) == 0 || list[0].Source != "visitor" || list[0].ArtifactID != target.ID {
+		t.Fatalf("visitor report not first: %+v", list)
+	}
+	// The system filter shows the flood capped to one open row, and the
+	// paging envelope reports the true total.
+	sys := h.reportsPage("", "system", 1)
+	if len(sys.Items) != 1 || sys.Total != 1 || sys.Page != 1 {
+		t.Fatalf("system filter: %d items, total %d", len(sys.Items), sys.Total)
+	}
+	all := h.reportsPage("all", "all", 1)
+	pages := (all.Total + all.PageSize - 1) / all.PageSize
+	if all.Total < 2 || pages < 1 || len(all.Items) > 50 || all.PageSize != 50 {
+		t.Fatalf("paging envelope: total %d, pages %d, items %d, page size %d", all.Total, pages, len(all.Items), all.PageSize)
+	}
+	// The webhook slot is not flooded either: one upload flag per owner and
+	// kind, so a visitor report during the flood still gets its slot.
 }
 
 func historyActions(r api.Report) []string {
@@ -398,8 +480,8 @@ func TestUploadChecksFlagOnly(t *testing.T) {
 	if _, err := c.Share(ctx, &client.Source{Path: clean}, client.PublishOptions{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(h.reports("all")); n != 0 {
-		t.Fatalf("a clean bundle was flagged: %+v", h.reports("all"))
+	if flags := h.waitReports("all", func(list []api.Report) bool { return len(list) == 0 }); len(flags) != 0 {
+		t.Fatalf("a clean bundle was flagged: %+v", flags)
 	}
 
 	pe := append([]byte("MZ"), make([]byte, 0x3e)...)
@@ -410,7 +492,7 @@ func TestUploadChecksFlagOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a flagged bundle failed to publish: %v", err)
 	}
-	flags := h.reports("")
+	flags := h.waitReports("", func(list []api.Report) bool { return len(list) == 2 })
 	if len(flags) != 2 {
 		t.Fatalf("%d flags, want 2: %+v", len(flags), flags)
 	}
@@ -445,23 +527,42 @@ func TestUploadChecksFlagOnly(t *testing.T) {
 	if _, err := c.Update(ctx, a.ID, &client.Source{Path: bad}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(h.reports("all")); n != 2 {
-		t.Fatalf("repeat findings: %d reports", n)
-	}
+	h.waitReports("all", func(list []api.Report) bool { return len(list) == 2 })
 	// Once resolved, a later version with a finding is flagged again.
 	expectStatus(t, h.do("PATCH", "/api/v1/admin/reports/"+byCategory["malware"].ID, api.ReportStatusUpdate{Status: "resolved"}, true), 200, "resolve")
 	if _, err := c.Update(ctx, a.ID, &client.Source{Path: bad}, nil); err != nil {
 		t.Fatal(err)
 	}
-	open := h.reports("")
-	if len(open) != 2 || open[0].Category != "malware" || open[0].Version != 3 {
-		t.Fatalf("after resolving: %+v", open)
+	h.waitReports("", func(list []api.Report) bool {
+		if len(list) != 2 {
+			return false
+		}
+		for _, r := range list {
+			if r.Category == "malware" && r.Version == 3 {
+				return true
+			}
+		}
+		return false
+	})
+	// The per-owner cap: another executable by the same owner adds nothing
+	// while the malware flag is open, so close it before the next step.
+	for _, r := range h.reports("") {
+		if r.Category == "malware" {
+			expectStatus(t, h.do("PATCH", "/api/v1/admin/reports/"+r.ID, api.ReportStatusUpdate{Status: "resolved"}, true), 200, "resolve")
+		}
 	}
 
 	// A single file that is an executable is flagged too.
 	exe := shareFile(t, c, "setup.msi", "not really", client.PublishOptions{})
 	found := false
-	for _, f := range h.reports("") {
+	for _, f := range h.waitReports("", func(list []api.Report) bool {
+		for _, r := range list {
+			if r.ArtifactID == exe.ID {
+				return true
+			}
+		}
+		return false
+	}) {
 		found = found || (f.ArtifactID == exe.ID && f.Details == "setup.msi: Windows installer (.msi)")
 	}
 	if !found {

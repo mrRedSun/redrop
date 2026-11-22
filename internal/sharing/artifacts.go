@@ -221,12 +221,12 @@ func (s *Service) blobTitle(sum string) string {
 
 // --- owner operations ---
 
-// Create publishes an upload as a new artifact, then runs the upload checks
-// on it (they never change the result).
+// Create publishes an upload as a new artifact, then queues the upload
+// checks on it (they never change the result or delay it).
 func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (Artifact, error) {
 	a, v, err := s.create(ctx, actor, c, set)
 	if err == nil {
-		s.checkUpload(ctx, a.ID, a.Version, v.Files)
+		s.queueScan(a.ID, a.Version, v.Files)
 	}
 	return a, err
 }
@@ -332,11 +332,12 @@ func (s *Service) list(ctx context.Context, f store.ListFilter, status string) (
 }
 
 // AddVersion publishes an upload as the new current version (same link),
-// then runs the upload checks on it (they never change the result).
+// then queues the upload checks on it (they never change the result or
+// delay it).
 func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (Artifact, error) {
 	a, v, err := s.addVersion(ctx, actor, id, c)
 	if err == nil {
-		s.checkUpload(ctx, a.ID, a.Version, v.Files)
+		s.queueScan(a.ID, a.Version, v.Files)
 	}
 	return a, err
 }

@@ -55,8 +55,12 @@ export const deleteArtifact = Atom.family((id: string) =>
   mutation((_: void) => endpoints.deleteArtifact(id), { invalidates: ['admin', 'artifacts'], success: 'Artifact deleted' }),
 )
 
-/** The abuse queue for one filter. */
-export const reports = Atom.family((status: ReportFilter) => query(['admin'], endpoints.reports(status)))
+/** Key: `${status}|${source}|${page}`. Only scalar keys enter the atom family. */
+export const reports = Atom.family((key: string) => {
+  const [status, source, page] = key.split('|')
+  return query(['admin'], endpoints.reports(status as ReportFilter['status'], source as ReportFilter['source'], Number(page)))
+})
+export const reportsKey = (filter: ReportFilter) => `${filter.status}|${filter.source}|${filter.page}`
 
 const reportDone: Record<ReportStatus, string> = { open: 'Report reopened', resolved: 'Report resolved', dismissed: 'Report dismissed' }
 

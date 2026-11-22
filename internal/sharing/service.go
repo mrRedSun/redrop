@@ -3,12 +3,14 @@
 package sharing
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -56,8 +58,25 @@ type Service struct {
 	reportKey []byte          // keys the hash of a reporter's network
 	notifier  notify.Notifier // announces new reports (SetNotifier)
 
+	scanQueue     chan scanJob // upload checks run off the publish request path
+	scanCancel    context.CancelFunc
+	scanDone      chan struct{}
+	scanOnce      sync.Once
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
 }
+
+// scanJob is one committed publication waiting for its upload checks. The
+// files are copied: the publish path's slice is no longer read after the
+// request returns.
+type scanJob struct {
+	artifactID string
+	version    int
+	files      []store.File
+}
+
+// scanQueueSize bounds the backlog of upload checks. A publish with the
+// queue full drops the scan and logs it; publication is never delayed.
+const scanQueueSize = 64
 
 // maxLimiterKeys bounds each unlock limiter's table (about 10 MiB when
 // full). The per-network tables evict their oldest entry when full: the
@@ -80,6 +99,7 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		unlockBudget:    security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, security.RefuseNew, time.Now),
 		reportLimiter:   security.NewLimiter(cfg.ReportsPerHour, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
 		reportKey:       derivedKey(secret, "report-network"),
+		scanQueue:       make(chan scanJob, scanQueueSize),
 		notifier:        notify.Discard{},
 		checkPassword:   security.CheckPassword,
 	}
@@ -87,12 +107,50 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		s.Close()
 		return nil, err
 	}
+	s.startScanner()
 	return s, nil
 }
 
-// Close stops the rate limiters' background sweepers. The service stays
-// usable; call it once requests have drained, at shutdown.
+// startScanner runs the one upload-check worker. One is enough: the checks
+// are bounded (scanTimeout each) and only a lead, never a guarantee.
+func (s *Service) startScanner() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.scanCancel, s.scanDone = cancel, make(chan struct{})
+	go func() {
+		defer close(s.scanDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-s.scanQueue:
+				s.checkUpload(ctx, job.artifactID, job.version, job.files)
+			}
+		}
+	}()
+}
+
+// queueScan offers a committed publication to the worker without ever
+// blocking the publish request. With the queue full the scan is dropped
+// and logged: a publication is never delayed by its checks (m-F).
+func (s *Service) queueScan(artifactID string, version int, files []store.File) {
+	job := scanJob{artifactID: artifactID, version: version, files: slices.Clone(files)}
+	select {
+	case s.scanQueue <- job:
+	default:
+		s.log.Warn("upload check dropped: queue full", "id", artifactID, "version", version)
+	}
+}
+
+// Close stops the rate limiters' background sweepers and the upload-check
+// worker. The service stays usable; call it once requests have drained, at
+// shutdown.
 func (s *Service) Close() {
+	s.scanOnce.Do(func() {
+		if s.scanCancel != nil {
+			s.scanCancel()
+			<-s.scanDone
+		}
+	})
 	s.unlockLimiter.Close()
 	s.unlockIPLimiter.Close()
 	s.unlockBudget.Close()

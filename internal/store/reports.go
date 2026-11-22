@@ -117,17 +117,21 @@ func (s *Store) AddVisitorReport(ctx context.Context, r *Report, maxOpen, maxPer
 }
 
 // AddSystemReport stores r, an upload check's finding, unless an open
-// system report of the same kind exists for its artifact. It reports
-// whether r was stored.
+// system report already covers it: one per artifact and finding kind, and
+// at most one open system report per owner and kind across all the owner's
+// artifacts. The second bound keeps one account from filling the queue
+// with flags, one artifact at a time. It reports whether r was stored.
 func (s *Store) AddSystemReport(ctx context.Context, r *Report) (bool, error) {
 	stored := false
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
-		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM reports WHERE status = 'open' AND source = 'system' AND artifact_id = ? AND kind = ?`,
-			r.ArtifactID, r.Kind).Scan(&n); err != nil {
+		var onArtifact, byOwner int
+		if err := tx.QueryRowContext(ctx, `SELECT
+				(SELECT count(*) FROM reports WHERE status = 'open' AND source = 'system' AND artifact_id = ? AND kind = ?),
+				(SELECT count(*) FROM reports WHERE status = 'open' AND source = 'system' AND owner_id = ? AND kind = ?)`,
+			r.ArtifactID, r.Kind, r.OwnerID, r.Kind).Scan(&onArtifact, &byOwner); err != nil {
 			return err
 		}
-		if n > 0 {
+		if onArtifact > 0 || byOwner > 0 {
 			return nil
 		}
 		r.Source = ReportSystem
@@ -142,27 +146,46 @@ func (s *Store) ReportByID(ctx context.Context, id string) (*Report, error) {
 	return scanReport(s.DB.QueryRowContext(ctx, `SELECT `+reportCols+reportFrom+` WHERE r.id = ?`, id))
 }
 
-// ListReports returns the newest reports with status ("" = every status),
-// at most limit.
-func (s *Store) ListReports(ctx context.Context, status string, limit int) ([]Report, error) {
-	q, args := `SELECT `+reportCols+reportFrom, []any{}
+// ListReports returns one page of the reports with status ("" = every
+// status) and source ("" = both sources), newest first, plus the total count
+// for the same filter. Visitor reports come before system reports so a
+// flood of upload flags cannot bury them: within one source, newest first.
+// A page beyond the last one returns no rows, not an error.
+func (s *Store) ListReports(ctx context.Context, status, source string, limit, offset int) ([]Report, int, error) {
+	where, args := []string{}, []any{}
 	if status != "" {
-		q, args = q+` WHERE r.status = ?`, append(args, status)
+		where, args = append(where, "r.status = ?"), append(args, status)
 	}
-	rows, err := s.DB.QueryContext(ctx, q+` ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`, append(args, limit)...)
+	if source != "" {
+		where, args = append(where, "r.source = ?"), append(args, source)
+	}
+	cond := ""
+	if len(where) > 0 {
+		cond = " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int
+	if err := s.DB.QueryRowContext(ctx, `SELECT count(*)`+reportFrom+cond, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if offset >= total {
+		return []Report{}, total, nil
+	}
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+reportCols+reportFrom+cond+
+		` ORDER BY r.source = 'visitor' DESC, r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?`, listArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []Report{}
 	for rows.Next() {
 		r, err := scanReport(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, *r)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // ArtifactsByIDs returns the artifacts among ids that exist, by ID.
@@ -193,7 +216,15 @@ func (s *Store) ArtifactsByIDs(ctx context.Context, idList []string) (map[string
 }
 
 // AuditFor returns the audit entries of the given reports, oldest first.
-func (s *Store) AuditFor(ctx context.Context, reportIDs []string) (map[string][]AuditEntry, error) {
+// Entries with an empty report_id (an undo from the Artifacts or Users
+// page) are returned under "" and attached to every listed report that
+// names the same artifact or user, so a report's history shows that its
+// revocation or suspension was later reversed.
+func (s *Store) AuditFor(ctx context.Context, reports []Report) (map[string][]AuditEntry, error) {
+	reportIDs := make([]string, 0, len(reports))
+	for _, r := range reports {
+		reportIDs = append(reportIDs, r.ID)
+	}
 	out := map[string][]AuditEntry{}
 	for len(reportIDs) > 0 {
 		chunk := reportIDs[:min(len(reportIDs), 500)]
@@ -219,7 +250,63 @@ func (s *Store) AuditFor(ctx context.Context, reportIDs []string) (map[string][]
 			return nil, err
 		}
 	}
-	return out, nil
+	// Undo entries with no report_id (an artifact restored, an owner
+	// unsuspended from the Artifacts or Users page) belong to the history
+	// of every report on that artifact or user.
+	return s.auditsForReports(ctx, reports, out)
+}
+
+// auditsForReports augments a report's own audit rows with entries whose
+// report_id is empty but whose artifact_id or user_id matches. reports is
+// the full page the history is being built for; own holds each report's
+// own rows, keyed by report ID.
+func (s *Store) auditsForReports(ctx context.Context, reports []Report, own map[string][]AuditEntry) (map[string][]AuditEntry, error) {
+	artifacts, users := map[string]bool{}, map[string]bool{}
+	for _, r := range reports {
+		artifacts[r.ArtifactID] = true
+		users[r.OwnerID] = true
+	}
+	aid, uid := make([]string, 0, len(artifacts)), make([]string, 0, len(users))
+	for id := range artifacts {
+		aid = append(aid, id)
+	}
+	for id := range users {
+		uid = append(uid, id)
+	}
+	in := func(col string, ids []string) string {
+		if len(ids) == 0 {
+			return "0"
+		}
+		return col + " IN (?" + strings.Repeat(",?", len(ids)-1) + ")"
+	}
+	q := `SELECT at, actor, action, artifact_id, user_id, detail FROM audit WHERE report_id = '' AND ((` + in("artifact_id", aid) + `) OR (` + in("user_id", uid) + `)) ORDER BY id`
+	args := append(append([]any{}, anySlice(aid)...), anySlice(uid)...)
+	rows, err := s.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var extra []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		var at int64
+		if err := rows.Scan(&at, &e.Actor, &e.Action, &e.ArtifactID, &e.UserID, &e.Detail); err != nil {
+			return nil, err
+		}
+		e.At = ts(at)
+		extra = append(extra, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, r := range reports {
+		for _, e := range extra {
+			if e.ArtifactID == r.ArtifactID || e.UserID == r.OwnerID {
+				own[r.ID] = append(own[r.ID], e)
+			}
+		}
+	}
+	return own, nil
 }
 
 func anySlice(ss []string) []any {
@@ -234,6 +321,13 @@ func audit(ctx context.Context, tx *sql.Tx, e AuditEntry) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO audit (at, actor, action, report_id, artifact_id, user_id, detail) VALUES (?,?,?,?,?,?,?)`,
 		now(), e.Actor, e.Action, e.ReportID, e.ArtifactID, e.UserID, e.Detail)
 	return err
+}
+
+// WriteAudit records an action that has no report of its own (an artifact
+// restored or an owner unsuspended from the Artifacts or Users page), so
+// the reports it undoes can show it in their history.
+func (s *Store) WriteAudit(ctx context.Context, e AuditEntry) error {
+	return s.Tx(ctx, func(tx *sql.Tx) error { return audit(ctx, tx, e) })
 }
 
 // closeOpen resolves the open reports matching where (a condition on
@@ -280,11 +374,13 @@ func (s *Store) RevokeReported(ctx context.Context, reportID, actor string) (str
 		if err := tx.QueryRowContext(ctx, `SELECT artifact_id, owner_id FROM reports WHERE id = ?`, reportID).Scan(&artifactID, &ownerID); err != nil {
 			return notFound(err)
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE artifacts SET admin_revoked = 1, access_gen = access_gen + 1, updated_at = ? WHERE id = ?`, now(), artifactID)
+		revoked, err := adminRevoke(ctx, tx, `id = ?`, artifactID)
 		if err != nil {
 			return err
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		// A deleted artifact is gone: refuse rather than resolving reports
+		// for something that no longer exists.
+		if revoked == 0 {
 			return ErrArtifactGone
 		}
 		closed, err := closeOpen(ctx, tx, actor, `artifact_id = ?`, artifactID)
@@ -321,11 +417,10 @@ func (s *Store) SuspendReported(ctx context.Context, reportID, actor string) (st
 		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, ownerID); err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE artifacts SET admin_revoked = 1, access_gen = access_gen + 1, updated_at = ? WHERE user_id = ?`, now(), ownerID)
+		revoked, err := adminRevoke(ctx, tx, `user_id = ?`, ownerID)
 		if err != nil {
 			return err
 		}
-		revoked, _ := res.RowsAffected()
 		closed, err := closeOpen(ctx, tx, actor, `owner_id = ? OR artifact_id IN (SELECT id FROM artifacts WHERE user_id = ?)`, ownerID, ownerID)
 		if err != nil {
 			return err
@@ -341,4 +436,18 @@ func plural(n int64, word string) string {
 		return word
 	}
 	return word + "s"
+}
+
+// adminRevoke gives the artifacts matching where an administrator's
+// revocation: admin_revoked is set and the access generation changes, so
+// outstanding grants and links stop at once. It returns how many artifacts
+// matched. The abuse queue's revoke and suspend paths both go through it,
+// so they cannot drift apart.
+func adminRevoke(ctx context.Context, tx *sql.Tx, where string, args ...any) (int64, error) {
+	res, err := tx.ExecContext(ctx, `UPDATE artifacts SET admin_revoked = 1, access_gen = access_gen + 1, updated_at = ? WHERE `+where,
+		append([]any{now()}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

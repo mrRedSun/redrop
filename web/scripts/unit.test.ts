@@ -10,7 +10,7 @@ import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
 import * as artifactEndpoints from '@/features/artifacts/endpoints'
 import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, statusLabel, toUpdateRequest } from '@/features/artifacts/schemas'
-import { Stats, AdminArtifact, CreateInviteForm, Report, reportFilterFromSearch, reportedLink, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
+import { Stats, AdminArtifact, CreateInviteForm, Report, ReportList, reportFilterFromSearch, reportSearch, reportedLink, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import * as adminEndpoints from '@/features/admin/endpoints'
 import * as reportEndpoints from '@/features/reports/endpoints'
 import { ReportForm, reportDefaults, toReportRequest } from '@/features/reports/schemas'
@@ -297,21 +297,48 @@ await test('admin reports decode; the artifact stays metadata only; only http(s)
   assert(Option.isNone(Schema.decodeUnknownOption(Report)(reportWire({ status: 'pending' }))))
   assert.equal(reportedLink(r), 'https://amber-otter-quilt-river.usercontent.example/')
   for (const bad of ['javascript:alert(1)', 'data:text/html,x', '//evil.example/', '']) assert.equal(reportedLink({ reported_url: bad }), undefined)
-  assert.equal(reportFilterFromSearch(new URLSearchParams('status=dismissed')), 'dismissed')
-  assert.equal(reportFilterFromSearch(new URLSearchParams('status=bogus')), 'open')
-  assert.equal(reportFilterFromSearch(new URLSearchParams('')), 'open')
 })
 
-await test('report endpoints: paths, bodies and the CSRF header', async () => {
-  const h = harness((path) => (path.startsWith('/api/v1/admin/reports') && !path.endsWith('/reports') ? response(reportWire()) : path.endsWith('/admin/reports') ? response({ items: null }) : response({ ok: true }, 202)))
+await test('report queue filters validate URL state and reset paging on a filter change', () => {
+  assert.deepEqual(reportFilterFromSearch(new URLSearchParams('status=dismissed&source=system&page=12')), { status: 'dismissed', source: 'system', page: 12 })
+  assert.deepEqual(reportFilterFromSearch(new URLSearchParams('status=bogus&source=bogus&page=0')), { status: 'open', source: 'all', page: 1 })
+  assert.deepEqual(reportFilterFromSearch(new URLSearchParams('')), { status: 'open', source: 'all', page: 1 })
+  for (const page of ['-1', '1.5', 'Infinity', 'NaN', '2x', '9007199254740992']) {
+    assert.equal(reportFilterFromSearch(new URLSearchParams({ page })).page, 1)
+  }
+  const current = new URLSearchParams('status=resolved&source=visitor&page=8&keep=yes')
+  assert.equal(reportSearch(current, { status: 'dismissed' }).toString(), 'status=dismissed&source=visitor&keep=yes')
+  assert.equal(reportSearch(current, { source: 'system' }).toString(), 'status=resolved&source=system&keep=yes')
+  assert.equal(reportSearch(current, { page: 9 }).toString(), 'status=resolved&source=visitor&page=9&keep=yes')
+  assert.equal(reportSearch(current, { status: 'open', source: 'all' }).toString(), 'keep=yes')
+  assert.equal(current.get('page'), '8')
+})
+
+await test('report queue pages require a total and preserve the paging metadata', () => {
+  const page = Schema.decodeUnknownSync(ReportList)({ items: [reportWire()], total: 501, page: 11, page_size: 50 })
+  assert.equal(page.items?.length, 1)
+  assert.equal(page.total, 501)
+  assert.equal(page.page, 11)
+  assert.equal(page.page_size, 50)
+  for (const invalid of [
+    { items: [] },
+    { items: [], total: -1, page: 1, page_size: 50 },
+    { items: [], total: 0, page: 0, page_size: 50 },
+    { items: [], total: 0, page: 1, page_size: 0 },
+    { items: [], total: 0.5, page: 1, page_size: 50 },
+  ]) assert(Option.isNone(Schema.decodeUnknownOption(ReportList)(invalid)))
+})
+
+await test('report endpoints: page and source queries, bodies and the CSRF header', async () => {
+  const h = harness((path) => (path.startsWith('/api/v1/admin/reports') && !path.endsWith('/reports') ? response(reportWire()) : path.endsWith('/admin/reports') ? response({ items: null, total: 501, page: 11, page_size: 50 }) : response({ ok: true }, 202)))
   await h.run(reportEndpoints.submit({ url: 'https://x.example/', category: 'spam' }))
-  assert.deepEqual(await h.run(adminEndpoints.reports('all')), [])
+  assert.deepEqual(await h.run(adminEndpoints.reports('all', 'visitor', 11)), { items: [], total: 501, page: 11, page_size: 50 })
   await h.run(adminEndpoints.setReportStatus('r/1', { status: 'resolved' }))
   await h.run(adminEndpoints.revokeReported('r1'))
   await h.run(adminEndpoints.suspendReportedOwner('r1'))
   assert.deepEqual(h.requests, [
     { method: 'POST', path: '/api/v1/reports', csrf: '1', body: '{"url":"https://x.example/","category":"spam"}' },
-    { method: 'GET', path: '/api/v1/admin/reports?status=all', csrf: '1', body: undefined },
+    { method: 'GET', path: '/api/v1/admin/reports?status=all&source=visitor&page=11', csrf: '1', body: undefined },
     { method: 'PATCH', path: '/api/v1/admin/reports/r%2F1', csrf: '1', body: '{"status":"resolved"}' },
     { method: 'POST', path: '/api/v1/admin/reports/r1/revoke', csrf: '1', body: undefined },
     { method: 'POST', path: '/api/v1/admin/reports/r1/suspend', csrf: '1', body: undefined },

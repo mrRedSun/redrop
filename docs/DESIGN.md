@@ -1285,10 +1285,13 @@ The checks, in order:
    now", with the abuse contact when one is configured. This does not
    depend on the URL.
 6. The slug is looked up (one indexed query, as for a visit). The report is
-   stored only when it names an existing artifact (in any state: active,
-   expired within retention, revoked, used up), the artifact has fewer than
+   stored only when it names an **active** artifact (one the content host
+   would serve now), the artifact has fewer than
    `REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT` (default 20) open visitor
-   reports, and the same network has no open report on it.
+   reports, and the same network has no open report on it. A revoked,
+   expired or used-up link is dropped like an unknown one: it cannot hurt
+   visitors, and storing (or refusing) a report for it would turn the form
+   into an oracle for which hidden links still exist.
 
 Steps 1 to 5 answer the same whatever the URL names. Step 6 always answers
 `202 {"ok": true}`: unknown links, full artifacts and duplicates are
@@ -1321,14 +1324,26 @@ The detail names the file and, for a form, the host it posts to, for
 example `login.html: a password form posts to evil.example`. That is all
 an administrator learns of the content; it is cleaned and shown as text.
 
-**Bounds.** The scan runs after the publication has released its slot and
-its upload, so it never holds up other publishers, and its result is never
-returned to the publisher. It reads at most 4 KiB of each file for magic
-numbers, at most 1 MiB of each HTML file, at most 32 MiB in all, and stops
-after 5 seconds; it stops early at the first finding of each kind. A
-version that is cut short is logged (`upload check incomplete`). At most one
-open system report per artifact and finding kind exists: a later version
-with the same finding adds nothing until the first is closed.
+**Bounds and scheduling.** The scan runs on one background worker, off the
+publish request path entirely: a publication queues its version's files and
+returns immediately, so the checks never delay a response. The queue holds
+64 jobs; when it is full the scan is dropped and logged. A scan reads at
+most 4 KiB of each file for magic numbers, at most 1 MiB of each HTML
+file, at most 32 MiB in all, and stops after 5 seconds; it stops early at
+the first finding of each kind. A version that is cut short is logged
+(`upload check incomplete`). At most one open system report per artifact
+and finding kind exists, and at most one per owner and kind: a later
+version with the same finding, or another artifact by the same owner with
+it, adds nothing until the first is closed. That second bound is what
+keeps one account from filling the queue with upload flags, one artifact
+at a time.
+
+**Form parsing follows the browser.** A `<form>` start tag inside an open
+form is ignored, as the HTML parser ignores it. The first `<base href>`
+outside a form resolves relative actions. Before a URL is parsed, ASCII
+tab and newline are removed and leading C0 controls and spaces are
+trimmed, as the URL Standard requires, and `input type` is compared
+case-insensitively without trimming.
 
 **Known limits.** Forms built by scripts, `fetch()` posts and password
 fields associated with a form through `form=` from outside it are not
@@ -1338,7 +1353,11 @@ catch the careless case and give an operator a lead, not a guarantee.
 ### Admin queue
 
 Admins see a **Reports** tab: open reports by default, with resolved and
-dismissed as filters, newest first, at most 500.
+dismissed as status filters and visitor/system as a source filter. The
+list is paged, 50 to a page with a total count for the filter, so a full
+queue hides nothing: with both sources shown, visitor reports come first
+(newest first within each source), because a visitor took the trouble to
+write what happened and must not be buried under machine flags.
 
 Each report shows its source (visitor or system), category, time, the
 reporter's text and contact (as text), the artifact (title, kind, owner,
@@ -1379,8 +1398,13 @@ restores each one from the Artifacts tab after reviewing it.
 **Audit.** Every queue action writes one `audit` row in the same
 transaction as its effect: time, administrator, action, report, artifact,
 user, and a short detail (for example `revoked 3 artifacts, resolved 2
-reports`). The report shows its rows as its history, and the server logs
-each action too. Rows are never edited or deleted by redrop.
+reports`). Undoing an action from elsewhere in the dashboard writes a row
+too: restoring an artifact (`artifact.restore`) from the Artifacts tab,
+and enabling an account (`user.unsuspend`) from the Users tab. Those rows
+have no report of their own, so they attach to the history of every
+report on the same artifact or user: a takedown that was quietly reversed
+is still visible there. The server logs each action as well. Rows are
+never edited or deleted by redrop.
 
 ### Notifications
 
@@ -1472,12 +1496,17 @@ queue; artifacts revoked and accounts disabled from it stay so.
   link from burying the rest, and duplicates from one network count once.
 * **Enumeration.** The endpoint answers the same for every URL that passes
   the syntax check, and the limit of 5 an hour per network is far slower
-  than the content host's miss limiter.
+  than the content host's miss limiter. Only active artifacts are
+  reportable, so a dropped report for a revoked or expired link is
+  indistinguishable from one for an unknown link even under cap pressure.
 * **Cross-site filing.** Required same-origin `Origin`, the custom header
   (which forces a CORS preflight that is never approved) and JSON only.
 * **Untrusted text in the admin UI.** Reporter text and contact, and the
   file names and hosts in system findings, are cleaned on input and shown
-  as React text nodes only. The contact is never a `mailto:` or other link.
+  as React text nodes only: controls, invisible characters and the
+  bidirectional embedding, override and isolate controls are removed, so a
+  name cannot render with a misleading order. The contact is never a
+  `mailto:` or other link.
   The reported URL is a link only because it passed the content-domain
   check on input; it opens with `rel="noopener noreferrer"` in a new tab.
 * **Untrusted text in the webhook.** None is sent: category, artifact ID
