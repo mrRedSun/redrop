@@ -37,21 +37,21 @@ func (s *feedbackServer) handler(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	switch {
-	case (r.Method == "GET" || r.Method == "PATCH") && r.URL.Path == "/api/v1/artifacts/art1":
-		json.NewEncoder(w).Encode(api.Artifact{ID: "art1", Title: "Report\x1b[5m", Feedback: s.feedback, InfoButton: !s.noInfo})
-	case r.Method == "GET" && r.URL.Path == "/api/v1/artifacts/art1/feedback":
+	case (r.Method == "GET" || r.Method == "PATCH") && r.URL.Path == "/api/v1/artifacts/artreportabcdefg":
+		json.NewEncoder(w).Encode(api.Artifact{ID: "artreportabcdefg", Title: "Report\x1b[5m", Feedback: s.feedback, InfoButton: !s.noInfo})
+	case r.Method == "GET" && r.URL.Path == "/api/v1/artifacts/artreportabcdefg/feedback":
 		json.NewEncoder(w).Encode(api.CommentList{Items: s.comments})
 	case strings.HasSuffix(r.URL.Path, "/feedback/missing"):
 		w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte(`{"title":"not_found","detail":"comment not found","status":404}`))
-	case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/art1/feedback/"):
+	case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artreportabcdefg/feedback/"):
 		var req api.ResolveCommentRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		s.mu.Lock()
 		s.requests[len(s.requests)-1] += " resolved=" + map[bool]string{true: "true", false: "false"}[req.Resolved]
 		s.mu.Unlock()
-		json.NewEncoder(w).Encode(api.Comment{ID: strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/art1/feedback/")})
-	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/art1/feedback/"):
+		json.NewEncoder(w).Encode(api.Comment{ID: strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/artreportabcdefg/feedback/")})
+	case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artreportabcdefg/feedback/"):
 		w.Write([]byte(`{"ok":true}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -81,14 +81,14 @@ func clean(s string) bool {
 
 func TestFeedbackPlainOutputFramesViewerText(t *testing.T) {
 	s := &feedbackServer{feedback: true, comments: []api.Comment{hostile}}
-	out, _, err := runFeedback(t, s, "feedback", "art1")
+	out, _, err := runFeedback(t, s, "feedback", "artreportabcdefg")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !clean(out) {
 		t.Fatalf("output keeps terminal control: %q", out)
 	}
-	if !strings.Contains(out, untrustedNote) || !strings.Contains(out, `1 open comment on "Report" (art1).`) {
+	if !strings.Contains(out, untrustedNote) || !strings.Contains(out, `1 open comment on "Report" (artreportabcdefg).`) {
 		t.Fatalf("header: %s", out)
 	}
 	// Between the start and end lines, every line is a label or viewer text
@@ -110,14 +110,14 @@ func TestFeedbackPlainOutputFramesViewerText(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
-	if s.requests[1] != "GET /api/v1/artifacts/art1/feedback?status=open" {
+	if s.requests[1] != "GET /api/v1/artifacts/artreportabcdefg/feedback?status=open" {
 		t.Fatalf("requests: %v", s.requests)
 	}
 }
 
 func TestFeedbackJSONIsCleanAndStructured(t *testing.T) {
 	s := &feedbackServer{feedback: true, comments: []api.Comment{hostile}}
-	out, _, err := runFeedback(t, s, "--json", "feedback", "art1", "--all", "--version", "2")
+	out, _, err := runFeedback(t, s, "--json", "feedback", "artreportabcdefg", "--all", "--version", "2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,52 +137,52 @@ func TestFeedbackJSONIsCleanAndStructured(t *testing.T) {
 	if !clean(out) {
 		t.Fatalf("raw output: %q", out)
 	}
-	if s.requests[1] != "GET /api/v1/artifacts/art1/feedback?status=all&version=2" {
+	if s.requests[1] != "GET /api/v1/artifacts/artreportabcdefg/feedback?status=all&version=2" {
 		t.Fatalf("requests: %v", s.requests)
 	}
 }
 
 func TestFeedbackEmpty(t *testing.T) {
-	out, _, err := runFeedback(t, &feedbackServer{}, "feedback", "art1")
+	out, _, err := runFeedback(t, &feedbackServer{}, "feedback", "artreportabcdefg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "0 open comments") || !strings.Contains(out, "redrop set art1 --feedback") || strings.Contains(out, untrustedNote) {
+	if !strings.Contains(out, "0 open comments") || !strings.Contains(out, "redrop set artreportabcdefg --feedback") || strings.Contains(out, untrustedNote) {
 		t.Fatalf("empty, closed: %s", out)
 	}
-	out, _, _ = runFeedback(t, &feedbackServer{feedback: true}, "feedback", "art1")
+	out, _, _ = runFeedback(t, &feedbackServer{feedback: true}, "feedback", "artreportabcdefg")
 	if strings.Contains(out, "--feedback") {
 		t.Fatalf("empty, open, still hints: %s", out)
 	}
-	_, _, err = runFeedback(t, &feedbackServer{}, "feedback", "art1", "--version", "-1")
+	_, _, err = runFeedback(t, &feedbackServer{}, "feedback", "artreportabcdefg", "--version", "-1")
 	requireExitCode(t, err, exitUsage)
 }
 
 func TestFeedbackResolveAndDelete(t *testing.T) {
 	s := &feedbackServer{}
-	out, _, err := runFeedback(t, s, "--json", "feedback", "resolve", "art1", "c1", "c2")
+	out, _, err := runFeedback(t, s, "--json", "feedback", "resolve", "artreportabcdefg", "c1", "c2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, `"resolved": [`) || len(s.requests) != 2 ||
-		s.requests[0] != "PATCH /api/v1/artifacts/art1/feedback/c1 resolved=true" || s.requests[1] != "PATCH /api/v1/artifacts/art1/feedback/c2 resolved=true" {
+		s.requests[0] != "PATCH /api/v1/artifacts/artreportabcdefg/feedback/c1 resolved=true" || s.requests[1] != "PATCH /api/v1/artifacts/artreportabcdefg/feedback/c2 resolved=true" {
 		t.Fatalf("resolve: %s %v", out, s.requests)
 	}
 
 	// Deleting needs --yes when not interactive (tests have no terminal).
 	s = &feedbackServer{}
-	_, _, err = runFeedback(t, s, "feedback", "delete", "art1", "c1")
+	_, _, err = runFeedback(t, s, "feedback", "delete", "artreportabcdefg", "c1")
 	requireExitCode(t, err, exitUsage)
 	if len(s.requests) != 0 {
 		t.Fatalf("deleted without confirmation: %v", s.requests)
 	}
-	out, _, err = runFeedback(t, s, "feedback", "delete", "art1", "c1", "--yes")
-	if err != nil || out != "deleted c1\n" || len(s.requests) != 1 || s.requests[0] != "DELETE /api/v1/artifacts/art1/feedback/c1" {
+	out, _, err = runFeedback(t, s, "feedback", "delete", "artreportabcdefg", "c1", "--yes")
+	if err != nil || out != "deleted c1\n" || len(s.requests) != 1 || s.requests[0] != "DELETE /api/v1/artifacts/artreportabcdefg/feedback/c1" {
 		t.Fatalf("delete: %q %v %v", out, s.requests, err)
 	}
 
 	// An unknown comment is exit code 4, with its ID cleaned in the message.
-	_, _, err = runFeedback(t, &feedbackServer{}, "feedback", "resolve", "nope", "c1")
+	_, _, err = runFeedback(t, &feedbackServer{}, "feedback", "resolve", "nopenopenopenope", "c1")
 	requireExitCode(t, err, exitNotFound)
 }
 

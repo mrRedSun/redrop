@@ -109,12 +109,13 @@ func readSecretFile(p string) (string, error) {
 }
 
 // resolveID accepts an artifact ID, its link, or the link's slug. A #k= key
-// (or any fragment) is cut off first: it never reaches the server.
+// (or any fragment) is cut off first: it never reaches the server. Anything
+// that is not one of those shapes is refused before any request.
 func resolveID(ctx context.Context, c *client.Client, arg string) (string, error) {
-	arg = withoutFragment(arg)
+	arg = strings.TrimSpace(withoutFragment(arg))
 	slug, err := artifactSlug(arg)
 	if err != nil || slug == "" {
-		return strings.TrimSpace(arg), err
+		return arg, err
 	}
 	list, err := c.ListArtifacts(ctx, "", "all")
 	if err != nil {
@@ -125,32 +126,34 @@ func resolveID(ctx context.Context, c *client.Client, arg string) (string, error
 			return a.ID, nil
 		}
 	}
-	return "", withCode(exitNotFound, "no artifact of yours has the link %s", arg)
+	return "", withCode(exitNotFound, "no artifact of yours has the link with %s", slug)
 }
 
 // artifactSlug returns the slug named by a link (https://<slug>.<content-domain>/,
-// scheme optional) or a bare slug, and "" for anything else, which is taken
-// as an artifact ID. A link whose first label is not a slug is a usage error.
+// scheme optional) or a bare slug, and "" for an artifact ID. Anything else
+// is a usage error that doesn't echo the argument: it may hold a key whose
+// "#" was percent-encoded (ID%23k=...), and only an ID, a slug or a link's
+// slug ever goes to the server.
 func artifactSlug(arg string) (string, error) {
 	arg = strings.TrimSpace(arg)
-	if ids.ValidSlug(arg) {
+	switch {
+	case ids.ValidSlug(arg):
 		return arg, nil
-	}
-	if !strings.Contains(arg, "://") && !strings.Contains(arg, ".") {
+	case ids.ValidID(arg):
 		return "", nil
-	}
-	raw := arg
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	u, err := url.Parse(raw)
-	if err == nil {
-		label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
-		if ids.ValidSlug(label) {
-			return label, nil
+	case strings.Contains(arg, "://") || strings.Contains(arg, "."):
+		raw := arg
+		if !strings.Contains(raw, "://") {
+			raw = "https://" + raw
+		}
+		if u, err := url.Parse(raw); err == nil {
+			label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
+			if ids.ValidSlug(label) {
+				return label, nil
+			}
 		}
 	}
-	return "", withCode(exitUsage, "not an artifact ID or link: %s (links look like https://amber-otter-quilt-river.usercontent.example/)", arg)
+	return "", withCode(exitUsage, "not an artifact ID or link: an ID is %d characters of a-z and 2-7, a link looks like https://amber-otter-quilt-river.usercontent.example/", ids.IDLen)
 }
 
 func printArtifact(a *api.Artifact, extra map[string]string) error {

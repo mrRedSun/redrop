@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -303,6 +304,29 @@ func TestCLIKeyInArgumentsNeverReachesTheServer(t *testing.T) {
 	}
 	if !strings.Contains(s.requests.String(), "GET /api/v1/artifacts/"+a.ID+"\n") {
 		t.Fatal("the recorder missed the artifact reads")
+	}
+	// The re-check of review 33: a "#" that was percent-encoded makes an
+	// argument that is no ID, slug or link. It is refused before any
+	// request, and the refusal doesn't echo it.
+	slug, _ := artifactSlug(a.URL)
+	before := s.requests.mark()
+	for _, ref := range []string{
+		a.ID + "%23k=" + key, slug + "%23k=" + key, a.ID + "%23k%3D" + key, a.ID + "/%23k=" + key,
+		a.ID + "%2523k=" + key, a.ID + "%23k=" + key + "#k=" + key,
+	} {
+		for _, args := range [][]string{{"info", ref}, {"update", ref, page}, {"watch", ref, page}, {"versions", ref}} {
+			_, errOut, err := s.run(t, fresh, "", args...)
+			var ee *exitError
+			if !errors.As(err, &ee) || ee.code != exitUsage {
+				t.Fatalf("%s %s: error %v, want a usage error", args[0], strings.ReplaceAll(ref, key, "KEY"), err)
+			}
+			if strings.Contains(errOut, key) || strings.Contains(err.Error(), key) {
+				t.Fatalf("%s: the refusal echoes the key", args[0])
+			}
+		}
+	}
+	if s.requests.mark() != before {
+		t.Fatalf("a refused argument sent requests:\n%s", strings.ReplaceAll(s.requests.since(before), key, "KEY"))
 	}
 	for name, text := range map[string]string{"requests": s.requests.String(), "log": s.logs.String()} {
 		if strings.Contains(text, key) {

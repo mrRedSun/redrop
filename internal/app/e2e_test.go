@@ -693,13 +693,19 @@ func TestE2EPlaintextNeverUploaded(t *testing.T) {
 }
 
 // M2 of review 33: a fragment a client sent encoded in a path (an
-// end-to-end key pasted where an ID belongs) never reaches the log.
+// end-to-end key pasted where an ID belongs) never reaches the log, encoded
+// once (%23) or more (%2523: what a client that path-escapes "ID%23k=..."
+// sends).
 func TestE2EFragmentsAreNeverLogged(t *testing.T) {
 	var logs syncBuffer
 	h := newHarnessWith(t, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), Options{})
 	token := h.setupAdmin()
 	const secret = "SecretKeyText0123456789abcdefghijklmnopqrs"
-	for _, p := range []string{"/api/v1/artifacts/k2j4m9qx7d4abcde%23k=" + secret, "/api/v1/artifacts/k2j4m9qx7d4abcde%23k=" + secret + "/versions", "/no/such%23k=" + secret} {
+	for _, p := range []string{
+		"/api/v1/artifacts/k2j4m9qx7d4abcde%23k=" + secret, "/api/v1/artifacts/k2j4m9qx7d4abcde%23k=" + secret + "/versions", "/no/such%23k=" + secret,
+		"/api/v1/artifacts/k2j4m9qx7d4abcde%2523k=" + secret, "/api/v1/artifacts/k2j4m9qx7d4abcde%2523k%253D" + secret + "/versions",
+		"/api/v1/artifacts/k2j4m9qx7d4abcde/%252523k=" + secret, "/no/such%2523k=" + secret,
+	} {
 		req, _ := http.NewRequest(http.MethodGet, h.srv.URL+p, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := h.srv.Client().Do(req)

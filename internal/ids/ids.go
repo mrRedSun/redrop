@@ -23,6 +23,23 @@ func Random(n int) string {
 // ID is a short, stable public identifier (80 bits).
 func ID() string { return Random(10) }
 
+// IDLen is the length of every ID.
+const IDLen = 16
+
+// ValidID reports whether s has the form of an ID: IDLen characters of the
+// lowercase base32 alphabet.
+func ValidID(s string) bool {
+	if len(s) != IDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !(s[i] >= 'a' && s[i] <= 'z' || s[i] >= '2' && s[i] <= '7') {
+			return false
+		}
+	}
+	return true
+}
+
 // Secret returns a 256-bit secret string.
 func Secret() string { return Random(32) }
 

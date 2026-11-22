@@ -119,6 +119,15 @@ func TestRedactPath(t *testing.T) {
 		"/api/v1/artifacts/x#k=SECRETKEY/views":  "/api/v1/artifacts/x#…",
 		"/api/v1/invites/abc#k=SECRETKEY/accept": "/api/v1/invites/…",
 		"/#k=SECRETKEY":                          "/#…",
+		// Review 33 re-check M2: and one that arrived as %2523 (a %23 in
+		// the decoded path), or encoded deeper.
+		"/api/v1/artifacts/x%23k=SECRETKEY":        "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x%2523k%3DSECRETKEY":    "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x/%23k=SECRETKEY/views": "/api/v1/artifacts/x/#…",
+		"/api/v1/invites/abc%23k=SECRETKEY/accept": "/api/v1/invites/…",
+		"/api/v1/artifacts/x%25%23k=SECRETKEY":     "/api/v1/artifacts/x%25#…",
+		"/api/v1/artifacts/x%2k=SECRETKEY%25":      "/api/v1/artifacts/x%2k=SECRETKEY%25",
+		"/api/v1/artifacts/x%20name":               "/api/v1/artifacts/x%20name",
 	}
 	for in, want := range cases {
 		if got := redactPath(in); got != want {

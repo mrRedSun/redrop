@@ -409,6 +409,7 @@ SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 # decrypt LINKFILE [PATH|--list]: decrypt the link in LINKFILE like a viewer.
 decrypt() { local f=$1; shift; node "$SCRIPTS/e2e-decrypt.mjs" "$@" < "$f"; }
 logged_uploads() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'path=/api/v1/uploads' || true; fi; }
+logged_requests() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'msg=http ' || true; fi; }
 EMARK="e2e-secret-$RANDOM-$RANDOM"
 mkdir -p "$WORK/e2e-site/docs"
 printf '<!doctype html><title>E2E title</title><p>%s</p><a href="docs/n.txt">n</a>\n' "$EMARK" > "$WORK/e2e-site/index.html"
@@ -483,6 +484,25 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" 
   -d "{\"size\":10,\"artifact_id\":\"$EID\"}" "$BASE/api/v1/uploads")
 [ "$code" = 400 ] || die "the server must refuse a plaintext upload declared for an e2e artifact, got $code"
 $R info "$EID" | grep -q "#k=$EKEY" || die "info prints the full link"
+# A "#" that was percent-encoded makes no ID, slug or link: refused before
+# any request (review 33 re-check M2). A client that sends one anyway, once
+# or twice encoded, is not logged with it (checked with the log below).
+before=$(logged_requests)
+ESLUG=$(sed 's|^[a-z]*://||; s|\..*||' "$ELINKF")
+for ref in "$EID%23k=$EKEY" "$ESLUG%23k=$EKEY" "$EID%23k%3D$EKEY" "$EID/%23k=$EKEY"; do
+  for cmd in info "update" watch; do
+    set +e
+    if [ "$cmd" = info ]; then $R info "$ref" >/dev/null 2>"$WORK/e2e-enc.err"; else $R "$cmd" "$ref" "$WORK/e2e-site" >/dev/null 2>"$WORK/e2e-enc.err"; fi
+    rc=$?
+    set -e
+    [ "$rc" = 2 ] || die "'redrop $cmd' of an ID with an encoded #k= must exit 2 (got $rc)"
+    grep -qF -- "$EKEY" "$WORK/e2e-enc.err" && die "'redrop $cmd' echoes an encoded key"
+  done
+done
+[ "$(logged_requests)" = "$before" ] || die "a refused encoded-key argument sent a request"
+for p in "$EID%23k=$EKEY" "$EID%2523k=$EKEY" "$EID%252523k%253D$EKEY"; do
+  curl -s -o /dev/null -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/artifacts/$p"
+done
 $R watch "$EID" "$WORK/e2e-site" --debounce 300ms >"$WORK/e2e-watch.log" 2>"$WORK/e2e-watch.err" &
 WPID=$!
 e_ready() { grep -q "^watching" "$WORK/e2e-watch.err"; }
@@ -570,7 +590,7 @@ pass "stdin share, revoke/restore, rotate to a four-word link"
 
 # exit codes
 set +e
-$R info doesnotexist00 >/dev/null 2>&1; [ $? = 4 ] || die "exit code 4 for not found"
+$R info aaaaaaaaaaaaaaaa >/dev/null 2>&1; [ $? = 4 ] || die "exit code 4 for not found"
 $R share "$WORK/page.html" --ttl banana >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for bad ttl"
 $R share "$WORK/notes.md" --render invalid >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for render mode"
 $R share "$WORK/notes.md" --render markdown --as file >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for render-kind conflict"
