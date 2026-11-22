@@ -414,10 +414,12 @@ OKR=$(curl -fsS "${RH[@]}" -H "Origin: $PUB" -d "$(rbody "${RURL}x.html#frag")" 
 UNK=$(python3 -c 'import sys,urllib.parse as u;p=u.urlsplit(sys.argv[1]);print(p._replace(netloc="zebra-zebra-zebra-zebra."+p.netloc.split(".",1)[1]).geturl())' "$RURL")
 UNKR=$(curl -fsS "${RH[@]}" -H "Origin: $PUB" -d "$(rbody "$UNK")" "$BASE/api/v1/reports")
 [ "$OKR" = '{"ok":true}' ] && [ "$UNKR" = "$OKR" ] || die "report answers differ: $OKR / $UNKR"
-REPID=$(curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports" | python3 -c 'import json,sys
-d=[r for r in json.load(sys.stdin)["items"] if r["source"]=="visitor"]
-assert len(d)==1, d
-r=d[0]
+REPID=$(curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=visitor&page=1" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["total"]>=1 and d["page"]==1 and d["page_size"]==50, d
+rs=[r for r in d["items"] if r["source"]=="visitor"]
+assert len(rs)==1, rs
+r=rs[0]
 assert r["artifact_id"]==sys.argv[1] and r["reported_url"]==sys.argv[2]+"x.html" and r["category"]=="phishing" and r["status"]=="open", r
 assert r["artifact"] and r["artifact"]["url"]=="" and r["owner_username"]==sys.argv[3], r
 print(r["id"])' "$RID" "$RURL" "$USER") || die "report in the admin queue"
@@ -431,7 +433,13 @@ printf '<p>downloads</p>' > "$WORK/exe-site/index.html"
 printf 'MZ not really a program' > "$WORK/exe-site/setup.exe"
 EURL=$($R share "$WORK/exe-site" -q)
 EID=$($R info "$EURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports" | python3 -c 'import json,sys
+for _ in $(seq 1 50); do
+  N=$(curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=system&page=1" | python3 -c 'import json,sys
+d=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
+print(len(d))' "$EID") && [ "$N" = 1 ] && break
+  sleep 0.2
+done
+curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=system&page=1" | python3 -c 'import json,sys
 d=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
 assert len(d)==1 and d[0]["source"]=="system" and d[0]["category"]=="malware" and d[0]["details"]=="setup.exe: Windows program (.exe)" and d[0]["reported_url"]=="", d' "$EID" || die "executable upload flagged"
 curl -fsS "${EURL}setup.exe" | cmp -s - "$WORK/exe-site/setup.exe" || die "flagged file changed"
