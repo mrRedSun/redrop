@@ -247,10 +247,14 @@ keep the link working; a lost link and key mean lost content.
   info, rotate, update and watch print the full link when the key is saved
   here; list --json and the dashboard show links without it. delete
   removes the saved key. A key given with an ID (ID#k=...) is used here
-  and never sent to the server.
+  and never sent to the server. Only an ID, a slug or a link's slug goes
+  to the server: anything else, such as ID%23k=... (a # that was
+  percent-encoded), is refused with exit 2 before any request.
 - The server refuses a version encrypted with another key, a plaintext
   upload or version for an encrypted artifact, and an encrypted version
-  of a plaintext one. An artifact can't be switched either way.
+  of a plaintext one. An artifact can't be switched either way. Upgrade
+  redrop on every machine you publish from: an older CLI's update of an
+  encrypted artifact uploads the plaintext before the server refuses it.
 - Still works: passwords, --ttl, --once and --max-views (the gate keeps
   the key), revoke/restore, rotate (new link, same key), versions and
   rollback, --old-versions, the info button, and --feedback. Feedback
@@ -267,7 +271,9 @@ keep the link working; a lost link and key mean lost content.
   removes it from the address bar and reloads before showing the page, so
   scripts in the page (analytics, libraries) can't read the key; they can
   only use it while the page is open. The browser keeps that CryptoKey for
-  12 hours, and its history keeps the full link.
+  12 hours, and its history keeps the full link. A link whose key is
+  damaged (cut short, or with characters added) opens nothing, even in a
+  browser that has the key: copy the whole link again.
 - This protects against the server's storage being read, not against a
   compromised live server, which could serve a viewer that leaks the key.
 

@@ -204,7 +204,9 @@ backup learns sizes, file counts and timing, never content, names or titles.
   artifact first and encrypt every new version with its key, with or
   without `--e2e`. Without a key (from the store or the link) they upload
   nothing and exit 2, and the server refuses a plaintext upload declared
-  for an encrypted artifact before any byte of it arrives.
+  for an encrypted artifact before any byte of it arrives. Upgrade the CLI
+  on every machine you publish from: an older CLI's `update` still
+  uploads the plaintext before the server refuses the version.
 - **Still works:** passwords, expiry, view limits and `--once` (the gate
   keeps the key), revoke, rotate, versions, the info panel, and feedback.
   Feedback is **not** encrypted: comments, quotes and page paths reach the
@@ -218,7 +220,8 @@ backup learns sizes, file counts and timing, never content, names or titles.
   and decrypts in the browser through redrop's own service worker; the
   page still runs on its own origin. Scripts in the page can't read the
   key, but can use it while the page is open. The browser keeps the key
-  for 12 hours, so reloads work; its history keeps the full link.
+  for 12 hours, so reloads work; its history keeps the full link. A link
+  whose key is damaged opens nothing, even where the key is kept.
 - **Limit:** this protects stored data, not visits through a compromised
   live server, which could serve a viewer that leaks the key. Design and
   format: [`docs/DESIGN.md`](docs/DESIGN.md#end-to-end-encrypted-links).
