@@ -258,22 +258,42 @@
 
   function live(row) {
     var shown = Number(row.getAttribute('data-version'))
-    var es = new window.EventSource(row.getAttribute('data-src'))
-    var pending = false, again = false, saved = null
-    es.addEventListener('open', function () { row.hidden = false })
-    // "end": live mode stopped or access ended. No more requests.
-    es.addEventListener('end', function () { es.close(); row.hidden = true })
-    // A refused or failed stream is closed for good (readyState 2);
-    // a dropped one reconnects by itself.
-    es.addEventListener('error', function () { if (es.readyState === 2) row.hidden = true })
-    es.addEventListener('version', function (e) {
-      var v = null
-      try { v = JSON.parse(e.data) } catch (x) { return }
-      if (!v || typeof v.version !== 'number' || v.version === shown) return
-      shown = v.version
-      panelShows(v)
-      reload()
-    })
+    var es = null
+    var pending = false, again = false, saved = null, reloadTimer = 0
+    function connect() {
+      var stream = new window.EventSource(row.getAttribute('data-src'))
+      es = stream
+      stream.addEventListener('open', function () { if (es === stream) row.hidden = false })
+      // Only an explicit shutdown end permits one delayed reconnect. Errors
+      // must not let EventSource retry and spend the network's miss budget.
+      stream.addEventListener('end', function (e) {
+        if (es !== stream) return
+        stream.close()
+        es = null
+        row.hidden = true
+        var end = null
+        try { end = JSON.parse(e.data) } catch { return }
+        if (end && end.reconnect === true) {
+          setTimeout(connect, 25000)
+        }
+      })
+      stream.addEventListener('error', function () {
+        stream.close()
+        if (es === stream) { es = null; row.hidden = true }
+      })
+      stream.addEventListener('version', function (e) {
+        if (es !== stream) return
+        var v = null
+        try { v = JSON.parse(e.data) } catch (x) { return }
+        if (!v || !Number.isSafeInteger(v.version) || v.version < 1 || v.version === shown) return
+        if (typeof v.published !== 'string' || !Number.isFinite(Date.parse(v.published))) return
+        if (typeof v.size !== 'string' || !Number.isSafeInteger(v.files) || v.files < 0) return
+        shown = v.version
+        panelShows(v)
+        reload()
+      })
+    }
+    connect()
     function reload() {
       if (pending) { again = true; return }
       try {
@@ -283,12 +303,20 @@
         if (loc.origin !== location.origin || loc.pathname.indexOf('/__redrop/') === 0) return
         saved = { x: win.scrollX, y: win.scrollY }
         pending = true
+        // A cancelled beforeunload prompt produces no load event. Forget the
+        // attempt after 30 s so a later version can reload, without retrying it.
+        reloadTimer = setTimeout(function () {
+          pending = false; saved = null; again = false; reloadTimer = 0
+        }, 30000)
         loc.reload()
       } catch (x) {
-        pending = false
+        clearTimeout(reloadTimer)
+        pending = false; saved = null; again = false; reloadTimer = 0
       }
     }
     frame.addEventListener('load', function () {
+      clearTimeout(reloadTimer)
+      reloadTimer = 0
       if (!pending) return
       pending = false
       var at = saved

@@ -18,11 +18,11 @@ import (
 const livePath = reservedPrefix + "live"
 
 const (
-	// liveRetry is how long a browser waits before reconnecting a dropped
-	// stream: longer than the CLI's renewal (a third of the lease), so after
-	// a server restart the lease is back before pages reconnect.
+	// liveRetry is the delay advertised for a graceful shutdown's single
+	// reconnect. Errors never retry automatically.
 	liveRetry = 25 * time.Second
-	// liveWriteTimeout drops a viewer that stops reading.
+	// liveWriteTimeout bounds a write once socket buffers fill. Idle streams
+	// remain open even if the viewer isn't reading; admission caps bound them.
 	liveWriteTimeout = 10 * time.Second
 	// liveBusyRetry is the Retry-After of a refused stream.
 	liveBusyRetry = 60
@@ -69,10 +69,11 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request, a *store.Artifact
 	hd := w.Header()
 	hd.Set("Content-Type", "text/event-stream; charset=utf-8")
 	hd.Set("X-Accel-Buffering", "no") // a buffering proxy would hold events back
+	// Keep the write deadline through net/http's terminating chunk. Closing
+	// HTTP/1.1 connections prevents a later request inheriting it. HTTP/2
+	// deadlines apply only to this stream.
+	hd.Set("Connection", "close")
 	rc := http.NewResponseController(w)
-	// The deadline would outlive the stream on a reused HTTP/1.1
-	// connection; the server sets none of its own (no WriteTimeout).
-	defer rc.SetWriteDeadline(time.Time{})
 	send := func(msg string) bool {
 		if err := rc.SetWriteDeadline(time.Now().Add(liveWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			return false
@@ -114,7 +115,9 @@ func (h *Handler) live(w http.ResponseWriter, r *http.Request, a *store.Artifact
 		case <-r.Context().Done():
 			return
 		case <-st.Quit():
-			// Shutting down: no "end", so pages reconnect to the restarted server.
+			// Only an explicit shutdown requests a reconnect. A dropped stream
+			// must not make every tab behind one NAT spend the miss budget.
+			send("event: end\ndata: {\"reconnect\":true}\n\n")
 			return
 		case <-st.Changed():
 			msg, more = recheck()

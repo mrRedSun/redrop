@@ -70,12 +70,11 @@ class Node {
 }
 
 class FakeEventSource {
-  static last: FakeEventSource | null = null
   listeners: Record<string, Listener[]> = {}
   readyState = 0
   closed = false
   url: string
-  constructor(url: string) { this.url = url; FakeEventSource.last = this }
+  constructor(url: string) { this.url = url }
   addEventListener(type: string, fn: Listener) { (this.listeners[type] ??= []).push(fn) }
   close() { this.closed = true; this.readyState = 2 }
   emit(type: string, data?: unknown) {
@@ -138,19 +137,46 @@ function page(opts: { live?: boolean; version?: number; frameAt?: string; feedba
     createTextNode: (text: string) => new Node('#text', { text }),
   })
   viewerDoc.appendChild(body)
-  FakeEventSource.last = null
+  const streams: FakeEventSource[] = []
+  class EventSource extends FakeEventSource {
+    constructor(url: string) { super(url); streams.push(this) }
+  }
+  // Only timeouts are needed here; address-bar polling stays inert.
+  let now = 0, nextTimer = 1
+  const timers = new Map<number, { fn: () => void; due: number }>()
+  const clock = {
+    setTimeout(fn: () => void, ms: number) { const id = nextTimer++; timers.set(id, { fn, due: now + ms }); return id },
+    clearTimeout(id: number) { timers.delete(id) },
+    advance(ms: number) {
+      const end = now + ms
+      for (;;) {
+        const due = [...timers.entries()].filter(([, t]) => t.due <= end).sort((a, b) => a[1].due - b[1].due)[0]
+        if (!due) break
+        now = due[1].due
+        timers.delete(due[0])
+        due[1].fn()
+      }
+      now = end
+    },
+    get pending() { return timers.size },
+  }
+  const viewerWindow = Object.assign(new Node('#window'), { Intl, EventSource })
   const top = new URL('/docs/a.html?x=1', ORIGIN)
   const context = vm.createContext({
-    window: { Intl, EventSource: FakeEventSource },
+    window: viewerWindow,
     document: viewerDoc,
     history: { state: null, replaceState() {}, pushState() { throw new Error('the viewer must never push history entries') } },
     location: { origin: ORIGIN, pathname: top.pathname, search: top.search, hash: top.hash },
     URL, URLSearchParams, Date, Intl, Array, JSON, Number, String,
     setInterval: () => 0, clearInterval: () => {},
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
   })
   vm.runInContext(source, context)
   return {
-    es: FakeEventSource.last as FakeEventSource | null,
+    es: streams[0] ?? null,
+    streams, clock,
+    pagehide() { viewerWindow.dispatch('pagehide', { persisted: true }) },
+    pageshow() { viewerWindow.dispatch('pageshow', { persisted: true }) },
     row, shown, size, revs, form, calls, writes,
     frame: doc,
     // The frame finishes loading a document (a reload keeps the URL).
@@ -170,28 +196,132 @@ await test('without the live row, nothing connects', () => {
   assert.equal(p.es, null)
 })
 
-await test('the stream opens; the row shows only while it is open', () => {
-  const p = page()
-  assert.equal(p.es!.url, '/__redrop/live')
-  assert.equal(p.row!.hidden, true)
-  p.es!.emit('open')
-  assert.equal(p.row!.hidden, false)
-  // A dropped stream reconnects by itself: the row stays.
-  p.es!.readyState = 0
-  p.es!.emit('error')
-  assert.equal(p.row!.hidden, false)
-  // Closed for good (refused): the row goes.
-  p.es!.readyState = 2
-  p.es!.emit('error')
-  assert.equal(p.row!.hidden, true)
+await test('every error closes the stream, hides the row and never retries', () => {
+  for (const state of [0, 1, 2]) {
+    const p = page()
+    assert.equal(p.es!.url, '/__redrop/live')
+    assert.equal(p.row!.hidden, true)
+    p.es!.emit('open')
+    assert.equal(p.row!.hidden, false)
+    p.es!.readyState = state
+    p.es!.emit('error')
+    assert.equal(p.es!.closed, true, `readyState ${state}`)
+    assert.equal(p.row!.hidden, true)
+    p.clock.advance(100_000)
+    assert.equal(p.streams.length, 1)
+    assert.equal(p.clock.pending, 0)
+  }
 })
 
-await test('"end" closes the stream and hides the row', () => {
+await test('end always closes and hides; only reconnect: true permits a retry', () => {
+  for (const data of [undefined, {}, 'not json', 'null', { reconnect: false }, { reconnect: 'true' }]) {
+    const p = page()
+    p.es!.emit('open')
+    p.es!.emit('end', data)
+    assert.equal(p.es!.closed, true)
+    assert.equal(p.row!.hidden, true)
+    p.clock.advance(100_000)
+    assert.equal(p.streams.length, 1)
+    assert.equal(p.clock.pending, 0)
+  }
+})
+
+await test('an explicit end retries once after 25 seconds and the initial version catches up', () => {
   const p = page()
   p.es!.emit('open')
-  p.es!.emit('end', {})
+  p.es!.emit('end', { reconnect: true })
   assert.equal(p.es!.closed, true)
   assert.equal(p.row!.hidden, true)
+  // Duplicate or queued events from the closed source cannot reconnect or reload.
+  p.es!.emit('end', { reconnect: true })
+  p.es!.emit('error')
+  p.es!.emit('open')
+  p.es!.emit('version', v(2))
+  assert.equal(p.row!.hidden, true)
+  assert.deepEqual(p.calls, [])
+  assert.equal(p.clock.pending, 1)
+  p.clock.advance(24_999)
+  assert.equal(p.streams.length, 1)
+  p.clock.advance(1)
+  assert.equal(p.streams.length, 2)
+  const retry = p.streams[1]
+  assert.equal(retry.url, '/__redrop/live')
+  assert.equal(p.row!.hidden, true)
+  retry.emit('open')
+  // Late callbacks from the previous source must not affect the new one.
+  p.es!.emit('end', { reconnect: true })
+  p.es!.emit('error')
+  p.es!.emit('open')
+  p.es!.emit('version', v(99))
+  assert.equal(p.row!.hidden, false)
+  assert.equal(p.clock.pending, 0)
+  assert.deepEqual(p.calls, [])
+  retry.emit('version', v(3))
+  assert.deepEqual(p.calls, ['reload /docs/a.html?x=1#s'])
+  p.load()
+  p.clock.advance(100_000)
+  assert.equal(p.streams.length, 2)
+  assert.equal(p.clock.pending, 0)
+})
+
+await test('a failed shutdown retry closes without another retry', () => {
+  const p = page()
+  p.es!.emit('end', { reconnect: true })
+  p.clock.advance(25_000)
+  const retry = p.streams[1]
+  assert.ok(retry)
+  retry.emit('error')
+  assert.equal(retry.closed, true)
+  assert.equal(p.row!.hidden, true)
+  p.clock.advance(100_000)
+  assert.equal(p.streams.length, 2)
+  assert.equal(p.clock.pending, 0)
+})
+
+await test('persisted page transitions do not terminate an active stream', () => {
+  const p = page()
+  p.es!.emit('open')
+  p.pagehide()
+  p.pageshow()
+  assert.equal(p.es!.closed, false)
+  assert.equal(p.row!.hidden, false)
+  assert.equal(p.streams.length, 1)
+  p.es!.emit('version', v(2))
+  assert.deepEqual(p.calls, ['reload /docs/a.html?x=1#s'])
+})
+
+await test('persisted page transitions preserve the single scheduled reconnect', () => {
+  const p = page()
+  p.es!.emit('end', { reconnect: true })
+  p.clock.advance(10_000)
+  p.pagehide()
+  p.pageshow()
+  p.clock.advance(14_999)
+  assert.equal(p.streams.length, 1)
+  p.clock.advance(1)
+  assert.equal(p.streams.length, 2)
+  p.clock.advance(100_000)
+  assert.equal(p.streams.length, 2)
+  assert.equal(p.clock.pending, 0)
+})
+
+await test('persisted page transitions never revive terminal end or error', () => {
+  for (const event of ['end', 'error']) {
+    const p = page()
+    p.es!.emit('open')
+    p.es!.emit(event, {})
+    p.pagehide()
+    p.pageshow()
+    p.es!.emit('end', { reconnect: true })
+    p.es!.emit('open')
+    p.es!.emit('version', v(2))
+    assert.equal(p.es!.closed, true)
+    assert.equal(p.row!.hidden, true)
+    p.clock.advance(100_000)
+    assert.equal(p.streams.length, 1)
+    assert.equal(p.clock.pending, 0)
+    assert.deepEqual(p.calls, [])
+  }
 })
 
 await test('a new version reloads the frame in place: same path, query and fragment', () => {
@@ -246,6 +376,56 @@ await test('a version that arrives during a reload reloads once more after it', 
   assert.equal(p.calls.length, 2)
 })
 
+await test('a cancelled reload recovers after 30 seconds without reloading on its own', () => {
+  const p = page()
+  p.scroll(0, 800)
+  p.es!.emit('version', v(2))
+  p.es!.emit('version', v(3))
+  // No load event: the visitor cancelled the artifact's beforeunload prompt.
+  p.clock.advance(30_000)
+  assert.deepEqual(p.calls, ['reload /docs/a.html?x=1#s'])
+  p.scroll(10, 300)
+  p.es!.emit('version', v(4))
+  assert.equal(p.calls.length, 2)
+  p.load()
+  assert.deepEqual(p.calls, ['reload /docs/a.html?x=1#s', 'reload /docs/a.html?x=1#s', 'scrollTo 10,300'])
+  assert.deepEqual(p.writes, [])
+})
+
+await test('reload timeout discards stale scroll and the queued trailing reload', () => {
+  const p = page()
+  p.scroll(0, 800)
+  p.es!.emit('version', v(2))
+  p.es!.emit('version', v(3))
+  assert.equal(p.clock.pending, 1)
+  p.clock.advance(29_999)
+  assert.equal(p.clock.pending, 1)
+  p.clock.advance(1)
+  assert.equal(p.clock.pending, 0)
+  p.load()
+  assert.deepEqual(p.calls, ['reload /docs/a.html?x=1#s'])
+})
+
+await test('load clears the old timeout before a coalesced trailing reload starts', () => {
+  const p = page()
+  p.es!.emit('version', v(2))
+  p.clock.advance(20_000)
+  p.es!.emit('version', v(3))
+  p.load()
+  assert.equal(p.calls.length, 2)
+  assert.equal(p.clock.pending, 1)
+  // The first reload's deadline must not clear the second reload's pending state.
+  p.clock.advance(10_000)
+  p.es!.emit('version', v(4))
+  assert.equal(p.calls.length, 2)
+  p.load()
+  assert.equal(p.calls.length, 3)
+  p.load()
+  assert.equal(p.clock.pending, 0)
+  p.clock.advance(100_000)
+  assert.equal(p.calls.length, 3)
+})
+
 await test('another origin, or redrop\'s own pages in the frame, are not reloaded', () => {
   for (const at of ['https://elsewhere.example/x', '/__redrop/v/1/docs/a.html']) {
     const p = page({ frameAt: at })
@@ -254,10 +434,21 @@ await test('another origin, or redrop\'s own pages in the frame, are not reloade
   }
 })
 
-await test('malformed events are ignored', () => {
+await test('malformed events are ignored without poisoning the next valid version', () => {
   const p = page()
-  for (const data of ['not json', 'null', '{"version":"2"}', '{}']) p.es!.emit('version', data)
+  const malformed = [
+    'not json', 'null', '{"version":"2"}', '{}', '{"version":2}',
+    { ...v(2), published: 'invalid date' }, { ...v(2), published: null },
+    { ...v(2), size: {} }, { ...v(2), files: -1 }, { ...v(2), files: '1' },
+    { ...v(2), version: 0 }, { ...v(2), version: -1 }, { ...v(2), version: 2.5 },
+    { ...v(2), version: Number.MAX_SAFE_INTEGER + 1 },
+    '{"version":1e999,"published":"2026-01-02T03:04:05Z","size":"3 KB","files":1}',
+  ]
+  for (const data of malformed) assert.doesNotThrow(() => p.es!.emit('version', data))
   assert.deepEqual(p.calls, [])
+  assert.equal(p.form!.getAttribute('data-version'), '1')
+  p.es!.emit('version', v(2))
+  assert.deepEqual(p.calls, ['reload /docs/a.html?x=1#s'])
 })
 
 await test('the panel follows: version line, size, feedback version, current mark', () => {

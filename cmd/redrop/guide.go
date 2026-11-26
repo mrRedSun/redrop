@@ -276,7 +276,8 @@ HTML page or folder; --no-info links, direct views (?redrop-info=0) and file
 artifacts are not reloaded, and viewers of an older version stay on it.
 Reloads never use a view, so view-limited and --once links work too. Watch
 prints "live reload on" (live_on), or "live reload off" with the server's
-reason (live_off, e.g. the info button is off) and keeps watching without it.
+reason (live_off, e.g. the info button is off) and keeps watching; a
+conflict is retried at the renewal interval, and live_on reports recovery.
 live_error means renewing failed and is retried. Live mode ends within a
 minute after watch stops or dies; while it is off, viewer pages make no
 extra requests.

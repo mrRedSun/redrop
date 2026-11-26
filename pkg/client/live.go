@@ -64,9 +64,9 @@ func NewLiveSession() string {
 // lease as the server asks, then releases it. It reports through
 // opts.OnNotice: NoticeLiveOn when the lease is held (again), NoticeLiveError
 // on the first of a run of failed renewals (network, 5xx, 429), which are
-// retried, and NoticeLiveOff when the server refuses live reload for good
-// (for example, the info button is off); KeepLive then returns. It never
-// fails the watch.
+// retried, and NoticeLiveOff on the first of a run of conflicts (409), which
+// are retried at the last known renewal interval (20 s by default). Other
+// permanent refusals report NoticeLiveOff and return. It never fails the watch.
 func KeepLive(ctx context.Context, h LiveHolder, id string, opts LiveOptions) {
 	clock := opts.Clock
 	if clock == nil {
@@ -81,9 +81,11 @@ func KeepLive(ctx context.Context, h LiveHolder, id string, opts LiveOptions) {
 			opts.OnNotice(n)
 		}
 	}
-	// held: a lease may exist on the server, so release it at the end.
-	// on: the last attempt succeeded (NoticeLiveOn was reported).
-	held, on, failing := false, false, false
+	// A successful hold must be released even if cancellation arrives with
+	// its response. The last notice suppresses repeats within each run.
+	held := false
+	var state NoticeKind
+	renew := liveDefaultRenew
 	defer func() {
 		if !held {
 			return
@@ -93,29 +95,40 @@ func KeepLive(ctx context.Context, h LiveHolder, id string, opts LiveOptions) {
 		h.ReleaseLive(rctx, id, session) // best effort: an unreleased lease lapses
 	}()
 	for {
-		lease, err := h.HoldLive(ctx, id, session)
 		if ctx.Err() != nil {
 			return
 		}
-		wait := liveDefaultRenew
+		lease, err := h.HoldLive(ctx, id, session)
+		if err == nil {
+			held = true
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		wait := renew
+		var apiErr *Error
 		switch {
 		case err == nil:
-			held = true
 			if lease.RenewAfterSeconds > 0 {
-				wait = time.Duration(lease.RenewAfterSeconds) * time.Second
+				renew = time.Duration(lease.RenewAfterSeconds) * time.Second
 			}
-			if !on {
+			wait = renew
+			if state != NoticeLiveOn {
 				notify(Notice{Kind: NoticeLiveOn})
 			}
-			on, failing = true, false
+			state = NoticeLiveOn
+		case errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict:
+			if state != NoticeLiveOff {
+				notify(Notice{Kind: NoticeLiveOff, Err: err})
+			}
+			state = NoticeLiveOff
 		case transient(err):
-			if !failing {
+			if state != NoticeLiveError {
 				notify(Notice{Kind: NoticeLiveError, Err: err})
 			}
-			on, failing = false, true
+			state = NoticeLiveError
 			wait = liveRetryWait
-			var apiErr *Error
-			if errors.As(err, &apiErr) && apiErr.RetryAfter > wait {
+			if apiErr != nil && apiErr.RetryAfter > wait {
 				wait = min(apiErr.RetryAfter, MaxRetryAfter)
 			}
 		default:

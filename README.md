@@ -193,7 +193,9 @@ artifact. It needs the info button and an HTML page or folder: `--no-info`
 links, direct views (`?redrop-info=0`) and file artifacts are not reloaded.
 Reloads never use a view, so view-limited and `--once` links work too. Live
 mode ends within a minute after `watch` stops or dies; while it is off,
-viewer pages make no extra requests. See
+viewer pages make no extra requests. A temporary refusal (the info button
+off, or all sessions in use) is retried at the renewal interval, so fixing
+the cause restores live reload without restarting `watch`. See
 [`docs/DESIGN.md`](docs/DESIGN.md#live-reload).
 
 ## Develop
@@ -231,7 +233,7 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
 | `REDROP_LIVE_LEASE` | `60s` (15s to 10m): how long a `redrop watch` session's live reload lease lasts; the CLI renews it every third of that |
 | `REDROP_LIVE_KEEPALIVE` | `20s` (1s to 29s): keep-alive interval of live reload streams; keep it under your proxies' idle timeout (Cloudflare: about 100 s) |
-| `REDROP_LIVE_MAX_STREAMS`, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` | `1000`, `100`: open live reload streams on the server and per artifact (16 per client network); beyond them viewers get no live reload |
+| `REDROP_LIVE_MAX_STREAMS`, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` | `1000`, `100`: open live reload streams on the server and per artifact (plus one quarter of the server cap per artifact owner, 32 watch leases per owner, and 16 per client network); beyond them viewers get no live reload |
 
 ## Reverse proxy
 

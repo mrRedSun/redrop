@@ -69,7 +69,8 @@ its frame and keeps the page and scroll position. It needs the info button
 it. Reloading never uses a view, so view-limited and --once links work too.
 Live mode lasts while watch runs and ends within a minute after it stops or
 dies. Watch prints "live reload on", or why the server refused it, and goes
-on watching either way.
+on watching either way; a refusal such as the info button being off is
+retried, so turning the button on restores live reload without a restart.
 
 If files change while a version is being packed or uploaded, or the folder
 is empty (a build tool cleaned it), watch waits for the next change instead

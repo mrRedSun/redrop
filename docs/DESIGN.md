@@ -1243,8 +1243,9 @@ and reloads its frame.
     top-level load.
   * A viewer showing an older version (`?redrop-version=N`) is not live.
   * The server refuses a lease (`409`) for an artifact with the info button
-    off or a `file` current version, and `watch` says so and carries on
-    without live reload.
+    off or a `file` current version. `watch` reports live reload off and
+    retries at the lease renewal interval, so enabling the info button or
+    publishing a framed version can restore it without restarting watch.
 * **When it is off, viewers make no extra requests.** The viewer page
   includes the live element only while a lease is active. A page whose
   stream ends is told so (`end`) and stops; it does not poll.
@@ -1268,14 +1269,24 @@ and reloads its frame.
   third of that (20 s by default), so a missed renewal or two does not end
   it. Live mode is on while any session's lease is unexpired, so two
   watchers on one artifact don't switch each other off.
-* **Bounds.** At most 8 sessions per artifact (`409` beyond) and 10,000
-  leases on the server (`429` beyond). Expired leases are pruned by the
-  maintenance sweep and whenever a lease on the same artifact changes.
+* **Bounds.** At most 8 sessions per artifact and 32 per owner across their
+  artifacts (`409` beyond either), plus 10,000 leases on the server (`429`
+  beyond). Renewals of existing sessions still work at capacity. Expired
+  leases are pruned by the maintenance sweep, when a lease on the same
+  artifact changes, and before refusing an owner or server whose share is
+  full. One account cannot occupy every server lease slot.
+* A `409` reports `live_off` once per consecutive conflict run and retries
+  at the last successful renewal interval, 20 s before the first success.
+  A later success reports `live_on`. Network failures, `5xx` and `429` keep
+  their bounded retries; authentication and not-found errors stop live
+  renewal without failing the file watcher.
 * Leases live in the server's memory, not the database: there is no
-  migration, and a restart drops them. The CLI renews within 20 s and the
-  viewer reconnects after 25 s (`retry`), so a restart costs at most one
-  missed update for open pages. Rolling back the binary just removes the
-  feature.
+  migration, and a restart drops them. At default settings the CLI attempts
+  renewal every 20 s, or after 5 s following a transient failure, subject
+  to `Retry-After`. Viewer restart recovery is best effort, not an update
+  guarantee: graceful shutdown requests one reconnect after 25 s. An abrupt
+  drop, a longer outage, or reconnecting before the lease is restored can
+  require manually reloading the viewer. Rolling back removes the feature.
 
 ### Stream
 
@@ -1294,7 +1305,8 @@ stream.
 * **Events.**
   * On connect: `retry: 25000` and a `version` event with the current
     version, so a page that missed an update between its load and the
-    connection catches up.
+    connection catches up. The viewer closes every failed EventSource;
+    this advertised retry does not authorize automatic error reconnects.
   * `version` with `{"version", "published", "size", "files"}` whenever the
     current version changes (a publish or a rollback). These are the
     shown-version facts the info panel already gives a viewer.
@@ -1313,14 +1325,25 @@ stream.
   never blocks: pokes coalesce, and each stream reads the artifact itself.
 * **Bounds.** At most `REDROP_LIVE_MAX_STREAMS` (default 1000) streams on
   the server, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` (default 100) per
-  artifact, and 16 per client network (keyed like the miss limiter, so a
-  team behind one address still fits). Beyond
-  them the answer is `503` with `Retry-After`; the page shows no live
-  indicator. Each write has a 10 s deadline, so a viewer that stops reading
-  is dropped instead of holding a goroutine and buffers. A stream holds
-  about one goroutine and a few KB.
-* **Shutdown.** Streams end when the server starts shutting down, without
-  `end`, so pages reconnect to the restarted server.
+  artifact, one quarter of the server cap per artifact owner (rounded down,
+  minimum 1; default 250), and 16 per client network (keyed like the miss
+  limiter, so a team behind one address still fits). Beyond any limit the
+  answer is `503` with `Retry-After`; the page shows no live indicator.
+  Each write has a 10 s deadline, retained through the terminating chunk;
+  HTTP/1.1 streams close their connection rather than reuse its deadline.
+  A reader is dropped only once writes block after socket buffers fill.
+  With little traffic, a non-reading client can occupy a slot indefinitely,
+  like an idle tab. The admission caps bound those clients. A stream holds
+  about one goroutine and a few KB in the process, plus kernel send buffers
+  that can remain allocated after close until TCP gives up.
+* **Shutdown and reconnects.** Graceful shutdown sends
+  `end` with `{"reconnect":true}` before closing. The viewer closes that
+  EventSource, hides the indicator and makes one attempt after 25 s. Every
+  `error` closes the source without retry, including an error on that one
+  attempt. Terminal `end` events never retry. This prevents tabs behind a
+  shared network from spending its miss budget on automatic reconnects
+  when leases have disappeared. A refused initial or explicitly requested
+  connection still spends one token, preserving the identical miss.
 
 ### Viewer side
 
@@ -1334,7 +1357,10 @@ stream.
   keeps its path, query and fragment and adds no history entry. It skips the
   reload when the frame is on another origin or on a `/__redrop/` page (an
   older version's files). Events that arrive during a reload trigger one
-  more reload once it finishes.
+  more reload once it finishes. A 30 s timeout clears pending reload state
+  without making a request, so a cancelled `beforeunload` prompt cannot
+  suppress every later version. A later distinct version retries the reload;
+  a real load exceeding 30 s may lose saved scroll and trailing state.
 * **Scroll.** Before reloading it reads the frame's scroll position. After
   the reload, if the browser left the page at the top, it scrolls the frame
   back. Reading the scroll position, `location.reload()` and `scrollTo()` are

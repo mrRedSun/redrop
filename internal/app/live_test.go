@@ -139,7 +139,9 @@ func (s *liveStream) expectVersion(t *testing.T, n int) {
 // expectEnd reads the "end" event and the stream's close.
 func (s *liveStream) expectEnd(t *testing.T) {
 	t.Helper()
-	if ev, ok := s.nextEvent(t); !ok || ev.Event != "end" {
+	// Normal access/lease endings must not ask for reconnect or emit
+	// unrelated events. The hub test separately pins the synchronous poke.
+	if ev, ok := s.next(t); !ok || ev.Event != "end" || ev.Data != "{}" {
 		t.Fatalf("want end, got %+v (open=%v)", ev, ok)
 	}
 	if ev, ok := s.next(t); ok {
@@ -194,10 +196,11 @@ func TestLiveLeaseAPI(t *testing.T) {
 	c := client.New(h.srv.URL, token)
 	a := shareFile(t, c, "a.html", "<p>a</p>", client.PublishOptions{})
 
+	started := time.Now()
 	r := h.holdLive(token, a.ID, liveSession)
 	expectStatus(t, r, http.StatusOK, "hold")
 	l := decode[api.LiveLease](t, r)
-	if l.RenewAfterSeconds != 20 || time.Until(l.ExpiresAt) <= 0 || time.Until(l.ExpiresAt) > time.Minute {
+	if l.RenewAfterSeconds != 20 || !l.ExpiresAt.After(started) {
 		t.Fatalf("lease %+v: want a 60 s lease renewed every 20 s", l)
 	}
 	// Renewing is the same call; the client library does the same.
@@ -237,6 +240,50 @@ func TestLiveLeaseAPI(t *testing.T) {
 		expectStatus(t, h.holdLive(token, a.ID, "watch-session-"+strings.Repeat("abcdefgh"[i:i+1], 4)), http.StatusOK, "session")
 	}
 	expectStatus(t, h.holdLive(token, a.ID, "watch-session-ninth"), http.StatusConflict, "ninth session")
+}
+
+func TestLiveOwnerShareLeavesAnotherWatchLive(t *testing.T) {
+	t.Setenv("REDROP_LIVE_MAX_STREAMS", "4") // one stream per owner
+	h := newHarness(t)
+	token := h.setupAdmin()
+	c := client.New(h.srv.URL, token)
+	var first *api.Artifact
+	for range 4 {
+		a := shareFile(t, c, "a.html", "<p>a</p>", client.PublishOptions{})
+		if first == nil {
+			first = a
+		}
+		for i := range 8 {
+			session := "watch-session-" + strings.Repeat("abcdefgh"[i:i+1], 4)
+			expectStatus(t, h.holdLive(token, a.ID, session), http.StatusOK, "owner's lease share")
+		}
+	}
+	extra := shareFile(t, c, "extra.html", "<p>extra</p>", client.PublishOptions{})
+	expectStatus(t, h.holdLive(token, extra.ID, liveSession), http.StatusConflict, "33rd owner lease")
+	s, r, b := h.openLive(first.URL, stream)
+	if s == nil {
+		t.Fatalf("first owner's stream: %d %s", r.StatusCode, b)
+	}
+	s.expectVersion(t, 1)
+	if s, r, _ := h.openLive(first.URL, stream); s != nil || r.StatusCode != http.StatusServiceUnavailable {
+		t.Fatal("first owner exceeded their stream share")
+	}
+
+	// The same lease call watch uses still succeeds for another account,
+	// and its viewer receives updates while the first account is at capacity.
+	otherToken := h.secondUser("bob")
+	other := client.New(h.srv.URL, otherToken)
+	a := shareFile(t, other, "b.html", "<p>b</p>", client.PublishOptions{})
+	if _, err := other.HoldLive(context.Background(), a.ID, liveSession); err != nil {
+		t.Fatal(err)
+	}
+	s, r, b = h.openLive(a.URL, stream)
+	if s == nil {
+		t.Fatalf("another owner's stream: %d %s", r.StatusCode, b)
+	}
+	s.expectVersion(t, 1)
+	publish(t, other, a.ID, "<p>updated</p>")
+	s.expectVersion(t, 2)
 }
 
 func TestLiveViewerPage(t *testing.T) {
@@ -342,7 +389,6 @@ func TestLiveStreamIdenticalMiss(t *testing.T) {
 }
 
 func TestLiveStreamEvents(t *testing.T) {
-	t.Setenv("REDROP_LIVE_KEEPALIVE", "1s")
 	h := newHarness(t)
 	token := h.setupAdmin()
 	c := client.New(h.srv.URL, token)
@@ -361,10 +407,6 @@ func TestLiveStreamEvents(t *testing.T) {
 	if !ok || first.Retry != "25000" || first.Event != "version" || !strings.Contains(first.Data, `"version":1`) {
 		t.Fatalf("first event %+v", first)
 	}
-	// Keep-alives arrive on an idle stream.
-	if ev, _ := s.next(t); ev.Comment != "keep-alive" {
-		t.Fatalf("want a keep-alive, got %+v", ev)
-	}
 	publish(t, c, a.ID, "<p>two</p>")
 	s.expectVersion(t, 2)
 	if _, err := c.ActivateVersion(context.Background(), a.ID, 1); err != nil {
@@ -379,8 +421,24 @@ func TestLiveStreamEvents(t *testing.T) {
 	publish(t, c, a.ID, "<p>three</p>")
 	s.expectVersion(t, 3)
 
-	// Releasing the lease ends the stream at once.
+	// Observe the service's notification independently of the HTTP stream's
+	// periodic rechecks. Removing the release poke must fail this test even
+	// if a later keep-alive would discover that the lease is gone.
+	record, err := h.app.db.ArtifactByID(context.Background(), a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := h.app.Sharing.OpenLiveStream(record, "release-observer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
 	expectStatus(t, h.releaseLive(token, a.ID, liveSession), http.StatusOK, "release")
+	select {
+	case <-observer.Changed():
+	default:
+		t.Fatal("release returned without notifying the open streams")
+	}
 	s.expectEnd(t)
 
 	// Revoking ends it too, and so does a password change, for streams
@@ -400,12 +458,15 @@ func TestLiveStreamEvents(t *testing.T) {
 	s, _, _ = h.openLive(b2.URL, stream)
 	s.expectVersion(t, 1)
 	expectStatus(t, h.releaseLive(token, b2.ID, liveSession), http.StatusOK, "release one")
-	if ev, ok := s.next(t); !ok || ev.Comment != "keep-alive" {
-		t.Fatalf("after releasing one of two sessions: %+v (open=%v)", ev, ok)
-	}
+	publish(t, c, b2.ID, "<p>still live</p>")
+	s.expectVersion(t, 2)
 
-	// Server shutdown closes streams without "end", so pages reconnect.
+	// Graceful shutdown asks for exactly one delayed reconnect. A dropped
+	// connection without this event must not trigger automatic requests.
 	h.app.Sharing.EndLiveStreams()
+	if ev, ok := s.next(t); !ok || ev.Event != "end" || ev.Data != `{"reconnect":true}` {
+		t.Fatalf("shutdown reconnect event: %+v (open=%v)", ev, ok)
+	}
 	if ev, ok := s.next(t); ok {
 		t.Fatalf("stream open after shutdown began: %+v", ev)
 	}
@@ -414,8 +475,58 @@ func TestLiveStreamEvents(t *testing.T) {
 	}
 }
 
+func TestLiveStreamKeepAlive(t *testing.T) {
+	t.Setenv("REDROP_LIVE_KEEPALIVE", "1s")
+	h := newHarness(t)
+	token := h.setupAdmin()
+	a := h.liveArtifact(client.New(h.srv.URL, token), token, client.PublishOptions{})
+	s, r, b := h.openLive(a.URL, stream)
+	if s == nil {
+		t.Fatalf("no stream: %d %s", r.StatusCode, b)
+	}
+	s.expectVersion(t, 1)
+	if ev, ok := s.next(t); !ok || ev.Comment != "keep-alive" {
+		t.Fatalf("want a keep-alive, got %+v (open=%v)", ev, ok)
+	}
+}
+
+func TestLiveStreamLifecycleEnds(t *testing.T) {
+	for _, change := range []string{"release", "owner revoke", "admin revoke", "rotation", "deletion"} {
+		t.Run(change, func(t *testing.T) {
+			h := newHarness(t)
+			token := h.setupAdmin()
+			c := client.New(h.srv.URL, token)
+			a := h.liveArtifact(c, token, client.PublishOptions{})
+			s, r, b := h.openLive(a.URL, stream)
+			if s == nil {
+				t.Fatalf("no stream: %d %s", r.StatusCode, b)
+			}
+			s.expectVersion(t, 1)
+			ctx := context.Background()
+			var err error
+			switch change {
+			case "release":
+				expectStatus(t, h.releaseLive(token, a.ID, liveSession), http.StatusOK, change)
+			case "owner revoke":
+				yes := true
+				_, err = c.UpdateArtifact(ctx, a.ID, &api.UpdateArtifactRequest{Revoked: &yes})
+			case "admin revoke":
+				expectStatus(t, h.do("PATCH", "/api/v1/admin/artifacts/"+a.ID, api.AdminArtifactUpdate{Revoked: true}, true), http.StatusOK, change)
+			case "rotation":
+				_, err = c.RotateArtifact(ctx, a.ID)
+			case "deletion":
+				err = c.DeleteArtifact(ctx, a.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.expectEnd(t)
+		})
+	}
+}
+
 func TestLiveStreamLimits(t *testing.T) {
-	t.Setenv("REDROP_LIVE_MAX_STREAMS", "4")
+	t.Setenv("REDROP_LIVE_MAX_STREAMS", "16")
 	t.Setenv("REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT", "2")
 	h := newHarness(t)
 	token := h.setupAdmin()
@@ -446,7 +557,19 @@ func TestLiveStreamLimits(t *testing.T) {
 	refused(a, "third stream on one artifact")
 	open(b)
 	open(b)
-	refused(d, "fifth stream on the server")
+	refused(d, "fifth stream for one owner")
+	// Each owner can hold a quarter of the global cap. Fill the remaining
+	// shares with other accounts before exercising the server-wide cap.
+	for _, name := range []string{"bob", "carol", "dana"} {
+		tok := h.secondUser(name)
+		other := client.New(h.srv.URL, tok)
+		for range 2 {
+			art := h.liveArtifact(other, tok, client.PublishOptions{})
+			open(art)
+			open(art)
+		}
+	}
+	refused(d, "seventeenth stream on the server")
 	// A closed stream frees its slot.
 	a1.close()
 	waitFor(t, "the closed stream's slot", func() bool {

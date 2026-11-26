@@ -20,13 +20,14 @@ import (
 const (
 	maxLiveSessions     = 8      // watch sessions holding a lease on one artifact
 	maxLiveLeases       = 10_000 // leases on the server
+	maxLeasesPerOwner   = 32     // watch sessions across an owner's artifacts
 	maxStreamsPerClient = 16     // open streams per client network (a team behind one NAT)
 )
 
 // liveSessionRE is the shape of a watch session's ID, chosen by the CLI.
 var liveSessionRE = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 
-// ErrLiveBusy means a stream limit (server, artifact or client) is reached.
+// ErrLiveBusy means a stream limit (server, owner, artifact or client) is reached.
 var ErrLiveBusy = errors.New("too many live streams")
 
 // LiveLease is a watch session's hold on live mode.
@@ -52,7 +53,7 @@ func (s *Service) HoldLive(ctx context.Context, actor Actor, id, session string)
 	case ModeFilePage:
 		return LiveLease{}, apperr.Conflict("live reload needs redrop's viewer frame; file artifacts are shown on a file page without one")
 	}
-	exp, err := s.live.hold(a.ID, session, s.cfg.LiveLease)
+	exp, err := s.live.hold(a.ID, a.UserID, session, s.cfg.LiveLease)
 	if err != nil {
 		return LiveLease{}, err
 	}
@@ -80,7 +81,7 @@ func (s *Service) Live(a *store.Artifact) bool {
 // network key). The caller has checked access and Live. It returns
 // ErrLiveBusy when a limit is reached.
 func (s *Service) OpenLiveStream(a *store.Artifact, client string) (*LiveStream, error) {
-	return s.live.open(a.ID, client)
+	return s.live.open(a.ID, a.UserID, client)
 }
 
 // EndLiveStreams ends every open stream and refuses new ones. The server
@@ -95,6 +96,7 @@ func (s *Service) changed(id string) { s.live.poke(id) }
 type LiveStream struct {
 	hub        *liveHub
 	artifactID string
+	owner      string
 	client     string
 	poke       chan struct{} // one slot: changes coalesce, senders never block
 	once       sync.Once
@@ -109,6 +111,11 @@ func (st *LiveStream) Quit() <-chan struct{} { return st.hub.quit }
 // Close unregisters the stream. It is safe to call more than once.
 func (st *LiveStream) Close() { st.once.Do(func() { st.hub.remove(st) }) }
 
+type liveLease struct {
+	owner   string
+	expires time.Time
+}
+
 // liveHub holds the leases and the open streams.
 type liveHub struct {
 	now            func() time.Time
@@ -116,24 +123,28 @@ type liveHub struct {
 	maxPerArtifact int
 	quit           chan struct{}
 
-	mu      sync.Mutex
-	leases  map[string]map[string]time.Time // artifact ID -> session -> expiry
-	nLeases int
-	streams map[string]map[*LiveStream]struct{} // artifact ID -> streams
-	clients map[string]int                      // client network -> streams
-	total   int
-	closed  bool
+	mu           sync.Mutex
+	leases       map[string]map[string]liveLease // artifact ID -> session -> lease
+	leaseOwners  map[string]int                  // owner ID -> leases
+	nLeases      int
+	streams      map[string]map[*LiveStream]struct{} // artifact ID -> streams
+	streamOwners map[string]int                      // owner ID -> streams
+	clients      map[string]int                      // client network -> streams
+	total        int
+	closed       bool
 }
 
 func newLiveHub(maxTotal, maxPerArtifact int, now func() time.Time) *liveHub {
 	return &liveHub{
 		now: now, maxTotal: maxTotal, maxPerArtifact: maxPerArtifact, quit: make(chan struct{}),
-		leases: map[string]map[string]time.Time{}, streams: map[string]map[*LiveStream]struct{}{}, clients: map[string]int{},
+		leases: map[string]map[string]liveLease{}, leaseOwners: map[string]int{},
+		streams: map[string]map[*LiveStream]struct{}{}, streamOwners: map[string]int{}, clients: map[string]int{},
 	}
 }
 
-// hold sets session's lease on artifact to expire ttl from now.
-func (h *liveHub) hold(artifact, session string, ttl time.Duration) (time.Time, error) {
+// hold sets session's lease on artifact to expire ttl from now. Owner comes
+// from the verified artifact; renewals do not consume another quota slot.
+func (h *liveHub) hold(artifact, owner, session string, ttl time.Duration) (time.Time, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := h.now()
@@ -143,20 +154,24 @@ func (h *liveHub) hold(artifact, session string, ttl time.Duration) (time.Time, 
 		if len(held) >= maxLiveSessions {
 			return time.Time{}, apperr.Conflict("too many watch sessions hold live reload on this artifact; stop one first")
 		}
-		if h.nLeases >= maxLiveLeases {
+		if h.leaseOwners[owner] >= maxLeasesPerOwner || h.nLeases >= maxLiveLeases {
 			h.pruneAllLocked(now)
+		}
+		if h.leaseOwners[owner] >= maxLeasesPerOwner {
+			return time.Time{}, apperr.Conflict("too many watch sessions hold live reload on your artifacts; the limit is %d per owner; stop one first", maxLeasesPerOwner)
 		}
 		if h.nLeases >= maxLiveLeases {
 			return time.Time{}, apperr.RateLimited("the server holds too many live reload sessions; try again later").WithRetryAfter(ttl)
 		}
 		if held == nil {
-			held = map[string]time.Time{}
+			held = map[string]liveLease{}
 			h.leases[artifact] = held
 		}
+		h.leaseOwners[owner]++
 		h.nLeases++
 	}
 	exp := now.Add(ttl)
-	held[session] = exp
+	held[session] = liveLease{owner: owner, expires: exp}
 	return exp, nil
 }
 
@@ -164,12 +179,7 @@ func (h *liveHub) hold(artifact, session string, ttl time.Duration) (time.Time, 
 // so they end now rather than at their next keep-alive.
 func (h *liveHub) release(artifact, session string) {
 	h.mu.Lock()
-	if held, ok := h.leases[artifact]; ok {
-		if _, ok := held[session]; ok {
-			delete(held, session)
-			h.nLeases--
-		}
-	}
+	h.dropLeaseLocked(artifact, session)
 	h.pruneLocked(artifact, h.now())
 	_, still := h.leases[artifact]
 	h.mu.Unlock()
@@ -183,25 +193,36 @@ func (h *liveHub) on(artifact string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := h.now()
-	for _, exp := range h.leases[artifact] {
-		if exp.After(now) {
+	for _, lease := range h.leases[artifact] {
+		if lease.expires.After(now) {
 			return true
 		}
 	}
 	return false
 }
 
+func (h *liveHub) dropLeaseLocked(artifact, session string) {
+	held := h.leases[artifact]
+	lease, ok := held[session]
+	if !ok {
+		return
+	}
+	delete(held, session)
+	if len(held) == 0 {
+		delete(h.leases, artifact)
+	}
+	if h.leaseOwners[lease.owner]--; h.leaseOwners[lease.owner] == 0 {
+		delete(h.leaseOwners, lease.owner)
+	}
+	h.nLeases--
+}
+
 // pruneLocked drops artifact's expired leases.
 func (h *liveHub) pruneLocked(artifact string, now time.Time) {
-	held := h.leases[artifact]
-	for session, exp := range held {
-		if !exp.After(now) {
-			delete(held, session)
-			h.nLeases--
+	for session, lease := range h.leases[artifact] {
+		if !lease.expires.After(now) {
+			h.dropLeaseLocked(artifact, session)
 		}
-	}
-	if held != nil && len(held) == 0 {
-		delete(h.leases, artifact)
 	}
 }
 
@@ -218,19 +239,20 @@ func (h *liveHub) prune() {
 	h.pruneAllLocked(h.now())
 }
 
-func (h *liveHub) open(artifact, client string) (*LiveStream, error) {
+func (h *liveHub) open(artifact, owner, client string) (*LiveStream, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.closed || h.total >= h.maxTotal || len(h.streams[artifact]) >= h.maxPerArtifact || h.clients[client] >= maxStreamsPerClient {
+	if h.closed || h.total >= h.maxTotal || h.streamOwners[owner] >= max(1, h.maxTotal/4) || len(h.streams[artifact]) >= h.maxPerArtifact || h.clients[client] >= maxStreamsPerClient {
 		return nil, ErrLiveBusy
 	}
-	st := &LiveStream{hub: h, artifactID: artifact, client: client, poke: make(chan struct{}, 1)}
+	st := &LiveStream{hub: h, artifactID: artifact, owner: owner, client: client, poke: make(chan struct{}, 1)}
 	set := h.streams[artifact]
 	if set == nil {
 		set = map[*LiveStream]struct{}{}
 		h.streams[artifact] = set
 	}
 	set[st] = struct{}{}
+	h.streamOwners[owner]++
 	h.clients[client]++
 	h.total++
 	return st, nil
@@ -246,6 +268,9 @@ func (h *liveHub) remove(st *LiveStream) {
 	delete(set, st)
 	if len(set) == 0 {
 		delete(h.streams, st.artifactID)
+	}
+	if h.streamOwners[st.owner]--; h.streamOwners[st.owner] == 0 {
+		delete(h.streamOwners, st.owner)
 	}
 	if h.clients[st.client]--; h.clients[st.client] <= 0 {
 		delete(h.clients, st.client)

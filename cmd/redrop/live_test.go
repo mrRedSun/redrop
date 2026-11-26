@@ -117,7 +117,7 @@ func TestWatchLiveRefusedJSON(t *testing.T) {
 		t.Fatalf("stdout %q: want one live_off event with the reason (%v)", out, err)
 	}
 	if got := s.seen(); len(got) != 1 {
-		t.Fatalf("requests %q: a refused lease is not released or retried", got)
+		t.Fatalf("requests %q: the first refusal's notice stopped watch before another request", got)
 	}
 }
 
