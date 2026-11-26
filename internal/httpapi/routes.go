@@ -42,6 +42,7 @@ func (a *API) routes() {
 	// Authentication and one-time links.
 	authG := fuego.Group(v1, "", option.Tags("auth"))
 	fuego.Get(authG, "/auth/config", a.getAuthConfig, op("getAuthConfig", "Login options and server info")...)
+	fuego.Get(authG, "/version", a.getVersion, op("getVersion", "Server build version and minimum supported CLI version")...)
 	fuego.Post(authG, "/auth/login", a.login, with(publicWrite, op("login", "Sign in with username and password")...)...)
 	fuego.Post(authG, "/auth/logout", a.logout, with(publicWrite, op("logout", "Sign out")...)...)
 	fuego.GetStd(authG, "/auth/oidc/{provider}/start", a.ssoStart, with(nil, append(op("ssoStart", "Begin single sign-on (browser redirect)"),

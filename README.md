@@ -36,6 +36,8 @@ cross-platform CLI that agents drive.
 - [`docs/DESIGN.md`](docs/DESIGN.md): product and security decisions.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): module map, data flow, and how
   to add a feature.
+- [`CHANGELOG.md`](CHANGELOG.md) and [`docs/RELEASING.md`](docs/RELEASING.md):
+  what has landed and how a release is cut.
 
 ## Layout
 
@@ -343,7 +345,12 @@ whose socket peer is in `REDROP_TRUSTED_PROXIES`.
   reaches the reverse proxy directly can send their own
   `CF-Connecting-IP`.
 
-Status: in development, not yet released.
+Status: in development, not yet released. No `vX.Y.Z` tag has been cut; the
+release process ([`docs/RELEASING.md`](docs/RELEASING.md)) is ready for the
+first one. Builds from `main` report `0.0.0-main+<commit>`; `redrop version`
+shows the CLI and server versions and warns about a too-old CLI;
+`redrop self-update --check` reports the latest release. See
+[`CHANGELOG.md`](CHANGELOG.md) for what has landed.
 
 ## License
 

@@ -1662,3 +1662,48 @@ Rolling back the binary leaves tunnel artifacts in the database. An older
 server reads their kind as an unknown one and shows an empty file listing
 on the link; an older dashboard fails to decode them. Delete tunnels, or
 revoke them, before rolling back.
+
+## Releases and versions
+
+Versions are stamped at build time with `-ldflags` into both binaries: the
+version (`vX.Y.Z` for a tag, `0.0.0-main+<sha>` for a `main` build, `dev`
+for a local `go build`), the abbreviated commit, and the commit time. The
+server reports them at `GET /api/v1/version`, which is public like
+`/api/v1/auth/config` and also carries `min_cli_version`, the oldest release
+CLI the server still supports. `/api/v1/auth/config` keeps its `version`
+field, and `/healthz` keeps its plain `ok` body.
+
+Only plain releases (`vX.Y.Z`) are compared. `redrop version` warns on
+stderr when a release CLI is below the server's minimum. A `main` build,
+which is what a server's `/install.sh` serves for a `main` deployment and
+matches that server, never warns; nor do `dev` and preview builds,
+prereleases, or an unparseable minimum.
+
+A `v*` tag runs `ci.yml` (see `docs/RELEASING.md`). After the `test` job
+passes, the `image` job publishes the `vX.Y.Z` and `sha-<commit>` image tags
+as before, and the release jobs build the six CLI binaries and `SHA256SUMS`,
+attest their provenance, and publish a GitHub Release with notes generated
+from PR titles. Tags with a `-` are prereleases, so they never become the
+"latest" release. Nothing release-related is built locally.
+
+`redrop self-update [--check] [--version vX.Y.Z]` downloads the binary for
+the current OS/architecture and `SHA256SUMS` from the release's asset list,
+over HTTPS only (loopback excepted), redirects included, and replaces the running binary with a
+rename in the same directory. The download streams through a SHA-256 hasher
+into a synced staging file with the old binary's mode; on Windows the running
+binary is renamed aside first. The old binary is never touched before the
+checksum matches. Size caps (64 KiB for `SHA256SUMS`, 128 MiB for the binary)
+bound a hostile release. self-update refuses system and package-manager
+trees (`/usr/bin`, `/bin`, Homebrew's Cellar, Linuxbrew, the Nix store) and
+unwritable directories before downloading. A `main` build is replaced only
+with an explicit `--version`, since "latest" may be older than `main`;
+`--version` to an older release is allowed (rollback) with a warning.
+`--check` reports `update_available`.
+
+The checksum protects integrity, not authenticity: both files come from the
+same release, so authenticity rests on HTTPS to GitHub and on GitHub account
+security. `gh attestation verify` gives an independent provenance check, and
+a pinned signing key for `SHA256SUMS` is a planned follow-up.
+
+`CHANGELOG.md` is kept in Keep-a-Changelog format with an Unreleased
+section; release notes are generated from pull-request titles.

@@ -18,8 +18,20 @@ import (
 	"github.com/mrRedSun/redrop/internal/tunnel"
 )
 
-// Version is reported by /api/v1/auth/config; set at build time.
-var Version = "dev"
+// Build stamps, set with -ldflags at build time. Commit is the abbreviated
+// git revision, Date the RFC 3339 build time; both may be empty in a plain
+// `go build`, which reports version "dev".
+var (
+	Version = "dev"
+	Commit  = ""
+	Date    = ""
+)
+
+// MinCLIVersion is the oldest CLI this server still supports. Older CLIs
+// get a warning from `redrop version`. Bump it only for a breaking change
+// to the API the CLI depends on, since a CLI older than this cannot even
+// self-update reliably.
+const MinCLIVersion = "0.0.0"
 
 type API struct {
 	accounts *accounts.Service

@@ -25,11 +25,13 @@ COPY pkg ./pkg
 # --- CLI binaries for every supported platform (served by /install.sh) ---
 FROM gobase AS cli
 ARG VERSION=dev
+ARG COMMIT=
+ARG DATE=
 RUN set -eu; mkdir -p /out/cli; \
     for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do \
       os=${target%/*}; arch=${target#*/}; ext=""; [ "$os" = windows ] && ext=.exe; \
       CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
-        -ldflags "-s -w -X main.version=${VERSION}" \
+        -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
         -o "/out/cli/redrop-$os-$arch$ext" ./cmd/redrop; \
     done; \
     cd /out/cli && sha256sum redrop-* > SHA256SUMS
@@ -37,11 +39,13 @@ RUN set -eu; mkdir -p /out/cli; \
 # --- Server for the target platform ---
 FROM gobase AS server
 ARG VERSION=dev
+ARG COMMIT=
+ARG DATE=
 ARG TARGETOS
 ARG TARGETARCH
 COPY --from=web /src/internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
-      -ldflags "-s -w -X github.com/mrRedSun/redrop/internal/httpapi.Version=${VERSION}" \
+      -ldflags "-s -w -X github.com/mrRedSun/redrop/internal/httpapi.Version=${VERSION} -X github.com/mrRedSun/redrop/internal/httpapi.Commit=${COMMIT} -X github.com/mrRedSun/redrop/internal/httpapi.Date=${DATE}" \
       -o /out/redrop-server ./cmd/redrop-server \
  && mkdir -p /out/data
 

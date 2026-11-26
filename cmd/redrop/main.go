@@ -18,7 +18,14 @@ import (
 	"github.com/mrRedSun/redrop/pkg/client"
 )
 
-var version = "dev"
+// Build stamps, set with -ldflags at build time. A plain `go build` leaves
+// version "dev" and the commit and date empty; release and CI builds always
+// stamp all three.
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
 
 // Exit codes (documented in `redrop guide`).
 const (
@@ -290,7 +297,7 @@ machine-readable output, and check exit codes (listed in the guide).`,
 		c.GroupID = "manage"
 		root.AddCommand(c)
 	}
-	for _, c := range []*cobra.Command{loginCmd(), logoutCmd(), whoamiCmd(), guideCmd(), versionCmd()} {
+	for _, c := range []*cobra.Command{loginCmd(), logoutCmd(), whoamiCmd(), guideCmd(), versionCmd(), selfUpdateCmd()} {
 		c.GroupID = "setup"
 		root.AddCommand(c)
 	}
