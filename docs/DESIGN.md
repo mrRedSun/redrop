@@ -1298,8 +1298,8 @@ visitor ──HTTPS──▶ Cloudflare ─▶ Traefik ─▶ redrop content han
    [yamux](https://github.com/hashicorp/yamux) session. The server is the
    yamux client and opens one stream per visitor request; the CLI accepts
    streams. Only the server opens streams: the first stream the CLI opens
-   ends the connection (`1008`). The server never accepts or reads such a
-   stream, which would otherwise hold up to a window of data, outside
+   ends the connection (`1008`). The server rejects it without serving or
+   reading it; otherwise it could hold up to a window of data, outside
    every limit, for as long as the session lasts.
 5. Each stream carries exactly one HTTP/1.1 exchange, written and read by
    Go's `net/http`: the server's `httputil.ReverseProxy` dials by opening a

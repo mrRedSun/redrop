@@ -225,8 +225,8 @@ func (l *link) armExpiryLocked() {
 
 // slot is a request's claim on one of its tunnel's stream slots and one of
 // the server's. It is released when the request has ended and the stream it
-// opened is closed (reset if the CLI hadn't finished), whichever is later:
-// slots bound the streams that exist, and so the memory they can hold.
+// opened is gone, whichever is later. A closed stream is drained until the
+// CLI closes its end, so slots bound the streams and the memory they hold.
 type slot struct {
 	l       *link
 	gen     int          // the access generation the request was let in under
