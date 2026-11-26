@@ -54,6 +54,14 @@ type AuthConfig struct {
 	ContentURL       string         `json:"content_url"`
 }
 
+// ServerVersion is the build report served by GET /api/v1/version.
+type ServerVersion struct {
+	Version       string `json:"version" description:"Server version, e.g. v1.2.3 or 0.0.0-main+abc1234"`
+	Commit        string `json:"commit,omitempty" description:"Abbreviated git revision the server was built from"`
+	Date          string `json:"date,omitempty" description:"RFC 3339 build time"`
+	MinCLIVersion string `json:"min_cli_version" description:"Oldest CLI version this server still supports"`
+}
+
 type LoginRequest struct {
 	Username string `json:"username" validate:"required"`
 	Password string `json:"password" validate:"required"`
