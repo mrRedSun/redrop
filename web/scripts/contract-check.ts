@@ -65,7 +65,9 @@ const program = Effect.gen(function* () {
 
   const list = yield* artifacts.list({ q: '', status: 'all' })
   check('artifact list decodes', true)
-  const first = list[0]
+  // e2e may have left the newest artifact revoked; the report and
+  // revocation checks below need one that is still live.
+  const first = list.find((a) => a.status === 'active') ?? list[0]
   if (first) {
     const a = yield* artifacts.get(first.id)
     const versions = yield* artifacts.versions(a.id)
@@ -105,12 +107,15 @@ const program = Effect.gen(function* () {
     yield* admin.deleteInvite(inv.id)
     // Abuse reports (DESIGN.md "Abuse handling"): file one as the report page
     // does, find it in the queue without a link on its artifact, dismiss it.
+    // The marker is unique per run, so earlier runs on the same server don't
+    // make the check expect a report that is already closed.
     if (first) {
       const link = (yield* artifacts.get(first.id)).url
-      yield* reports.submit({ url: link, category: 'other', details: 'contract-check' })
+      const marker = `contract-check-${Date.now()}`
+      yield* reports.submit({ url: link, category: 'other', details: marker })
       const visitors = yield* admin.reports('open', 'visitor')
       check('report queue has filtered paging metadata', visitors.total >= 1 && visitors.page === 1 && visitors.page_size === 50 && visitors.items.every((r) => r.source === 'visitor' && r.status === 'open'))
-      const queued = visitors.items.find((r) => r.artifact_id === first.id && r.details === 'contract-check')
+      const queued = visitors.items.find((r) => r.artifact_id === first.id && r.details === marker)
       check('report reaches the admin queue', queued !== undefined && queued.reported_url === link && queued.artifact !== null && !('url' in queued.artifact))
       if (queued) {
         const dismissed = yield* admin.setReportStatus(queued.id, { status: 'dismissed' })
