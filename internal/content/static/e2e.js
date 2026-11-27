@@ -57,18 +57,57 @@
 
   // splitFragment splits a link fragment (without "#") into the key text
   // and the rest: "k=<43 characters>", optionally followed by "&" and the
-  // rest. Without "k=", the whole fragment is the rest. A fragment that
-  // starts with "k=" is always a key attempt: damaged (a character missing,
-  // punctuation or an encoded space after it), it gives {damaged: true} and
-  // no rest, so no part of it can reach the frame (review 33 re-check B-2b).
+  // rest. A fragment without a key is all rest. Any fragment that could
+  // hold a key, whole or damaged (keyAttempt), is a key attempt: unless it
+  // is exactly that form it gives {damaged: true} and no rest, so no part of
+  // it can reach the frame (review 33 re-check B-2b'). internal/e2e's
+  // SplitFragment follows the same rule; internal/e2e/testdata/fragments.json
+  // holds the cases both are tested against.
   function splitFragment(fragment) {
-    if (fragment.indexOf('k=') !== 0) return { key: null, rest: fragment, damaged: false }
     var key = fragment.slice(2, 2 + KEY_TEXT), rest = fragment.slice(2 + KEY_TEXT)
-    if (key.length === KEY_TEXT && KEY_CHARS.test(key) && (rest === '' || rest.charAt(0) === '&')) {
-      return { key: key, rest: rest.slice(1), damaged: false }
+    if (fragment.slice(0, 2) === 'k=' && key.length === KEY_TEXT && KEY_CHARS.test(key)) {
+      if (rest === '') return { key: key, rest: '', damaged: false }
+      if (rest.charAt(0) === '&' && !keyAttempt(rest.slice(1))) return { key: key, rest: rest.slice(1), damaged: false }
+      return { key: null, rest: '', damaged: true }
     }
-    return { key: null, rest: '', damaged: true }
+    if (keyAttempt(fragment)) return { key: null, rest: '', damaged: true }
+    return { key: null, rest: fragment, damaged: false }
   }
+
+  // decodeLenient percent-decodes s as often as that changes it (at most
+  // MAX_DECODES times). Only escapes of ASCII characters are decoded; any
+  // other "%" is kept, so a malformed escape doesn't stop the rest.
+  var MAX_DECODES = 8
+  var ASCII_ESCAPE = /%([0-7][0-9A-Fa-f])/g
+  function decodeLenient(s) {
+    for (var i = 0; i < MAX_DECODES; i++) {
+      var d = s.replace(ASCII_ESCAPE, function (_, hex) { return String.fromCharCode(parseInt(hex, 16)) })
+      if (d === s) break
+      s = d
+    }
+    return s
+  }
+  // keyAttempt reports whether s could hold a key, whole or damaged: after
+  // decodeLenient, "k=" in any case at the start or after a character that
+  // is not a letter or digit, or a run of at least MIN_KEY_RUN key
+  // characters with both upper and lower case letters (a key that lost its
+  // "k="; lower-case anchors and file names don't match).
+  var MIN_KEY_RUN = 40
+  var K_PARAM = /(^|[^A-Za-z0-9])[kK]=/
+  var KEY_RUN = /[A-Za-z0-9_-]{40,}/g
+  function keyAttempt(s) {
+    var d = decodeLenient(s)
+    if (K_PARAM.test(d)) return true
+    var runs = d.match(KEY_RUN) || []
+    for (var i = 0; i < runs.length; i++) {
+      if (runs[i].length >= MIN_KEY_RUN && /[A-Z]/.test(runs[i]) && /[a-z]/.test(runs[i])) return true
+    }
+    return false
+  }
+  // hasEncodedFragment reports a path that holds a "#", encoded once or
+  // more: a link whose fragment, key included, went into the path (review
+  // 33 re-check M3).
+  function hasEncodedFragment(path) { return decodeLenient(path).indexOf('#') >= 0 }
 
   // importKey turns a key in its link form into a non-extractable HKDF key.
   function importKey(text) {
@@ -355,6 +394,9 @@
     KEY_TTL_MS: KEY_TTL_MS,
     keys: keys,
     splitFragment: splitFragment,
+    keyAttempt: keyAttempt,
+    hasEncodedFragment: hasEncodedFragment,
+    decodeLenient: decodeLenient,
     importKey: importKey,
     keyCheck: keyCheck,
     manifestBinding: manifestBinding,

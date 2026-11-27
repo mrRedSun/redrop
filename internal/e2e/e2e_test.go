@@ -212,28 +212,58 @@ func TestKeyCheck(t *testing.T) {
 	}
 }
 
+// fragmentCases is testdata/fragments.json, which the viewer's tests read too.
+type fragmentCases struct {
+	Key       string
+	Fragments []struct {
+		Fragment string
+		Key      *string
+		Rest     string
+		Damaged  bool
+		Why      string
+	}
+	Paths []struct {
+		Path            string
+		EncodedFragment bool `json:"encoded_fragment"`
+	}
+}
+
 func TestFragments(t *testing.T) {
-	key := strings.Repeat("A", 43)
-	for frag, want := range map[string][3]string{
-		"k=" + key:                     {key, "", "true"},
-		"k=" + key + "&/docs/a.html#x": {key, "/docs/a.html#x", "true"},
-		"k=" + key + "&part":           {key, "part", "true"},
-		"k=" + key + "&":               {key, "", "true"},
-		"/docs/a.html":                 {"", "/docs/a.html", "false"},
-		"section-2":                    {"", "section-2", "false"},
-		// A damaged key attempt passes nothing on (review 33 re-check B-2b).
-		"k=short":                      {"", "", "false"},
-		"k=" + key + "x":               {"", "", "false"},
-		"k=" + key + ".":               {"", "", "false"},
-		"k=" + key + "%20":             {"", "", "false"},
-		"k=" + key[:42]:                {"", "", "false"},
-		"k=" + strings.Repeat("!", 43): {"", "", "false"},
-		"":                             {"", "", "false"},
-	} {
-		k, rest, ok := SplitFragment(frag)
-		if k != want[0] || rest != want[1] || (ok && want[2] != "true") || (!ok && want[2] == "true") {
-			t.Errorf("SplitFragment(%q) = %q, %q, %v", frag, k, rest, ok)
+	b, err := os.ReadFile("testdata/fragments.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases fragmentCases
+	if err := json.Unmarshal(b, &cases); err != nil {
+		t.Fatal(err)
+	}
+	if len(cases.Fragments) < 40 || len(cases.Paths) < 5 {
+		t.Fatalf("fragments.json has %d fragments and %d paths", len(cases.Fragments), len(cases.Paths))
+	}
+	for _, c := range cases.Fragments {
+		k, rest, ok := SplitFragment(c.Fragment)
+		want := ""
+		if c.Key != nil {
+			want = *c.Key
 		}
+		if k != want || rest != c.Rest || ok != (c.Key != nil) {
+			t.Errorf("SplitFragment(%q) = %q, %q, %v; want %q, %q (%s)", c.Fragment, k, rest, ok, want, c.Rest, c.Why)
+		}
+		if got := c.Key == nil && KeyAttempt(c.Fragment); got != c.Damaged {
+			t.Errorf("KeyAttempt(%q) = %v, want damaged %v (%s)", c.Fragment, got, c.Damaged, c.Why)
+		}
+		_, found, err := KeyFromLink("https://amber-otter-quilt-river.usercontent.example/#" + c.Fragment)
+		if found != (c.Key != nil) || (err != nil) != c.Damaged {
+			t.Errorf("KeyFromLink(#%s) = %v, %v; want a key %v, an error %v", c.Fragment, found, err, c.Key != nil, c.Damaged)
+		}
+	}
+	for _, c := range cases.Paths {
+		if got := HasEncodedFragment(c.Path); got != c.EncodedFragment {
+			t.Errorf("HasEncodedFragment(%q) = %v", c.Path, got)
+		}
+	}
+	if DecodeLenient("%E0%A4%A%25%32%33%") != "%E0%A4%A#%" {
+		t.Errorf("DecodeLenient keeps other escapes and decodes the rest: %q", DecodeLenient("%E0%A4%A%25%32%33%"))
 	}
 	k := testKey(t)
 	link := Link("https://amber-otter-quilt-river.usercontent.example/", k)

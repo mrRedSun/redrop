@@ -314,30 +314,124 @@ func Link(artifactURL string, k Key) string {
 
 // SplitFragment splits a link fragment (without "#") into the key text and
 // the rest (DESIGN.md "Keys and links"): "k=<43 characters>", optionally
-// followed by "&" and the rest. Without "k=" the whole fragment is the rest.
-// A fragment that starts with "k=" is always a key attempt: if it doesn't
-// parse, ok is false and rest is empty, so no part of a damaged key is
-// passed on as the artifact's own fragment.
+// followed by "&" and the rest. A fragment without a key is all rest. Any
+// fragment that could hold a key, whole or damaged, is a key attempt
+// (KeyAttempt): unless it is exactly that form, ok is false and rest is
+// empty, so no part of it is passed on as the artifact's own fragment. The
+// viewer's splitFragment (internal/content/static/e2e.js) follows the same
+// rule; testdata/fragments.json holds the cases both test.
 func SplitFragment(fragment string) (key, rest string, ok bool) {
-	if !strings.HasPrefix(fragment, "k=") {
-		return "", fragment, false
-	}
-	if len(fragment) < 2+KeyTextLen {
+	if len(fragment) >= 2+KeyTextLen && strings.HasPrefix(fragment, "k=") && isKeyText(fragment[2:2+KeyTextLen]) {
+		key, rest = fragment[2:2+KeyTextLen], fragment[2+KeyTextLen:]
+		switch {
+		case rest == "":
+			return key, "", true
+		case rest[0] == '&' && !KeyAttempt(rest[1:]):
+			return key, rest[1:], true
+		}
 		return "", "", false
 	}
-	key, rest = fragment[2:2+KeyTextLen], fragment[2+KeyTextLen:]
-	for _, c := range key {
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return "", "", false
+	if KeyAttempt(fragment) {
+		return "", "", false
+	}
+	return "", fragment, false
+}
+
+func isKeyText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isKeyChar(s[i]) {
+			return false
 		}
 	}
-	switch {
-	case rest == "":
-		return key, "", true
-	case rest[0] == '&':
-		return key, rest[1:], true
+	return true
+}
+
+func isKeyChar(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_'
+}
+
+// minKeyRun is the shortest run of key characters, mixed upper and lower
+// case, that KeyAttempt takes for a key without its "k=".
+const minKeyRun = 40
+
+// KeyAttempt reports whether s, a fragment or another part of a link, could
+// hold a key, whole or damaged (review 33 re-check B-2b'). It looks at s
+// percent-decoded as often as it decodes (DecodeLenient) and matches:
+//   - "k=" in any case, at the start or after a character that is not a
+//     letter or digit ("K=", "&k=", " k=", "x&k=", "/docs?k=", and the
+//     encoded forms "k%3D", "%6B=", "k%253D");
+//   - a run of at least 40 key characters with both upper and lower case
+//     letters, such as a key that lost its "k=". Random keys have both;
+//     lower-case heading anchors and file names don't.
+func KeyAttempt(s string) bool {
+	d := DecodeLenient(s)
+	for i := 0; i+1 < len(d); i++ {
+		if (d[i] == 'k' || d[i] == 'K') && d[i+1] == '=' && (i == 0 || !isAlnum(d[i-1])) {
+			return true
+		}
 	}
-	return "", "", false
+	run, upper, lower := 0, false, false
+	for i := 0; i <= len(d); i++ {
+		if i < len(d) && isKeyChar(d[i]) {
+			run++
+			upper = upper || d[i] >= 'A' && d[i] <= 'Z'
+			lower = lower || d[i] >= 'a' && d[i] <= 'z'
+			continue
+		}
+		if run >= minKeyRun && upper && lower {
+			return true
+		}
+		run, upper, lower = 0, false, false
+	}
+	return false
+}
+
+func isAlnum(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+}
+
+// HasEncodedFragment reports whether a path holds a "#", encoded once or
+// more ("%23", "%2523", ...): a link whose fragment, key included, was
+// percent-encoded into the path (review 33 re-check M3).
+func HasEncodedFragment(path string) bool { return strings.IndexByte(DecodeLenient(path), '#') >= 0 }
+
+// maxDecodes bounds DecodeLenient; links are not encoded deeper by accident.
+const maxDecodes = 8
+
+// DecodeLenient percent-decodes s as often as that changes it, up to
+// maxDecodes times. Only escapes of ASCII characters are decoded; any other
+// "%" is kept, so a malformed escape doesn't stop the decoding of the rest.
+func DecodeLenient(s string) string {
+	for range maxDecodes {
+		var b strings.Builder
+		changed := false
+		for i := 0; i < len(s); i++ {
+			if s[i] == '%' && i+2 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' && isHex(s[i+2]) {
+				b.WriteByte(unhex(s[i+1])<<4 | unhex(s[i+2]))
+				i += 2
+				changed = true
+				continue
+			}
+			b.WriteByte(s[i])
+		}
+		if !changed {
+			break
+		}
+		s = b.String()
+	}
+	return s
+}
+
+func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
+
+func unhex(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
 }
 
 // KeyFromLink returns the key in a link's fragment. ok is false when the
@@ -349,7 +443,7 @@ func KeyFromLink(link string) (k Key, ok bool, err error) {
 	}
 	text, _, ok := SplitFragment(fragment)
 	if !ok {
-		if strings.HasPrefix(fragment, "k=") {
+		if KeyAttempt(fragment) {
 			return k, false, errors.New("the link's #k= key is malformed; copy the whole link")
 		}
 		return k, false, nil

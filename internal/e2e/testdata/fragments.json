@@ -1,0 +1,351 @@
+{
+  "comment": "Link fragments and paths for the key-attempt rule (DESIGN.md \"Keys and links\"). internal/e2e (SplitFragment, KeyAttempt, HasEncodedFragment) and the viewer's e2e.js (splitFragment, keyAttempt, hasEncodedFragment) are both tested against every case. Edit by hand.",
+  "key": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+  "fragments": [
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "rest": "",
+      "damaged": false
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&/docs/a.html?x=1#part",
+      "key": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "rest": "/docs/a.html?x=1#part",
+      "damaged": false
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&part",
+      "key": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "rest": "part",
+      "damaged": false
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&",
+      "key": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "rest": "",
+      "damaged": false
+    },
+    {
+      "fragment": "",
+      "key": null,
+      "rest": "",
+      "damaged": false
+    },
+    {
+      "fragment": "part",
+      "key": null,
+      "rest": "part",
+      "damaged": false
+    },
+    {
+      "fragment": "section-2",
+      "key": null,
+      "rest": "section-2",
+      "damaged": false
+    },
+    {
+      "fragment": "/docs/a.html#part",
+      "key": null,
+      "rest": "/docs/a.html#part",
+      "damaged": false
+    },
+    {
+      "fragment": "/search.html?q=1&page=2",
+      "key": null,
+      "rest": "/search.html?q=1&page=2",
+      "damaged": false
+    },
+    {
+      "fragment": "getting-started-with-the-command-line-interface-for-redrop",
+      "key": null,
+      "rest": "getting-started-with-the-command-line-interface-for-redrop",
+      "damaged": false
+    },
+    {
+      "fragment": "/docs/2026-11-quarterly-report-final-version-2.html",
+      "key": null,
+      "rest": "/docs/2026-11-quarterly-report-final-version-2.html",
+      "damaged": false
+    },
+    {
+      "fragment": "%2Fdocs%2Fa.html",
+      "key": null,
+      "rest": "%2Fdocs%2Fa.html",
+      "damaged": false
+    },
+    {
+      "fragment": "kk=1",
+      "key": null,
+      "rest": "kk=1",
+      "damaged": false
+    },
+    {
+      "fragment": "back=1",
+      "key": null,
+      "rest": "back=1",
+      "damaged": false
+    },
+    {
+      "fragment": "ok=1",
+      "key": null,
+      "rest": "ok=1",
+      "damaged": false
+    },
+    {
+      "fragment": "k=",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "no key text"
+    },
+    {
+      "fragment": "k=short",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "too short"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2Ix",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a character added"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I.",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "trailing ."
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I)",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "trailing )"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I%20",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "trailing encoded space"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "last character cut"
+    },
+    {
+      "fragment": "k=!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "not key characters"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I#part",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "# instead of &"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I=",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "padding"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I==",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "padding"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2Ik=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "doubled"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I#k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "doubled with #"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a second key in the rest"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&/docs/a.html#k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a key in the rest's fragment"
+    },
+    {
+      "fragment": "k%3DGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "= encoded"
+    },
+    {
+      "fragment": "k%3dGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "= encoded, lower case"
+    },
+    {
+      "fragment": "k%253DGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "= encoded twice"
+    },
+    {
+      "fragment": "%6B=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "k encoded"
+    },
+    {
+      "fragment": "%6b%3DGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "both encoded"
+    },
+    {
+      "fragment": "%25256B%25253DGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "encoded three times"
+    },
+    {
+      "fragment": "K=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "upper case K"
+    },
+    {
+      "fragment": "&k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "leading &"
+    },
+    {
+      "fragment": "%20k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "leading encoded space"
+    },
+    {
+      "fragment": "x&k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "after another parameter"
+    },
+    {
+      "fragment": "/docs/a.html?k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "in a page's query"
+    },
+    {
+      "fragment": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "the key alone"
+    },
+    {
+      "fragment": "key=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "another name"
+    },
+    {
+      "fragment": "k:GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "another separator"
+    },
+    {
+      "fragment": "k=x",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "k= with anything"
+    },
+    {
+      "fragment": "SomeVeryLongCamelCaseAnchorNameForTheDocsPage",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a long mixed-case run (the accepted cost)"
+    }
+  ],
+  "paths": [
+    {
+      "path": "/",
+      "encoded_fragment": false
+    },
+    {
+      "path": "/docs/a.html",
+      "encoded_fragment": false
+    },
+    {
+      "path": "/a%20b.html",
+      "encoded_fragment": false
+    },
+    {
+      "path": "/%2Fx",
+      "encoded_fragment": false
+    },
+    {
+      "path": "/#k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "encoded_fragment": true
+    },
+    {
+      "path": "/%23k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "encoded_fragment": true
+    },
+    {
+      "path": "/%2523k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "encoded_fragment": true
+    },
+    {
+      "path": "/docs/%252523part",
+      "encoded_fragment": true
+    },
+    {
+      "path": "/%25%32%33k=x",
+      "encoded_fragment": true
+    }
+  ]
+}

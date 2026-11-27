@@ -20,6 +20,9 @@ export type RedropE2E = {
     remove(artifact: string): Promise<void>
   }
   splitFragment(f: string): { key: string | null; rest: string; damaged: boolean }
+  keyAttempt(s: string): boolean
+  hasEncodedFragment(path: string): boolean
+  decodeLenient(s: string): string
   importKey(text: string): Promise<CryptoKey>
   keyCheck(key: CryptoKey, artifact: string): Promise<string>
   manifestBinding(artifact: string, version: number): Binding
@@ -185,21 +188,20 @@ await test('keys: only 43 canonical base64url characters', async () => {
   }
 })
 
-await test('fragments: the key, then & and the page or the artifact\'s own fragment', () => {
-  const key = 'A'.repeat(43)
-  const ok = (rest: string) => ({ key, rest, damaged: false })
-  assert.deepEqual({ ...E.splitFragment(`k=${key}`) }, ok(''))
-  assert.deepEqual({ ...E.splitFragment(`k=${key}&/docs/a.html?x=1#part`) }, ok('/docs/a.html?x=1#part'))
-  assert.deepEqual({ ...E.splitFragment(`k=${key}&part`) }, ok('part'))
-  assert.deepEqual({ ...E.splitFragment('/docs/a.html#part') }, { key: null, rest: '/docs/a.html#part', damaged: false })
-  assert.deepEqual({ ...E.splitFragment('part') }, { key: null, rest: 'part', damaged: false })
-  assert.deepEqual({ ...E.splitFragment('') }, { key: null, rest: '', damaged: false })
-  // Any fragment that starts with k= is a key attempt (the re-check of
-  // review 33, B-2b): a damaged one is never handed on as the artifact's own.
-  for (const f of ['k=', 'k=short', `k=${key}x`, `k=${key}.`, `k=${key})`, `k=${key}%20`, `k=${key.slice(0, 42)}`,
-    `k=${'!'.repeat(43)}`, `k=${key.slice(0, 42)}+`, `k=${key}#part`]) {
-    assert.deepEqual({ ...E.splitFragment(f) }, { key: null, rest: '', damaged: true }, f)
+// The same cases as internal/e2e's Go tests: one rule on both sides.
+const fragmentCases = JSON.parse(readFileSync(new URL('../../internal/e2e/testdata/fragments.json', import.meta.url), 'utf8')) as {
+  fragments: Array<{ fragment: string; key: string | null; rest: string; damaged: boolean; why?: string }>
+  paths: Array<{ path: string; encoded_fragment: boolean }>
+}
+
+await test('fragments: the key, then & and the page or the artifact\'s own fragment; anything that could hold a key is damaged', () => {
+  assert.ok(fragmentCases.fragments.length >= 40)
+  for (const c of fragmentCases.fragments) {
+    assert.deepEqual({ ...E.splitFragment(c.fragment) }, { key: c.key, rest: c.rest, damaged: c.damaged }, `${c.fragment} (${c.why ?? ''})`)
+    assert.equal(c.key === null && E.keyAttempt(c.fragment), c.damaged, c.fragment)
   }
+  for (const c of fragmentCases.paths) assert.equal(E.hasEncodedFragment(c.path), c.encoded_fragment, c.path)
+  assert.equal(E.decodeLenient('%E0%A4%A%25%32%33%'), '%E0%A4%A#%')
 })
 
 const object = (c: string) => c.repeat(26)
