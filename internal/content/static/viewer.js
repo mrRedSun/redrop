@@ -330,6 +330,7 @@
       else if (code === 'http' && err.status === 404) show('This link doesn\'t exist, or it has expired.')
       else if (code === 'worker') show('Your browser could not start the decryption worker. Allow this site to use service workers (some private windows block them) and reload.')
       else if (code === 'path') show('This link is damaged: its # was changed to %23, so its key went into the address. Nothing was opened. Ask for the link again and open it exactly as you get it.')
+      else if (code === 'query') show('This link is damaged: its # was changed to ?, so its key went into the address. Nothing was opened. Ask for the link again and open it exactly as you get it.')
       else if (code === 'browser') show('This browser can\'t keep an end-to-end encrypted link\'s key from the page it opens (it lacks the Navigation API), so the page isn\'t opened. Use a current version of Chrome, Edge, Firefox or Safari.')
       else if (code === 'guard') show('The page was closed to keep its key safe: a link was opened in this tab, or the page changed the tab\'s address, while it was open. Open the link in a new tab.')
       else show('This page could not be opened. Reload to try again.')
@@ -351,6 +352,14 @@
       // these itself; this is the viewer's own refusal).
       replaceAddress('/' + marked(''))
       failed(coded('path'))
+      return
+    }
+    if (E.queryKeyAttempt(location.search.slice(1))) {
+      // The link's # became ?: its key is in the query, which the frame's
+      // address would carry (review 33 re-check B-2b″). Refused before any
+      // key, the fragment's too, is used.
+      replaceAddress(location.pathname + marked(''))
+      failed(coded('query'))
       return
     }
     if (parts.damaged) {
@@ -487,16 +496,20 @@
   // from the artifact (review 33 re-check B-2a'). It runs before any frame
   // exists and captures everything it uses then, because the artifact,
   // sharing this window later, can replace any function or getter on it.
-  // Its navigate listener is this window's first, so it runs before any the
-  // artifact adds. Once armed (when the frame is created), every
+  // Its navigate listener is this window's first and a capturing one, so it
+  // runs before any the artifact adds, capturing or not, in any engine
+  // (review 33 re-check M5). Once armed (when the frame is created), every
   // same-document navigation of this page that the viewer didn't start (the
   // full link or a fragment opened in this tab, or the artifact rewriting
   // the address) is cancelled before the URL changes, hidden from later
   // listeners, and ends the artifact: every frame is removed, so none of
-  // its code runs here again. It returns null when the browser lacks the
-  // Navigation API; the viewer then opens nothing.
+  // its code runs here again. The viewer's own address updates are known by
+  // the exact URL they go to, not by a flag, and are hidden from later
+  // listeners too, so no write can ride along inside one (m-6). It returns
+  // null when the browser lacks the Navigation API; the viewer then opens
+  // nothing.
   function guardNavigation() {
-    var nav, apply, add, destination, sameDocument, cancelable, stopNow, cancel, replaceState, stateOf, hist, findAll, removeNode
+    var nav, apply, add, destination, sameDocument, urlOf, cancelable, stopNow, cancel, replaceState, stateOf, hist, findAll, removeNode, MakeURL, hrefOf
     try {
       var getter = function (proto, name) {
         var d = Object.getOwnPropertyDescriptor(proto, name)
@@ -508,6 +521,9 @@
       add = EventTarget.prototype.addEventListener
       destination = getter(NavigateEvent.prototype, 'destination')
       sameDocument = getter(NavigationDestination.prototype, 'sameDocument')
+      urlOf = getter(NavigationDestination.prototype, 'url')
+      MakeURL = URL
+      hrefOf = getter(URL.prototype, 'href')
       cancelable = getter(Event.prototype, 'cancelable')
       stopNow = Event.prototype.stopImmediatePropagation
       cancel = Event.prototype.preventDefault
@@ -517,13 +533,20 @@
       findAll = Document.prototype.querySelectorAll
       removeNode = Element.prototype.remove
       if (!nav || typeof apply !== 'function' || typeof stopNow !== 'function' || typeof cancel !== 'function' ||
-        typeof replaceState !== 'function' || typeof findAll !== 'function' || typeof removeNode !== 'function') return null
+        typeof replaceState !== 'function' || typeof findAll !== 'function' || typeof removeNode !== 'function' ||
+        typeof MakeURL !== 'function') return null
     } catch (e) {
       return null
     }
-    var own = false, armed = false, tripped = null
+    var expected = null, armed = false, tripped = null
     apply(add, nav, ['navigate', function (e) {
-      if (own || !armed || !apply(sameDocument, apply(destination, e, []), [])) return
+      var dest = apply(destination, e, [])
+      var same = apply(sameDocument, dest, [])
+      if (expected !== null && same && apply(urlOf, dest, []) === expected) {
+        apply(stopNow, e, [])
+        return
+      }
+      if (!armed || !same) return
       apply(stopNow, e, [])
       if (apply(cancelable, e, [])) apply(cancel, e, [])
       var frames = apply(findAll, doc, ['iframe, frame, object, embed'])
@@ -533,14 +556,14 @@
         tripped = null
         then()
       }
-    }])
+    }, true])
     return {
       replace: function (url) {
-        own = true
+        expected = apply(hrefOf, new MakeURL(url, location.href), [])
         try {
           apply(replaceState, hist, [apply(stateOf, hist, []), '', url])
         } finally {
-          own = false
+          expected = null
         }
       },
       arm: function (then) {

@@ -57,6 +57,9 @@
       w.addEventListener('message', (e) => seen('message', read(() => e.data)))
       if (w.navigation) {
         w.navigation.addEventListener('navigate', (e) => { seen('navigate', e.destination.url); look('navigate') })
+        // A capturing listener too: under the DOM standard's order it would
+        // run before non-capturing ones (third re-check M5).
+        w.navigation.addEventListener('navigate', (e) => seen('capture navigate', e.destination.url), true)
         w.navigation.addEventListener('currententrychange', () => look('currententrychange'))
         w.navigation.addEventListener('navigatesuccess', () => look('navigatesuccess'))
       }

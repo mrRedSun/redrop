@@ -278,6 +278,18 @@ try {
       await v.close()
     }
 
+    // A link whose # became ? (third re-check B-2b″), after a good visit and
+    // with a valid #k= as well: the server's fixed page, no viewer, no frame,
+    // and the page saw nothing.
+    for (const q of [`?k=${key}`, `?x=1&k=${key}`, `?K=${key}`, `?k%3D${key}`, `?k=${key}#k=${key}`]) {
+      const name = q.replaceAll(key, 'KEY')
+      const v = await goodVisit(name)
+      const shown = await v.open(`${base}${q}`, `(${pageText}).includes('This link is damaged')`, 15000)
+      check(`${name} gets the damaged-link page and no frame`, shown && (await v.evaluate(`!document.getElementById('rd-frame')`)) === true, await v.evaluate(pageText))
+      check(`  and the page saw no key`, (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), (await v.evaluate(stolen)) + (await v.evaluate(liveHref)))
+      await v.close()
+    }
+
     // A link whose # became %23 (M3): the server's fixed page, no viewer, no
     // frame. Only that request carries the key, as any browser must send it.
     for (const enc of ['%23', '%2523']) {
