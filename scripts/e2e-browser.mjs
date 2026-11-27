@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // End-to-end encrypted links in a real browser (headless Chromium over the
 // DevTools protocol, no packages), for scripts/e2e.sh. DESIGN.md
-// "End-to-end encrypted links"; review 33 B-2, M1 and m-A, and its re-check
-// (B-2a, B-2b).
+// "End-to-end encrypted links"; review 33 B-2, M1 and m-A, its re-check
+// (B-2a, B-2b) and the second re-check (B-2a', B-2b', M3, m-1).
 //
 //   node scripts/e2e-browser.mjs links.json
 //
@@ -94,6 +94,11 @@ const pageText = `document.body ? document.body.innerText : ''`
 const probeDone = `${frameText}.includes('probe-4471') && JSON.parse(${frameData}).done === '1'`
 // What the probe artifact saw that looked like a key, from any document.
 const stolen = `(() => { try { return localStorage.getItem('rd-probe-stolen') || '' } catch (e) { return 'ERR ' + e.name } })()`
+// What the probe's timer in the viewer's window last copied from the
+// viewer's address; it outlives the probe's own document.
+const liveHref = `(() => { try { return localStorage.getItem('rd-probe-live-href') || '' } catch (e) { return 'ERR ' + e.name } })()`
+const reset = `(() => { for (const k of ['rd-probe-stolen', 'rd-probe-live-href', 'rd-probe-acted', 'rd-probe-mode']) localStorage.removeItem(k); return true })()`
+const guardShown = `(() => { const m = document.getElementById('rd-e2e-msg'); return !!m && !m.hidden && /new tab/.test(m.textContent) })()`
 
 try {
   browserWS = await new Promise((resolve, reject) => {
@@ -165,11 +170,68 @@ try {
       check(`  and frames nothing`, state.src === '', state.src)
       check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes('k=') && !state.href.includes(key.slice(0, 20)), state.href)
     }
+    // Fragments that could hold a key but don't start with a literal k=
+    // (second re-check B-2b'): damaged, after a good visit, framing nothing.
+    for (const frag of [`k%3D${key}`, `k%253D${key}`, `%6B=${key}`, `K=${key}`, `&k=${key}`, `%20k=${key}`, `x&k=${key}`, key]) {
+      const name = frag.replace(key, 'KEY')
+      check(`the good link opens before #${name}`, await v.open(links.probe.url, probeDone))
+      const shown = await v.open(`${base}#${frag}`, `!document.getElementById('rd-e2e-msg').hidden`, 15000)
+      const state = JSON.parse((await v.evaluate(`JSON.stringify({ msg: document.getElementById('rd-e2e-msg').textContent, src: document.getElementById('rd-frame').src, href: location.href })`)) || '{}')
+      check(`#${name} after a good visit says the link is damaged and frames nothing`, shown && /damaged/.test(state.msg ?? '') && state.src === '', `${state.msg} ${state.src}`)
+      check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes(key.slice(0, 20)), state.href)
+    }
     check('the artifact saw no key, whole or damaged, at any point', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
     check('a good link still opens after the damaged ones', await v.open(links.probe.url, probeDone))
 
-    const leaked = v.requests.filter((r) => r.includes(key) || r.includes('#k=') || r.includes(key.slice(0, 20)))
-    check('no request carried the key in its URL or Referer', leaked.length === 0, `${leaked.length} of ${v.requests.length}`)
+    // A fragment typed after the live address (second re-check m-1): a
+    // same-document navigation, which the viewer cancels before the URL
+    // changes, ending the open page.
+    await v.evaluate(reset)
+    check('the good link opens before the fragment edit', await v.open(links.probe.url, probeDone))
+    await v.send('Page.navigate', { url: `${base}?redrop-e2e=1#k=${key}` })
+    check('a #k= typed after the live address closes the page and asks for a new tab', await v.waitFor(guardShown, 10000), await v.evaluate(pageText))
+    check('  frames nothing and keeps the key off the address bar', (await v.evaluate(`document.querySelectorAll('iframe').length === 0 && !location.href.includes('k=')`)) === true, await v.evaluate('location.href'))
+    check('  and the page saw no key', (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), (await v.evaluate(stolen)) + (await v.evaluate(liveHref)))
+
+    // An artifact that acts (second re-check B-2a'): it rewrites the
+    // viewer's address so the full link would be a fragment change, also
+    // after replacing the functions the viewer could use, or by replacing
+    // the viewer's document. The full link is then opened in the tab.
+    for (const mode of ['late', 'hard', 'docopen']) {
+      await v.evaluate(reset)
+      await v.evaluate(`localStorage.setItem('rd-probe-mode', ${JSON.stringify(mode)})`)
+      const acted = await v.open(links.probe.url, `localStorage.getItem('rd-probe-acted') === ${JSON.stringify(mode)}`, 20000)
+      check(`[${mode}] the probe acted`, acted)
+      if (mode !== 'docopen') {
+        // Rewriting the address is itself a navigation the viewer didn't
+        // start: refused, and the page closed.
+        check(`[${mode}] the rewrite is refused and closes the page`, await v.waitFor(guardShown, 10000), await v.evaluate(pageText))
+        check(`[${mode}]   the address keeps the live marker`, (await v.evaluate('location.search')) === '?redrop-e2e=1', await v.evaluate('location.href'))
+      }
+      await sleep(500)
+      const before = await v.evaluate('location.href')
+      await v.send('Page.navigate', { url: links.probe.url })
+      await sleep(1500)
+      const saw = (await v.evaluate(stolen)) + (await v.evaluate(liveHref))
+      check(`[${mode}] the full link opened in its tab gives the page no key`, (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), saw)
+      check(`[${mode}]   and the address bar never holds it`, !(await v.evaluate('location.href')).includes('k='), `${before} -> ${await v.evaluate('location.href')}`)
+    }
+    await v.evaluate(reset)
+
+    // A link whose # became %23 (second re-check M3): the server's fixed
+    // page, no viewer, no frame.
+    for (const enc of ['%23', '%2523']) {
+      const shown = await v.open(`${base}${enc}k=${key}`, `(${pageText}).includes('This link is damaged')`, 15000)
+      check(`a link whose # became ${enc} gets the damaged-link page and no frame`, shown && (await v.evaluate(`!document.getElementById('rd-frame')`)) === true, await v.evaluate(pageText))
+    }
+    check('a good link still opens after them', await v.open(links.probe.url, probeDone))
+
+    // Only the two links whose # was deliberately encoded into the path
+    // send the key (as any browser must); nothing else does.
+    const damagedPath = (r) => r.startsWith(`${base}%23k=${key} `) || r.startsWith(`${base}%2523k=${key} `)
+    const leaked = v.requests.filter((r) => !damagedPath(r) && (r.includes(key) || r.includes('#k=') || r.includes(key.slice(0, 20))))
+    check('no other request carried the key in its URL or Referer', leaked.length === 0, `${leaked.length} of ${v.requests.length}`)
+    check('  and the encoded-path links were sent once each', v.requests.filter(damagedPath).length === 2, String(v.requests.filter(damagedPath).length))
     await v.close()
   }
 

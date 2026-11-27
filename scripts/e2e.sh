@@ -587,7 +587,7 @@ print(json.dumps(out))
 PY
   CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" E2E_ELSEWHERE="$BASE/healthz" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
   sed 's/^/    /' "$B/out.txt"
-  pass "e2e: in Chromium, no script in the artifact can read the key, also through a same-tab reopen or a bfcache restore; damaged keys open nothing; gates keep it; SVG files are inert; revocation stops an open page"
+  pass "e2e: in Chromium, no script in the artifact reads the key, watching or acting, through a same-tab reopen, a bfcache restore or a fragment edit; damaged, encoded and %23 links open nothing; gates keep it; SVG files are inert; revocation stops an open page"
 else
   printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi

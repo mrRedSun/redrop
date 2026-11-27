@@ -5,7 +5,18 @@
      on it watches the viewer's window, by events and by polling, for
      anything key-like (k=), through a same-tab reopen of the full link and
      a back/forward cache restore (the re-check of review 33, B-2a). What it
-     sees goes to localStorage, which outlives this document. -->
+     sees goes to localStorage, which outlives this document.
+     localStorage rd-probe-mode makes it act as well (the second re-check,
+     B-2a'): "late" rewrites the viewer's address to "/" a second after load,
+     with a History.prototype from a fresh realm; "hard" first replaces the
+     functions and getters the viewer could use on its window, then rewrites
+     the address; "docopen" makes its own address "/" and then replaces the
+     viewer's document with document.open(), which moves the viewer's
+     address there without a navigation. In every mode it also leaves a
+     timer in the viewer's window that copies its live address to
+     localStorage rd-probe-live-href, which outlives the probe's own
+     document. It sets rd-probe-acted just before it acts: acting may end
+     its own document. -->
 <h1 id="h">probe-4471</h1>
 <p><a id="rel" href="docs/two.html#sec">two</a> <a id="abs" href="/docs/two.html">abs</a></p>
 <script>
@@ -42,6 +53,45 @@
     } catch (e) {}
   }
   setInterval(() => look('poll'), 10)
+  const mode = (() => { try { return localStorage.getItem('rd-probe-mode') || '' } catch (e) { return '' } })()
+  const acted = () => { try { localStorage.setItem('rd-probe-acted', mode || 'passive') } catch (e) {} }
+  try { parent.setInterval(parent.localStorage.setItem.bind(parent.localStorage, 'rd-probe-live-href'), 5, parent.location) } catch (e) {}
+  const pristineHistory = () => {
+    const f = document.createElement('iframe')
+    document.body.appendChild(f)
+    return f.contentWindow.History.prototype
+  }
+  const strip = () => pristineHistory().replaceState.call(parent.history, null, '', '/' + parent.location.hash)
+  if (mode === 'late') setTimeout(() => { acted(); try { strip() } catch (e) {} }, 1000)
+  if (mode === 'hard') {
+    setTimeout(() => {
+      acted()
+      const P = parent, noop = function () {}
+      try {
+        for (const n of ['preventDefault', 'stopImmediatePropagation', 'stopPropagation']) P.Event.prototype[n] = noop
+        Object.defineProperty(P.NavigateEvent.prototype, 'destination', { get() { throw new Error('probe') } })
+        Object.defineProperty(P.NavigationDestination.prototype, 'sameDocument', { get() { return false } })
+        P.History.prototype.replaceState = noop
+        P.History.prototype.pushState = noop
+        P.Element.prototype.remove = noop
+        P.Document.prototype.querySelectorAll = function () { return [] }
+        P.Reflect.apply = noop
+      } catch (e) {}
+      try { strip() } catch (e) {}
+    }, 1000)
+  }
+  if (mode === 'docopen') {
+    setTimeout(() => {
+      acted()
+      try {
+        history.replaceState(null, '', '/')
+        parent.document.open()
+        parent.document.write('<p>probe-replaced</p>')
+        parent.document.close()
+      } catch (e) {}
+    }, 1000)
+  }
+  if (!mode) acted()
   d.ownSession = read(() => Object.entries(sessionStorage))
   d.parentSession = read(() => Object.entries(parent.sessionStorage))
   d.local = read(() => Object.entries(localStorage))

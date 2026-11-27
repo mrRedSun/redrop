@@ -210,11 +210,14 @@
     if (!m) return null
     return '/?' + E2E_MARK + '=1' + (m[1] !== e2e.current ? '&redrop-version=' + m[1] : '') + '#' + m[2] + loc.search + loc.hash
   }
+  // replaceAddress is how the viewer changes its own address; an
+  // end-to-end link's goes through its navigation guard (bootE2E).
+  var replaceAddress = function (url) { history.replaceState(history.state, '', url) }
   function sync() {
     try {
       var next = addressFor(frame.contentWindow.location)
       if (next !== null && next !== location.pathname + location.search + location.hash) {
-        history.replaceState(history.state, '', next)
+        replaceAddress(next)
       }
     } catch (e) {
       // The frame navigated to another origin: leave the address bar alone.
@@ -287,13 +290,21 @@
   // address bar; and the page reloads, so its navigation records (the
   // Performance and Navigation APIs) never held the key either. Only that
   // reloaded page, which reads the CryptoKey back, creates the frame.
+  //
+  // Once the frame exists, the artifact's scripts share this window and
+  // could see any URL it gets, so the key must never arrive in it: the
+  // navigation guard (guardNavigation) stops every change of this page's
+  // address that the viewer didn't make. Opening the full link in this tab
+  // is then refused, and the visitor is asked to open it in a new tab.
   function bootE2E() {
     var E = window.RedropE2E
     var note = doc.getElementById('rd-e2e-msg')
+    var guard = guardNavigation()
+    if (guard) replaceAddress = guard.replace
     var hash = location.hash.slice(1)
-    // Any fragment that starts with k= is a key attempt: a good key, or a
-    // damaged one whose text must go nowhere (review 33 re-check B-2b).
-    var parts = E ? E.splitFragment(hash) : { key: null, rest: hash.indexOf('k=') === 0 ? '' : hash, damaged: false }
+    // Any fragment that could hold a key is a key attempt: a good key, or a
+    // damaged one whose text must go nowhere (review 33 re-check B-2b').
+    var parts = E ? E.splitFragment(hash) : { key: null, rest: '', damaged: true }
     var rest = parts.rest, key = null
     // The address without the key, at the live viewer's marked URL.
     var clean = location.pathname + marked(location.search) + (rest ? '#' + rest : '')
@@ -318,31 +329,49 @@
       else if (code === 'http' && err.status === 403) show('Your access to this link has ended. Reload the page to open it again.')
       else if (code === 'http' && err.status === 404) show('This link doesn\'t exist, or it has expired.')
       else if (code === 'worker') show('Your browser could not start the decryption worker. Allow this site to use service workers (some private windows block them) and reload.')
+      else if (code === 'path') show('This link is damaged: its # was changed to %23, so its key went into the address. Nothing was opened. Ask for the link again and open it exactly as you get it.')
+      else if (code === 'browser') show('This browser can\'t keep an end-to-end encrypted link\'s key from the page it opens (it lacks the Navigation API), so the page isn\'t opened. Use a current version of Chrome, Edge, Firefox or Safari.')
+      else if (code === 'guard') show('The page was closed to keep its key safe: a link was opened in this tab, or the page changed the tab\'s address, while it was open. Open the link in a new tab.')
       else show('This page could not be opened. Reload to try again.')
     }
     // The viewer never changes the fragment with an event (replaceState
     // fires none), so a hashchange is the visitor's: a pasted full link or
     // an edited page. Start over with it.
+    // Until the frame exists, that is safe: nothing but the viewer runs here.
     window.addEventListener('hashchange', function () { location.reload() })
     if (!E) {
       // The decryptor didn't load: nothing can open, and a key leaves the
       // address bar all the same.
-      history.replaceState(history.state, '', clean)
+      replaceAddress(location.pathname + marked(location.search))
       failed(coded('unavailable'))
+      return
+    }
+    if (E.hasEncodedFragment(location.pathname)) {
+      // The link's # became %23: its key is in the path (the server answers
+      // these itself; this is the viewer's own refusal).
+      replaceAddress('/' + marked(''))
+      failed(coded('path'))
       return
     }
     if (parts.damaged) {
       // A key attempt that doesn't parse: no part of it goes anywhere, and
       // a key stored from an earlier visit doesn't open the page through it.
-      history.replaceState(history.state, '', clean)
+      replaceAddress(clean)
       failed(coded('key'))
+      return
+    }
+    if (!guard) {
+      // Without the guard, a page that opened could later see a full link
+      // opened in this tab: refuse to open any (fail closed).
+      replaceAddress(clean)
+      failed(coded('browser'))
       return
     }
     if (parts.key) {
       // The link's key: off the address bar at once, then kept as a
       // CryptoKey, then a reload without it.
       var text = parts.key
-      history.replaceState(history.state, '', clean)
+      replaceAddress(clean)
       if (!secure) {
         show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
         return
@@ -356,7 +385,7 @@
       return
     }
     // The live viewer: always at its marked address before a frame exists.
-    if (location.search !== marked(location.search)) history.replaceState(history.state, '', clean)
+    if (location.search !== marked(location.search)) replaceAddress(clean)
     // The frame's first page: a page in the fragment, else this path with
     // the artifact's own fragment.
     var target = rest.charAt(0) === '/'
@@ -449,7 +478,75 @@
       return startWorker()
     }).then(function (worker) {
       sendKey(worker)
+      guard.arm(function () { failed(coded('guard')) })
       frame.src = target
     }).catch(failed)
+  }
+
+  // guardNavigation keeps every URL this page's address changes to away
+  // from the artifact (review 33 re-check B-2a'). It runs before any frame
+  // exists and captures everything it uses then, because the artifact,
+  // sharing this window later, can replace any function or getter on it.
+  // Its navigate listener is this window's first, so it runs before any the
+  // artifact adds. Once armed (when the frame is created), every
+  // same-document navigation of this page that the viewer didn't start (the
+  // full link or a fragment opened in this tab, or the artifact rewriting
+  // the address) is cancelled before the URL changes, hidden from later
+  // listeners, and ends the artifact: every frame is removed, so none of
+  // its code runs here again. It returns null when the browser lacks the
+  // Navigation API; the viewer then opens nothing.
+  function guardNavigation() {
+    var nav, apply, add, destination, sameDocument, cancelable, stopNow, cancel, replaceState, stateOf, hist, findAll, removeNode
+    try {
+      var getter = function (proto, name) {
+        var d = Object.getOwnPropertyDescriptor(proto, name)
+        if (!d || typeof d.get !== 'function') throw new Error(name)
+        return d.get
+      }
+      nav = window.navigation
+      apply = Reflect.apply
+      add = EventTarget.prototype.addEventListener
+      destination = getter(NavigateEvent.prototype, 'destination')
+      sameDocument = getter(NavigationDestination.prototype, 'sameDocument')
+      cancelable = getter(Event.prototype, 'cancelable')
+      stopNow = Event.prototype.stopImmediatePropagation
+      cancel = Event.prototype.preventDefault
+      replaceState = History.prototype.replaceState
+      stateOf = getter(History.prototype, 'state')
+      hist = window.history
+      findAll = Document.prototype.querySelectorAll
+      removeNode = Element.prototype.remove
+      if (!nav || typeof apply !== 'function' || typeof stopNow !== 'function' || typeof cancel !== 'function' ||
+        typeof replaceState !== 'function' || typeof findAll !== 'function' || typeof removeNode !== 'function') return null
+    } catch (e) {
+      return null
+    }
+    var own = false, armed = false, tripped = null
+    apply(add, nav, ['navigate', function (e) {
+      if (own || !armed || !apply(sameDocument, apply(destination, e, []), [])) return
+      apply(stopNow, e, [])
+      if (apply(cancelable, e, [])) apply(cancel, e, [])
+      var frames = apply(findAll, doc, ['iframe, frame, object, embed'])
+      for (var i = 0, f; (f = frames[i]); i++) apply(removeNode, f, [])
+      if (tripped) {
+        var then = tripped
+        tripped = null
+        then()
+      }
+    }])
+    return {
+      replace: function (url) {
+        own = true
+        try {
+          apply(replaceState, hist, [apply(stateOf, hist, []), '', url])
+        } finally {
+          own = false
+        }
+      },
+      arm: function (then) {
+        armed = true
+        tripped = then
+      },
+    }
   }
 })()

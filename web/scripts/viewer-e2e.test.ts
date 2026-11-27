@@ -30,6 +30,7 @@ class El {
   textContent = ''
   title = ''
   srcs: string[] = []
+  removed = false
   constructor(attrs: Record<string, string> = {}) { this.attrs = attrs }
   getAttribute(k: string) { return this.attrs[k] ?? null }
   addEventListener(type: string, fn: Listener) { (this.listeners[type] ??= []).push(fn) }
@@ -46,9 +47,38 @@ type Browser = {
 }
 const newBrowser = (): Browser => ({ keys: new Map(), session: new Map() })
 
-function page(browser: Browser, opts: { start: string; secure?: boolean; manifest?: (b: Uint8Array) => Uint8Array }) {
+// The Navigation API as the guard uses it, per page, so a test can tamper
+// with one page's prototypes the way an artifact could.
+function navigationAPI() {
+  class PageEvent extends Event {
+    get cancelable() { return super.cancelable }
+    stopImmediatePropagation() { super.stopImmediatePropagation() }
+    preventDefault() { super.preventDefault() }
+  }
+  class NavigationDestination {
+    constructor(private readonly u: string, private readonly same: boolean) {}
+    get url() { return this.u }
+    get sameDocument() { return this.same }
+  }
+  class NavigateEvent extends PageEvent {
+    constructor(private readonly dest: NavigationDestination, cancelable: boolean) { super('navigate', { cancelable }) }
+    get destination() { return this.dest }
+  }
+  return { PageEvent, NavigationDestination, NavigateEvent, navigation: new EventTarget() }
+}
+
+function page(browser: Browser, opts: { start: string; secure?: boolean; noNavigation?: boolean; manifest?: (b: Uint8Array) => Uint8Array }) {
   const top = new URL(opts.start, ORIGIN)
   const location = { origin: ORIGIN, pathname: top.pathname, search: top.search, hash: top.hash }
+  const api = navigationAPI()
+  // navigate fires the navigate event for a same-document change to url,
+  // like the browser, and applies it unless a listener cancelled it.
+  const navigate = (url: string) => {
+    const u = new URL(url, ORIGIN)
+    const go = api.navigation.dispatchEvent(new api.NavigateEvent(new api.NavigationDestination(u.href, true), true))
+    if (go) Object.assign(location, { pathname: u.pathname, search: u.search, hash: u.hash })
+    return go
+  }
   // The server's frame address never holds the live viewer's marker.
   const own = new URLSearchParams(top.search)
   own.delete('redrop-e2e')
@@ -71,6 +101,7 @@ function page(browser: Browser, opts: { start: string; secure?: boolean; manifes
     querySelectorAll: () => [],
     getElementById: (id: string) => ({ 'rd-frame': frame, 'rd-e2e-msg': note } as Record<string, unknown>)[id] ?? null,
   })
+  Object.assign(doc, { querySelectorAll: (sel: string) => (sel.includes('iframe') && !frame.removed ? [frame] : []) })
   const replaced: string[] = []
   const reloads: number[] = []
   const posted: Array<{ type: string; key: unknown; artifact: string }> = []
@@ -79,6 +110,13 @@ function page(browser: Browser, opts: { start: string; secure?: boolean; manifes
   const windowListeners: Record<string, Listener[]> = {}
   const activeWorker = { state: 'activated', postMessage: (m: { type: string; key: unknown; artifact: string }) => posted.push(m) }
   const fetched: string[] = []
+  class History {
+    get state() { return null }
+    replaceState(_s: unknown, _t: string, url: string) {
+      if (navigate(url)) replaced.push(url)
+    }
+    pushState() { throw new Error('the viewer must never push history entries') }
+  }
   const manifest = vectors.objects.find((o) => o.type === 1 && o.version === 3)!
   const context = vm.createContext({
     document: doc, location, URL, URLSearchParams, Date, Intl, Array, Uint8Array,
@@ -86,17 +124,11 @@ function page(browser: Browser, opts: { start: string; secure?: boolean; manifes
     crypto: globalThis.crypto, CryptoKey: globalThis.CryptoKey, TextEncoder, TextDecoder, atob, btoa, ReadableStream,
     setInterval: () => 0, clearInterval() {}, setTimeout,
     addEventListener(type: string, fn: Listener) { (windowListeners[type] ??= []).push(fn) },
-    history: {
-      state: null,
-      replaceState(_s: unknown, _t: string, url: string) {
-        replaced.push(url)
-        const u = new URL(url, ORIGIN)
-        location.pathname = u.pathname
-        location.search = u.search
-        location.hash = u.hash
-      },
-      pushState() { throw new Error('the viewer must never push history entries') },
-    },
+    history: new History(), History, EventTarget,
+    Event: api.PageEvent, NavigateEvent: api.NavigateEvent, NavigationDestination: api.NavigationDestination,
+    ...(opts.noNavigation ? {} : { navigation: api.navigation }),
+    Document: { prototype: { querySelectorAll(this: { querySelectorAll(s: string): unknown }, sel: string) { return this.querySelectorAll(sel) } } },
+    Element: { prototype: { remove(this: El) { this.removed = true } } },
     sessionStorage: {
       getItem: (k: string) => browser.session.get(k) ?? null,
       setItem: (k: string, v: string) => void browser.session.set(k, v),
@@ -134,8 +166,24 @@ function page(browser: Browser, opts: { start: string; secure?: boolean; manifes
   }
   vm.runInContext(viewer, context)
   return {
-    frame, note, doc, replaced, reloads, posted, registered, fetched,
+    frame, note, doc, replaced, reloads, posted, registered, fetched, context, api,
     get href() { return location.pathname + location.search + location.hash },
+    // visit opens url in this tab, like the address bar: a new document
+    // unless only the fragment changes, which is this page's navigation.
+    visit(url: string) {
+      const u = new URL(url, ORIGIN)
+      if (u.pathname !== location.pathname || u.search !== location.search) return 'new document'
+      if (!navigate(url)) return 'cancelled'
+      for (const fn of windowListeners.hashchange ?? []) fn()
+      return 'changed'
+    },
+    // watch adds a navigate listener the way the artifact would, after the
+    // frame exists, and returns every URL it saw.
+    watch() {
+      const seen: string[] = []
+      api.navigation.addEventListener('navigate', (e) => seen.push((e as InstanceType<typeof api.NavigateEvent>).destination.url))
+      return seen
+    },
     // settled waits for the boot to reload, frame the page, or show a
     // message. The bound only catches a hang.
     async settled() {
@@ -286,6 +334,96 @@ await test('a damaged key after a good visit opens nothing and leaves the addres
     assert.deepEqual(p.replaced, ['/?redrop-e2e=1'], frag)
     assert.ok(!p.href.includes('k='), frag)
   }
+})
+
+// The second re-check of review 33, B-2b': anything that could hold a key
+// is a key attempt, encoded or in another case, wherever it sits in the
+// fragment. With the key stored, none of it reaches the frame.
+await test('encoded, re-cased or displaced key fragments after a good visit open nothing', async () => {
+  const browser = newBrowser()
+  await open(browser, `/#k=${vectors.key}`)
+  const K = vectors.key
+  for (const frag of [`k%3D${K}`, `k%3d${K}`, `k%253D${K}`, `%6B=${K}`, `K=${K}`, `&k=${K}`, `%20k=${K}`, `x&k=${K}`, `/docs/a.html?k=${K}`, K]) {
+    const p = page(browser, { start: `/#${frag}` })
+    await p.settled()
+    assert.match(p.note.textContent, /damaged/, frag)
+    assert.deepEqual(p.frame.srcs, [], frag)
+    assert.deepEqual(p.fetched, [], frag)
+    assert.ok(!p.href.includes(K.slice(0, 20)), `${frag}: ${p.href}`)
+  }
+})
+
+// M3: a link whose # became %23 in the path.
+await test('a path holding an encoded # opens nothing and leaves the address bar', async () => {
+  const browser = newBrowser()
+  await open(browser, `/#k=${vectors.key}`)
+  for (const path of [`/%23k=${vectors.key}`, `/%2523k=${vectors.key}`]) {
+    const p = page(browser, { start: path })
+    await p.settled()
+    assert.match(p.note.textContent, /changed to %23/, path)
+    assert.deepEqual(p.frame.srcs, [], path)
+    assert.equal(p.href, '/?redrop-e2e=1')
+  }
+})
+
+// B-2a': once the frame exists, no address change the viewer didn't make
+// goes through: not the full link opened in this tab (whatever the address
+// is then), not a fragment typed after the live address, and not the
+// artifact rewriting the address to set that up. Each one ends the page.
+await test('a link opened in the tab of an open page is refused, before anything sees it, and the page ends', async () => {
+  for (const reopen of [`/?redrop-e2e=1#k=${vectors.key}`, '/?redrop-e2e=1#/docs/a.html']) {
+    const browser = newBrowser()
+    const { second } = await open(browser, `/#k=${vectors.key}`)
+    const seen = second.watch()
+    const before = second.href
+    assert.equal(second.visit(reopen), 'cancelled', reopen)
+    assert.deepEqual(seen, [], 'a later listener never sees the URL')
+    assert.equal(second.href, before, 'the address never changed')
+    assert.equal(second.frame.removed, true, 'the frame is gone')
+    assert.match(second.note.textContent, /new tab/)
+    assert.deepEqual(second.reloads, [])
+  }
+})
+
+await test('the artifact rewriting the address ends it, and the full link then loads a new page', async () => {
+  const { second } = await open(newBrowser(), `/#k=${vectors.key}`)
+  vm.runInContext(`history.replaceState(null, '', '/#/')`, second.context)
+  assert.equal(second.href, '/?redrop-e2e=1', 'the marker stays')
+  assert.equal(second.frame.removed, true)
+  assert.match(second.note.textContent, /new tab/)
+  assert.equal(second.visit(`/#k=${vectors.key}`), 'new document')
+})
+
+await test('an artifact that replaces the functions the guard uses doesn\'t disable it', async () => {
+  const { second } = await open(newBrowser(), `/#k=${vectors.key}`)
+  vm.runInContext(`
+    Event.prototype.preventDefault = function () {}
+    Event.prototype.stopImmediatePropagation = function () {}
+    Object.defineProperty(NavigateEvent.prototype, 'destination', { get: function () { throw new Error('no') } })
+    Object.defineProperty(NavigationDestination.prototype, 'sameDocument', { get: function () { return false } })
+    History.prototype.replaceState = function () {}
+    Element.prototype.remove = function () {}
+    Document.prototype.querySelectorAll = function () { return [] }
+    Reflect.apply = function () {}
+  `, second.context)
+  const seen = second.watch()
+  assert.equal(second.visit(`/?redrop-e2e=1#k=${vectors.key}`), 'cancelled')
+  assert.deepEqual(seen, [])
+  assert.equal(second.frame.removed, true)
+})
+
+await test('without the Navigation API nothing is opened, and the key leaves the address bar', async () => {
+  const first = page(newBrowser(), { start: `/#k=${vectors.key}`, noNavigation: true })
+  await first.settled()
+  assert.match(first.note.textContent, /Navigation API/)
+  assert.deepEqual(first.reloads, [])
+  assert.ok(!anyKey(first.href))
+  const browser = newBrowser()
+  await open(browser, `/#k=${vectors.key}`)
+  const later = page(browser, { start: '/?redrop-e2e=1', noNavigation: true })
+  await later.settled()
+  assert.match(later.note.textContent, /Navigation API/)
+  assert.deepEqual(later.frame.srcs, [], 'not even with the key stored')
 })
 
 await test('a stored key that no longer matches is forgotten', async () => {
