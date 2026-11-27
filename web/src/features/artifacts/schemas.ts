@@ -38,8 +38,14 @@ export const Artifact = Schema.Struct({
   revoked_by_admin: Schema.Boolean,
   /** End-to-end encrypted: the server holds only ciphertext, and `url` lacks the key (DESIGN.md). */
   e2e: Schema.Boolean,
+  /** End-to-end encrypted only: the link to give out, on this server's own origin, without its `#k=` key. */
+  e2e_link: Schema.optionalKey(Schema.String),
 })
 export type Artifact = typeof Artifact.Type
+
+/** The link people open: an end-to-end encrypted artifact's goes through this server's key intake page. */
+export const shareLink = (a: { readonly url: string; readonly e2e: boolean; readonly e2e_link?: string }): string =>
+  a.e2e && a.e2e_link ? a.e2e_link : a.url
 
 /** The status as shown to people: an administrator's revocation is named as such. */
 export const statusLabel = (a: { readonly status: ArtifactStatus; readonly revoked_by_admin: boolean }): string =>

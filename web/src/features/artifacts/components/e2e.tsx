@@ -19,8 +19,8 @@ export function E2EBadge() {
 export function E2ELinkNote({ id }: { id: string }) {
   return (
     <p className="text-muted-foreground text-sm">
-      End-to-end encrypted: this link has no key and opens nothing by itself. The working link ends in{' '}
-      <code>#k=…</code> and was printed by <code>redrop share --e2e</code>; the server never had the key.{' '}
+      End-to-end encrypted: this link has no key and opens nothing by itself. The working link is this one
+      followed by <code>#k=…</code>, printed by <code>redrop share --e2e</code>; the server never had the key.{' '}
       <code>redrop info {id}</code> prints it on the machine that shared it.
     </p>
   )

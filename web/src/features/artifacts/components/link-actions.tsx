@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useCopy } from '@/hooks/use-copy'
 import * as artifacts from '../atoms'
-import type { Artifact } from '../schemas'
+import { shareLink, type Artifact } from '../schemas'
 
 /**
  * Owner actions on one artifact: copy/open link, revoke/restore, rotate, delete.
@@ -38,11 +38,11 @@ export function LinkActions({ artifact, afterDelete }: { artifact: Artifact; aft
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => copy(artifact.url, 'Link copied')}>
+          <DropdownMenuItem onSelect={() => copy(shareLink(artifact), 'Link copied')}>
             <Copy /> Copy link
           </DropdownMenuItem>
           <DropdownMenuItem asChild>
-            <a href={artifact.url} target="_blank" rel="noreferrer noopener">
+            <a href={shareLink(artifact)} target="_blank" rel="noreferrer noopener">
               <ExternalLink /> Open link
             </a>
           </DropdownMenuItem>
