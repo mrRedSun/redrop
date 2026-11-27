@@ -57,6 +57,7 @@ type Service struct {
 
 	tunnels    *tunnel.Registry // live tunnel connections (SetTunnels); nil = none
 	tunnelSync sync.Mutex       // orders syncTunnel's read-then-apply (see there)
+	live       *liveHub         // live reload leases and open streams (live.go)
 }
 
 // maxLimiterKeys bounds each unlock limiter's table (about 10 MiB when
@@ -79,6 +80,7 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		unlockIPLimiter: security.NewLimiter(60, time.Hour, maxLimiterKeys, security.EvictOldest, time.Now),
 		unlockBudget:    security.NewLimiter(lockThreshold, time.Hour, maxLimiterKeys, security.RefuseNew, time.Now),
 		checkPassword:   security.CheckPassword,
+		live:            newLiveHub(cfg.LiveMaxStreams, cfg.LiveMaxStreamsPerArtifact, time.Now),
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
 		s.Close()
@@ -90,6 +92,7 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 // Close stops the rate limiters' background sweepers. The service stays
 // usable; call it once requests have drained, at shutdown.
 func (s *Service) Close() {
+	s.EndLiveStreams()
 	s.unlockLimiter.Close()
 	s.unlockIPLimiter.Close()
 	s.unlockBudget.Close()

@@ -99,6 +99,8 @@ func (a *API) routes() {
 		option.Query("status", "open or all (default all)"), option.QueryInt("version", "Only comments on this version"))...)...)
 	fuego.Patch(art, "/{id}/feedback/{comment}", a.resolveComment, with(anyAuthJSON, op("resolveComment", "Mark a comment resolved or open again")...)...)
 	fuego.Delete(art, "/{id}/feedback/{comment}", a.deleteComment, with(anyAuthOpts, op("deleteComment", "Delete a comment")...)...)
+	fuego.Put(art, "/{id}/live/{session}", a.holdLive, with(anyAuthOpts, op("holdLive", "Start or renew a watch session's live reload lease")...)...)
+	fuego.Delete(art, "/{id}/live/{session}", a.releaseLive, with(anyAuthOpts, op("releaseLive", "End a watch session's live reload lease")...)...)
 
 	// Tunnels (DESIGN.md "Tunnels"): artifacts of kind tunnel, served live by
 	// the owner's redrop tunnel over the connect WebSocket.

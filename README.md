@@ -191,6 +191,19 @@ typed notice events. Ctrl-C stops it. It takes `update`'s content options
 re-rendered on every change and `--render none` keeps it raw. Folders follow
 the [folder rules](#folder-uploads).
 
+**Live reload** is on while `watch` runs (`--no-live` turns it off). People
+who have the link open in redrop's viewer page see each new version without
+reloading: the viewer page reloads its frame, keeping the page and scroll
+position, and the info panel shows a "Live" row. Nothing is added to the
+artifact. It needs the info button and an HTML page or folder: `--no-info`
+links, direct views (`?redrop-info=0`) and file artifacts are not reloaded.
+Reloads never use a view, so view-limited and `--once` links work too. Live
+mode ends within a minute after `watch` stops or dies; while it is off,
+viewer pages make no extra requests. A temporary refusal (the info button
+off, or all sessions in use) is retried at the renewal interval, so fixing
+the cause restores live reload without restarting `watch`. See
+[`docs/DESIGN.md`](docs/DESIGN.md#live-reload).
+
 ### Tunnels
 
 ```sh
@@ -270,6 +283,9 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 | `REDROP_FEEDBACK_BURST`, `REDROP_FEEDBACK_PER_MINUTE` | `5`, `1`: viewer comments a client may post (burst, then per minute) |
 | `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
+| `REDROP_LIVE_LEASE` | `60s` (15s to 10m): how long a `redrop watch` session's live reload lease lasts; the CLI renews it every third of that |
+| `REDROP_LIVE_KEEPALIVE` | `20s` (1s to 29s): keep-alive interval of live reload streams; keep it under your proxies' idle timeout (Cloudflare: about 100 s) |
+| `REDROP_LIVE_MAX_STREAMS`, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` | `1000`, `100`: open live reload streams on the server and per artifact (plus one quarter of the server cap per artifact owner, 32 watch leases per owner, and 16 per client network); beyond them viewers get no live reload |
 | `REDROP_TUNNELS_PER_USER` | `3`: tunnels one user may have connected; `0` turns tunnels off |
 | `REDROP_TUNNEL_ARTIFACTS_PER_USER` | `20`: tunnels one user may keep, connected or not, until deleted |
 | `REDROP_TUNNEL_STREAMS`, `REDROP_TUNNEL_STREAMS_TOTAL` | `32`, `256`: open requests and WebSockets per tunnel, and across the server (each holds at most about 300 KB) |
@@ -299,6 +315,11 @@ traefik.http.routers.redrop-content.rule: >-
 Update this rule **before** deploying a version that mints word links; a rule
 that only matches the 26-character format sends new links nowhere. The content
 domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
+
+Live reload streams (`/__redrop/live`, `text/event-stream`) stay open while
+`redrop watch` runs. Proxies must pass them unbuffered (Traefik and Cloudflare
+do; redrop also sends `X-Accel-Buffering: no`) and must not close a
+connection that is idle for less than `REDROP_LIVE_KEEPALIVE`.
 
 Tunnels need WebSockets on both hosts: `redrop tunnel` connects to
 `/api/v1/tunnels/{id}/connect` on the dashboard host, and visitors' own

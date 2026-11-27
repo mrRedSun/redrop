@@ -34,6 +34,7 @@ func (s *Service) Sweep(ctx context.Context) {
 		s.releaseExpiredUploads(ctx, expired)
 	}
 	s.db.Cleanup(ctx, viewRetention)
+	s.live.prune()
 }
 
 // releaseExpiredUploads removes expired uploads and their reservations. Only

@@ -5,9 +5,9 @@
 set -euo pipefail
 BASE=${BASE:-http://$(hostname -I | awk '{print $1}'):8080}
 WORK=$(mktemp -d)
-# A watcher started below is ours: stop it if a check fails first.
-# So are a tunnel and its local test app.
-trap 'for p in "${WPID:-}" "${TPID:-}" "${APID:-}"; do [ -z "$p" ] || kill "$p" 2>/dev/null; done; rm -rf "$WORK"' EXIT
+# A watcher and a live stream started below are ours: stop them if a check
+# fails first. So are a tunnel and its local test app.
+trap 'for p in "${WPID:-}" "${SPID:-}" "${TPID:-}" "${APID:-}"; do [ -z "$p" ] || kill "$p" 2>/dev/null; done; rm -rf "$WORK"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
 R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
@@ -183,6 +183,40 @@ WPID=
 # show that nothing else was published.
 [ "$(w_versions)" = 2 ] || die "watch made exactly one new version, got $(w_versions)"
 pass "watch: content change published, version printed, clean SIGTERM exit"
+
+# Live reload: while watch runs, the viewer page's stream announces each new
+# current version; reloading uses no views; stopping watch ends the stream,
+# and the stream is then the identical miss.
+STREAM=(-H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: same-origin' -H 'Accept: text/event-stream')
+echo '<!doctype html><title>l1</title><p>live one</p>' > "$WORK/live.html"
+LIVE_URL=$($R share "$WORK/live.html" -q)
+LID=$($R info "$LIVE_URL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ "$(code_of "${STREAM[@]}" "${LIVE_URL}__redrop/live")" = 404 ] || die "live stream before watch is not the miss"
+curl -fsS "${DOC[@]}" "$LIVE_URL" | grep -q 'id="rd-live"' && die "live row before watch"
+$R watch "$LID" "$WORK/live.html" --debounce 300ms >"$WORK/live.log" 2>"$WORK/live.err" &
+WPID=$!
+l_on() { grep -q "^live reload on" "$WORK/live.err"; }
+wait_until 60 l_on || { cat "$WORK/live.err"; die "watch did not turn live reload on within 60s"; }
+curl -fsS "${DOC[@]}" "$LIVE_URL" | grep -q 'id="rd-live"' || die "viewer page without the live row"
+LVIEWS=$(views_of "$LID")
+command curl -sN --max-time 120 "${STREAM[@]}" "${LIVE_URL}__redrop/live" >"$WORK/stream.txt" &
+SPID=$!
+s_has() { grep -q "$1" "$WORK/stream.txt"; }
+wait_until 60 s_has '"version":1' || { cat "$WORK/stream.txt"; die "live stream did not announce version 1"; }
+echo '<!doctype html><title>l2</title><p>live two</p>' > "$WORK/live.html.tmp"
+mv "$WORK/live.html.tmp" "$WORK/live.html"
+wait_until 60 s_has '"version":2' || { cat "$WORK/stream.txt" "$WORK/live.err"; die "live stream did not announce version 2"; }
+curl -fsS "${FRAME[@]}" "$LIVE_URL" | grep -q 'live two' || die "reloaded frame content"
+[ "$(views_of "$LID")" = "$LVIEWS" ] || die "live stream or frame reload counted a view"
+kill -TERM "$WPID" 2>/dev/null
+wait_until 60 s_has 'event: end' || { cat "$WORK/stream.txt"; die "stopping watch did not end the live stream"; }
+WRC=0; wait "$WPID" || WRC=$?
+WPID=
+[ "$WRC" = 0 ] || die "live watch exit code $WRC after SIGTERM, want 0"
+wait "$SPID" 2>/dev/null || true
+SPID=
+[ "$(code_of "${STREAM[@]}" "${LIVE_URL}__redrop/live")" = 404 ] || die "live stream after watch is not the miss"
+pass "live reload: stream announces new versions while watch runs, no views used, ends with watch"
 
 # one-time link with password
 P=$($R share "$WORK/page.html" --once --password-generate --json)

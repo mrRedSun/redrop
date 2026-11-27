@@ -26,18 +26,6 @@ import (
 // handler, the CLI's agent (client.RunTunnel) over a real WebSocket, and a
 // local httptest app.
 
-// waitFor polls cond until it holds. The bound only catches a real hang.
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // noDelay retries at once, so reconnect tests wait on events, not time.
 type noDelay struct{}
 

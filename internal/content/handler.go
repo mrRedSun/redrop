@@ -176,6 +176,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.preview(w, r, a)
 		case rest == "open":
 			h.open(w, r, a)
+		case rest == "live":
+			h.live(w, r, a)
 		case strings.HasPrefix(rest, versionPrefix):
 			h.serveOldVersion(w, r, a, strings.TrimPrefix(rest, versionPrefix))
 		default:

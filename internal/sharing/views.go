@@ -151,7 +151,7 @@ type ViewerInfo struct {
 	Current   int   // the current version's number
 	Latest    int   // the highest retained version number ("version N of Latest")
 	CanOpen   bool  // viewers may open older versions
-	Live      bool  // a tunnel: a running app, not stored files or versions
+	Tunnel    bool  // a running app, not stored files or versions
 	Revisions []Revision
 }
 
@@ -170,7 +170,7 @@ func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snaps
 	info := ViewerInfo{
 		Title: a.Title, Version: shown.Version, Published: shown.Published, ExpiresAt: a.ExpiresAt,
 		Password: a.PasswordHash != "", Size: shown.Size, Files: shown.Files,
-		Current: a.CurrentVersion, Latest: a.CurrentVersion, CanOpen: s.oldVersionsOpen(a), Live: IsTunnel(a),
+		Current: a.CurrentVersion, Latest: a.CurrentVersion, CanOpen: s.oldVersionsOpen(a), Tunnel: IsTunnel(a),
 	}
 	if a.MaxViews > 0 {
 		info.MaxViews, info.ViewsLeft = a.MaxViews, max(a.MaxViews-a.Views, 0)

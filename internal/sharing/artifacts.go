@@ -347,6 +347,7 @@ func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Cont
 	}
 	attempt.committed = true
 	s.log.Info("artifact version published", "id", a.ID, "version", n, "user", actor.Username)
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 
@@ -397,6 +398,7 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 		return Artifact{}, mapStore(err)
 	}
 	s.syncTunnel(ctx, a.ID)
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 
@@ -410,6 +412,7 @@ func (s *Service) Rotate(ctx context.Context, actor Actor, id string) (Artifact,
 		return Artifact{}, mapStore(err)
 	}
 	s.syncTunnel(ctx, a.ID)
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 
@@ -423,6 +426,7 @@ func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
 	}
 	s.syncTunnel(ctx, a.ID)
 	s.log.Info("artifact deleted", "id", a.ID, "user", actor.Username)
+	s.changed(a.ID)
 	return nil
 }
 
@@ -465,6 +469,7 @@ func (s *Service) ActivateVersion(ctx context.Context, actor Actor, id string, n
 	if err := s.db.SetCurrentVersion(ctx, a.ID, number); err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 

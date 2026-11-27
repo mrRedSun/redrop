@@ -52,6 +52,8 @@ func reservedRouteFixture(t *testing.T) (*Handler, *store.Store, map[string]*sto
 		ContentURL:       &url.URL{Scheme: "https", Host: "usercontent.example"},
 		ContentMissBurst: 10_000, ContentMissPerMinute: 1,
 		ViewWindowLimited: time.Hour, ViewWindowPassword: 12 * time.Hour,
+		InfoButtonDefault: true, LiveLease: time.Minute, LiveKeepAlive: 20 * time.Second,
+		LiveMaxStreams: 1000, LiveMaxStreamsPerArtifact: 100,
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sh, err := sharing.New(db, blobs, cfg, []byte(routeTestSecret), log)
