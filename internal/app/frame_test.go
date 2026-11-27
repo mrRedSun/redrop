@@ -559,7 +559,9 @@ func TestSelfURLsStayOnOrigin(t *testing.T) {
 				}
 				if strings.Contains(b, `id="rd-info"`) {
 					for _, m := range hrefRE.FindAllStringSubmatch(b, -1) {
-						if ref := html.UnescapeString(m[1]); !sameOriginRef(ref, host.Host) {
+						// The one link off the origin is the report form on
+						// the app origin (DESIGN.md "Abuse handling").
+						if ref := html.UnescapeString(m[1]); !sameOriginRef(ref, host.Host) && !strings.HasPrefix(ref, h.app.cfg.PublicOrigin()+"/report#url=") {
 							t.Errorf("%s %s %q: link %q leaves the origin", a.Title, name, p, ref)
 						}
 					}

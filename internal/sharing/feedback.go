@@ -138,6 +138,13 @@ func invisible(r rune) bool {
 	return (r >= 0xE0000 && r <= 0xE007F) || r == '\u200B' || (r >= '\u2060' && r <= '\u2064') || r == '\uFEFF' || r == '\u180E'
 }
 
+// bidi reports the bidirectional embedding, override and isolate controls:
+// text that keeps them can render with a misleading order (for example a
+// file name that reads one way in the queue and another in a file manager).
+func bidi(r rune) bool {
+	return (r >= '\u202A' && r <= '\u202E') || (r >= '\u2066' && r <= '\u2069')
+}
+
 // cleanText makes viewer text valid UTF-8 without control characters (C0,
 // DEL, C1) or invisible characters. Multiline text keeps tabs, and every
 // line break (\r\n, \r, U+2028, U+2029, U+0085) becomes \n; single-line
@@ -153,7 +160,7 @@ func cleanText(s string, multiline bool) string {
 			return -1
 		case multiline && r == '\t':
 			return r
-		case unicode.IsControl(r), invisible(r):
+		case unicode.IsControl(r), invisible(r), bidi(r):
 			return -1
 		}
 		return r

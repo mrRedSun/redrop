@@ -17,6 +17,7 @@ import * as admin from '@/features/admin/endpoints'
 import * as artifacts from '@/features/artifacts/endpoints'
 import { settingsDefaults, ArtifactSettingsForm, toUpdateRequest } from '@/features/artifacts/schemas'
 import * as auth from '@/features/auth/endpoints'
+import * as reports from '@/features/reports/endpoints'
 import * as tokens from '@/features/tokens/endpoints'
 import { Schema } from 'effect'
 
@@ -28,11 +29,15 @@ const password = process.env.E2E_PASSWORD ?? 'correct-horse-battery'
 ;(globalThis as { location?: unknown }).location = { origin: base, pathname: '/', href: base + '/' }
 
 // fetch with a cookie jar and the browser's same-origin header, like the dashboard.
+// A browser also sends Origin with every POST; the report endpoint requires
+// it to be the server's public origin (read from /auth/config below).
 let cookie = ''
+let publicOrigin = ''
 const browserFetch: typeof fetch = async (input, init) => {
   const headers = new Headers(init?.headers)
   if (cookie) headers.set('cookie', cookie)
   headers.set('sec-fetch-site', 'same-origin')
+  if (publicOrigin && init?.method === 'POST' && String(input instanceof Request ? input.url : input).endsWith('/api/v1/reports')) headers.set('origin', publicOrigin)
   const res = await fetch(input, { ...init, headers })
   const set = res.headers.getSetCookie().map((c) => c.split(';')[0])
   if (set.length) cookie = set.join('; ')
@@ -54,11 +59,15 @@ const program = Effect.gen(function* () {
   check('login signs in (or asks for TOTP)', login._tag === 'SignedIn' || login._tag === 'TotpRequired')
   const me = yield* auth.getSession
   check('session decodes after login', Option.isSome(me))
-  check('auth config decodes', (yield* auth.config).public_url.startsWith('http'))
+  const config = yield* auth.config
+  check('auth config decodes', config.public_url.startsWith('http'))
+  publicOrigin = config.public_url
 
   const list = yield* artifacts.list({ q: '', status: 'all' })
   check('artifact list decodes', true)
-  const first = list[0]
+  // e2e may have left the newest artifact revoked; the report and
+  // revocation checks below need one that is still live.
+  const first = list.find((a) => a.status === 'active') ?? list[0]
   if (first) {
     const a = yield* artifacts.get(first.id)
     const versions = yield* artifacts.versions(a.id)
@@ -96,6 +105,29 @@ const program = Effect.gen(function* () {
     check('created invite URL is Redacted', Redacted.value(inv.url).includes('/invite/'))
     check('invite list decodes', (yield* admin.invites).some((i) => i.id === inv.id))
     yield* admin.deleteInvite(inv.id)
+    // Abuse reports (DESIGN.md "Abuse handling"): file one as the report page
+    // does, find it in the queue without a link on its artifact, dismiss it.
+    // The marker is unique per run, so earlier runs on the same server don't
+    // make the check expect a report that is already closed.
+    if (first) {
+      const link = (yield* artifacts.get(first.id)).url
+      const marker = `contract-check-${Date.now()}`
+      yield* reports.submit({ url: link, category: 'other', details: marker })
+      const visitors = yield* admin.reports('open', 'visitor')
+      check('report queue has filtered paging metadata', visitors.total >= 1 && visitors.page === 1 && visitors.page_size === 50 && visitors.items.every((r) => r.source === 'visitor' && r.status === 'open'))
+      const queued = visitors.items.find((r) => r.artifact_id === first.id && r.details === marker)
+      check('report reaches the admin queue', queued !== undefined && queued.reported_url === link && queued.artifact !== null && !('url' in queued.artifact))
+      if (queued) {
+        const dismissed = yield* admin.setReportStatus(queued.id, { status: 'dismissed' })
+        check('report dismissal is audited', dismissed.status === 'dismissed' && (dismissed.history ?? []).some((e) => e.action === 'report.dismissed'))
+      }
+    }
+    const reportQueue = yield* admin.reports('all')
+    check('admin report queue decodes', Array.isArray(reportQueue.items) && reportQueue.total >= reportQueue.items.length)
+    const beyondQueue = yield* admin.reports('all', 'all', Math.floor(reportQueue.total / reportQueue.page_size) + 2)
+    check('report paging reaches an empty page without losing the total', beyondQueue.items.length === 0 && beyondQueue.total === reportQueue.total)
+    const systemQueue = yield* admin.reports('all', 'system')
+    check('system report filter excludes visitors', systemQueue.items.every((r) => r.source === 'system'))
     const all = yield* admin.artifacts('', 'all')
     check('admin artifacts decode without links', all.every((a) => !('url' in a)))
     // An administrator's revocation: the owner sees it and cannot undo it.

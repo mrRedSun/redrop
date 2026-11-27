@@ -113,6 +113,17 @@ func (a *API) routes() {
 	fuego.Patch(adm, "/artifacts/{id}", a.admin.updateArtifact, with(adminJSON, op("adminUpdateArtifact", "Revoke or restore any artifact")...)...)
 	fuego.Delete(adm, "/artifacts/{id}", a.admin.deleteArtifact, with(adminOpts, op("adminDeleteArtifact", "Delete any artifact")...)...)
 
+	// Abuse reports (DESIGN.md "Abuse handling"): the public form's endpoint
+	// and the admin queue.
+	rep := fuego.Group(v1, "/reports", option.Tags("reports"))
+	fuego.Post(rep, "", a.submitReport, append(op("submitReport", "Report an abusive shared link (no account; same-origin only)"),
+		option.Middleware(a.sameOriginOnly), option.Middleware(a.reportBody), jsonOnly, option.DefaultStatusCode(http.StatusAccepted))...)
+	fuego.Get(adm, "/reports", a.admin.listReports, with(adminOpts, append(op("adminListReports", "Abuse report queue, newest first"),
+		option.Query("status", "open (default), resolved, dismissed, or all"))...)...)
+	fuego.Patch(adm, "/reports/{id}", a.admin.updateReport, with(adminJSON, op("adminUpdateReport", "Resolve, dismiss, or reopen a report")...)...)
+	fuego.Post(adm, "/reports/{id}/revoke", a.admin.revokeReported, with(adminOpts, op("adminRevokeReported", "Revoke the reported artifact as an administrator and resolve its reports")...)...)
+	fuego.Post(adm, "/reports/{id}/suspend", a.admin.suspendReportedOwner, with(adminOpts, op("adminSuspendReportedOwner", "Suspend the reported artifact's owner: disable the account and revoke all of its artifacts")...)...)
+
 	fuego.GetStd(s, "/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("ok\n"))

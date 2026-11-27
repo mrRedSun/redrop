@@ -33,7 +33,9 @@ func (m *Moderation) List(ctx context.Context, query, status string) ([]AdminArt
 
 // SetRevoked sets or clears an administrator's revocation of any artifact.
 // It is stored apart from the owner's own revocation: the owner cannot clear
-// it, and clearing it leaves an owner's revocation in place.
+// it, and clearing it leaves an owner's revocation in place. Every change
+// writes an audit row, so a later restore is visible in the reports that
+// led to the revocation.
 func (m *Moderation) SetRevoked(ctx context.Context, admin, id string, revoked bool) (AdminArtifact, error) {
 	if err := m.s.db.UpdateArtifact(ctx, id, store.ArtifactUpdate{AdminRevoked: &revoked}); err != nil {
 		return AdminArtifact{}, mapStore(err)
@@ -42,6 +44,14 @@ func (m *Moderation) SetRevoked(ctx context.Context, admin, id string, revoked b
 	a, err := m.s.db.ArtifactByID(ctx, id)
 	if err != nil {
 		return AdminArtifact{}, mapStore(err)
+	}
+	action := "artifact.revoke"
+	detail := "revoked the artifact"
+	if !revoked {
+		action, detail = "artifact.restore", "restored the artifact"
+	}
+	if err := m.s.db.WriteAudit(ctx, store.AuditEntry{Actor: admin, Action: action, ArtifactID: id, UserID: a.UserID, Detail: detail}); err != nil {
+		return AdminArtifact{}, apperr.Internal(err)
 	}
 	m.s.log.Info("admin changed artifact", "admin", admin, "id", id, "owner", a.OwnerUsername, "revoked", revoked)
 	return m.s.adminView(a), nil
