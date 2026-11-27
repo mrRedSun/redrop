@@ -16,6 +16,9 @@
 // Plain-HTTP content origins are marked secure for this browser only
 // (--unsafely-treat-insecure-origin-as-secure), since browsers give WebCrypto
 // and service workers to secure contexts alone.
+// The run is bounded: every DevTools call gives up after CALL_MS, the whole
+// run after RUN_MS, and each second re-check case gets its own browser
+// context, closed after it. scripts/e2e.sh also caps its memory.
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -34,6 +37,8 @@ const args = ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run
 if (origins.length) args.push(`--unsafely-treat-insecure-origin-as-secure=${origins.join(',')}`)
 const chrome = spawn(process.env.CHROMIUM || 'chromium', [...args, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const CALL_MS = 20000
+const RUN_MS = 10 * 60 * 1000
 let failed = 0
 const check = (name, ok, detail = '') => {
   if (!ok) failed++
@@ -51,7 +56,14 @@ function connect(url) {
     if (msg.method) listeners.forEach((f) => f(msg))
   })
   const ready = new Promise((r) => ws.addEventListener('open', r))
-  const send = (method, params = {}) => new Promise((resolve) => { const i = ++id; pending.set(i, resolve); ws.send(JSON.stringify({ id: i, method, params })) })
+  // send gives up after CALL_MS, so a page that stops answering fails the
+  // check that asked instead of hanging the run.
+  const send = (method, params = {}) => new Promise((resolve) => {
+    const i = ++id
+    const timer = setTimeout(() => { if (pending.delete(i)) resolve({ error: { message: `${method} timed out` } }) }, CALL_MS)
+    pending.set(i, (msg) => { clearTimeout(timer); resolve(msg) })
+    ws.send(JSON.stringify({ id: i, method, params }))
+  })
   return { ws, ready, send, on: (f) => listeners.push(f) }
 }
 
@@ -66,7 +78,11 @@ async function visitor() {
   await p.ready
   const requests = []
   const notCached = []
+  // Every same-document navigation the browser made, by URL: a key in one
+  // means the key entered a window the artifact shares.
+  const sameDocument = []
   p.on((msg) => {
+    if (msg.method === 'Page.navigatedWithinDocument') sameDocument.push(msg.params.url)
     if (msg.method === 'Network.requestWillBeSent') requests.push(msg.params.request.url + ' ' + (msg.params.request.headers.Referer ?? ''))
     if (msg.method === 'Page.backForwardCacheNotUsed') notCached.push(...msg.params.notRestoredExplanations.map((e) => e.reason))
   })
@@ -86,7 +102,7 @@ async function visitor() {
     await p.send('Page.navigate', { url })
     return waitFor(`window.rdOld === undefined && (${until})`, ms)
   }
-  return { ...p, evaluate, waitFor, open, requests, notCached, close: () => b.send('Target.disposeBrowserContext', { browserContextId: ctx }) }
+  return { ...p, evaluate, waitFor, open, requests, notCached, sameDocument, close: () => b.send('Target.disposeBrowserContext', { browserContextId: ctx }) }
 }
 const frameText = `(() => { try { return document.getElementById('rd-frame').contentDocument.body.innerText } catch (e) { return '' } })()`
 const frameData = `(() => { try { return JSON.stringify(document.getElementById('rd-frame').contentDocument.body.dataset) } catch (e) { return '{}' } })()`
@@ -100,6 +116,13 @@ const liveHref = `(() => { try { return localStorage.getItem('rd-probe-live-href
 const reset = `(() => { for (const k of ['rd-probe-stolen', 'rd-probe-live-href', 'rd-probe-acted', 'rd-probe-mode']) localStorage.removeItem(k); return true })()`
 const guardShown = `(() => { const m = document.getElementById('rd-e2e-msg'); return !!m && !m.hidden && /new tab/.test(m.textContent) })()`
 
+// The whole run is bounded too: past RUN_MS it fails and stops the browser.
+const deadline = setTimeout(() => {
+  check('the browser run finishes in time', false, `over ${RUN_MS / 60000} minutes`)
+  chrome.kill('SIGKILL')
+  rmSync(profile, { recursive: true, force: true })
+  process.exit(1)
+}, RUN_MS)
 try {
   browserWS = await new Promise((resolve, reject) => {
     let buf = ''
@@ -170,35 +193,71 @@ try {
       check(`  and frames nothing`, state.src === '', state.src)
       check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes('k=') && !state.href.includes(key.slice(0, 20)), state.href)
     }
-    // Fragments that could hold a key but don't start with a literal k=
-    // (second re-check B-2b'): damaged, after a good visit, framing nothing.
-    for (const frag of [`k%3D${key}`, `k%253D${key}`, `%6B=${key}`, `K=${key}`, `&k=${key}`, `%20k=${key}`, `x&k=${key}`, key]) {
-      const name = frag.replace(key, 'KEY')
-      check(`the good link opens before #${name}`, await v.open(links.probe.url, probeDone))
-      const shown = await v.open(`${base}#${frag}`, `!document.getElementById('rd-e2e-msg').hidden`, 15000)
-      const state = JSON.parse((await v.evaluate(`JSON.stringify({ msg: document.getElementById('rd-e2e-msg').textContent, src: document.getElementById('rd-frame').src, href: location.href })`)) || '{}')
-      check(`#${name} after a good visit says the link is damaged and frames nothing`, shown && /damaged/.test(state.msg ?? '') && state.src === '', `${state.msg} ${state.src}`)
-      check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes(key.slice(0, 20)), state.href)
-    }
     check('the artifact saw no key, whole or damaged, at any point', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
     check('a good link still opens after the damaged ones', await v.open(links.probe.url, probeDone))
 
-    // A fragment typed after the live address (second re-check m-1): a
-    // same-document navigation, which the viewer cancels before the URL
-    // changes, ending the open page.
-    await v.evaluate(reset)
-    check('the good link opens before the fragment edit', await v.open(links.probe.url, probeDone))
-    await v.send('Page.navigate', { url: `${base}?redrop-e2e=1#k=${key}` })
-    check('a #k= typed after the live address closes the page and asks for a new tab', await v.waitFor(guardShown, 10000), await v.evaluate(pageText))
-    check('  frames nothing and keeps the key off the address bar', (await v.evaluate(`document.querySelectorAll('iframe').length === 0 && !location.href.includes('k=')`)) === true, await v.evaluate('location.href'))
-    check('  and the page saw no key', (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), (await v.evaluate(stolen)) + (await v.evaluate(liveHref)))
+    const leaked = v.requests.filter((r) => r.includes(key) || r.includes('#k=') || r.includes(key.slice(0, 20)))
+    check('no request carried the key in its URL or Referer', leaked.length === 0, `${leaked.length} of ${v.requests.length}`)
+    await v.close()
+  }
 
-    // An artifact that acts (second re-check B-2a'): it rewrites the
-    // viewer's address so the full link would be a fragment change, also
-    // after replacing the functions the viewer could use, or by replacing
-    // the viewer's document. The full link is then opened in the tab.
+  // The second re-check of review 33. Each case starts a fresh browser
+  // context with a good visit (so the key is stored there), runs once, and
+  // closes the context.
+  {
+    const key = keyOf(links.probe.url)
+    const base = links.probe.url.split('#')[0]
+    const noKey = (v, label) => {
+      const sent = v.requests.filter((r) => r.includes(key.slice(0, 20)) || r.includes('#k='))
+      check(`${label}: no request carried the key`, sent.length === 0, `${sent.length} of ${v.requests.length}`)
+    }
+    const notInWindow = (v, label) => {
+      const urls = v.sameDocument.filter((u) => u.includes(key.slice(0, 20)))
+      check(`${label}: the key never entered an open page by a same-document navigation`, urls.length === 0, urls.join(' '))
+    }
+    const goodVisit = async (label) => {
+      const v = await visitor()
+      await v.send('Page.navigate', { url: links.probe.url })
+      check(`${label}: the good link opens first`, await v.waitFor(probeDone))
+      return v
+    }
+
+    // Fragments that could hold a key but don't start with a literal k=
+    // (B-2b'): damaged, after a good visit, framing nothing.
+    for (const frag of [`k%3D${key}`, `k%253D${key}`, `%6B=${key}`, `K=${key}`, `&k=${key}`, `%20k=${key}`, `x&k=${key}`, key]) {
+      const name = '#' + frag.replace(key, 'KEY')
+      const v = await goodVisit(name)
+      const shown = await v.open(`${base}#${frag}`, `!document.getElementById('rd-e2e-msg').hidden`, 15000)
+      const state = JSON.parse((await v.evaluate(`JSON.stringify({ msg: document.getElementById('rd-e2e-msg').textContent, src: document.getElementById('rd-frame').src, href: location.href })`)) || '{}')
+      check(`${name} after a good visit says the link is damaged and frames nothing`, shown && /damaged/.test(state.msg ?? '') && state.src === '', `${state.msg} ${state.src}`)
+      check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes(key.slice(0, 20)), state.href)
+      check(`  and the page saw no key`, (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
+      noKey(v, name)
+      await v.close()
+    }
+
+    // A fragment typed after the live address (m-1): a same-document
+    // navigation, which the viewer cancels before the URL changes, ending
+    // the open page.
+    {
+      const v = await goodVisit('fragment edit')
+      await v.send('Page.navigate', { url: `${base}?redrop-e2e=1#k=${key}` })
+      check('a #k= typed after the live address closes the page and asks for a new tab', await v.waitFor(guardShown, 10000), await v.evaluate(pageText))
+      check('  frames nothing and keeps the key off the address bar', (await v.evaluate(`document.querySelectorAll('iframe').length === 0 && !location.href.includes('k=')`)) === true, await v.evaluate('location.href'))
+      check('  and the page saw no key', (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), (await v.evaluate(stolen)) + (await v.evaluate(liveHref)))
+      notInWindow(v, 'fragment edit')
+      await v.close()
+    }
+
+    // An artifact that acts (B-2a'): it rewrites the viewer's address so the
+    // full link would be a fragment change, also after replacing the
+    // functions the viewer could use, or by replacing the viewer's document.
+    // The full link is then opened in the tab. (document.open() also ends the
+    // probe's own code, so there that case checks that the key never enters
+    // the page, which the guard ensures; only the other two show a leak
+    // without it.)
     for (const mode of ['late', 'hard', 'docopen']) {
-      await v.evaluate(reset)
+      const v = await goodVisit(`[${mode}]`)
       await v.evaluate(`localStorage.setItem('rd-probe-mode', ${JSON.stringify(mode)})`)
       const acted = await v.open(links.probe.url, `localStorage.getItem('rd-probe-acted') === ${JSON.stringify(mode)}`, 20000)
       check(`[${mode}] the probe acted`, acted)
@@ -215,24 +274,20 @@ try {
       const saw = (await v.evaluate(stolen)) + (await v.evaluate(liveHref))
       check(`[${mode}] the full link opened in its tab gives the page no key`, (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), saw)
       check(`[${mode}]   and the address bar never holds it`, !(await v.evaluate('location.href')).includes('k='), `${before} -> ${await v.evaluate('location.href')}`)
+      notInWindow(v, `[${mode}]`)
+      await v.close()
     }
-    await v.evaluate(reset)
 
-    // A link whose # became %23 (second re-check M3): the server's fixed
-    // page, no viewer, no frame.
+    // A link whose # became %23 (M3): the server's fixed page, no viewer, no
+    // frame. Only that request carries the key, as any browser must send it.
     for (const enc of ['%23', '%2523']) {
+      const v = await visitor()
       const shown = await v.open(`${base}${enc}k=${key}`, `(${pageText}).includes('This link is damaged')`, 15000)
       check(`a link whose # became ${enc} gets the damaged-link page and no frame`, shown && (await v.evaluate(`!document.getElementById('rd-frame')`)) === true, await v.evaluate(pageText))
+      const other = v.requests.filter((r) => !r.startsWith(`${base}${enc}k=${key} `) && r.includes(key.slice(0, 20)))
+      check(`  no other request carried the key`, other.length === 0, `${other.length} of ${v.requests.length}`)
+      await v.close()
     }
-    check('a good link still opens after them', await v.open(links.probe.url, probeDone))
-
-    // Only the two links whose # was deliberately encoded into the path
-    // send the key (as any browser must); nothing else does.
-    const damagedPath = (r) => r.startsWith(`${base}%23k=${key} `) || r.startsWith(`${base}%2523k=${key} `)
-    const leaked = v.requests.filter((r) => !damagedPath(r) && (r.includes(key) || r.includes('#k=') || r.includes(key.slice(0, 20))))
-    check('no other request carried the key in its URL or Referer', leaked.length === 0, `${leaked.length} of ${v.requests.length}`)
-    check('  and the encoded-path links were sent once each', v.requests.filter(damagedPath).length === 2, String(v.requests.filter(damagedPath).length))
-    await v.close()
   }
 
   // Gates keep the key (M1): the password, then a one-time link.
@@ -282,6 +337,7 @@ try {
 } catch (e) {
   check('the browser run', false, e && e.stack ? e.stack : String(e))
 } finally {
+  clearTimeout(deadline)
   chrome.kill('SIGKILL')
   await sleep(300)
   rmSync(profile, { recursive: true, force: true })
