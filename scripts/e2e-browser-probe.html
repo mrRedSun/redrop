@@ -16,7 +16,16 @@
      timer in the viewer's window that copies its live address to
      localStorage rd-probe-live-href, which outlives the probe's own
      document. It sets rd-probe-acted just before it acts: acting may end
-     its own document. -->
+     its own document.
+     The third re-check's modes: "capture-strip" rewrites the address from
+     inside a capturing navigate listener that hides the rewrite from later
+     listeners; "nested" rewrites it from inside the viewer's own address
+     update; "stop" calls parent.stop() every millisecond for 10 s. With
+     window.rdOpen() (it needs a click, a user gesture), "popup" opens a
+     popup that keeps a handle on the visitor's tab and watches every
+     document in it for 40 s (B-2a''); "opener" opens an empty window named
+     rdw and watches it, for the visitor to open the link in. Both record in
+     rd-probe-stolen too. -->
 <h1 id="h">probe-4471</h1>
 <p><a id="rel" href="docs/two.html#sec">two</a> <a id="abs" href="/docs/two.html">abs</a></p>
 <script>
@@ -103,6 +112,81 @@
         parent.document.close()
       } catch (e) {}
     }, 1000)
+  }
+  if (mode === 'capture-strip') {
+    let mine = false
+    parent.navigation.addEventListener('navigate', (e) => { seen('capture-strip navigate', e.destination.url); if (mine) e.stopImmediatePropagation() }, true)
+    setTimeout(() => {
+      acted()
+      mine = true
+      try { parent.history.replaceState(parent.history.state, '', '/' + parent.location.hash) } catch (e) {}
+      mine = false
+    }, 1000)
+  }
+  if (mode === 'nested') {
+    let done = false
+    parent.navigation.addEventListener('navigate', () => {
+      if (done) return
+      done = true
+      try { parent.history.replaceState(null, '', '/' + parent.location.hash) } catch (e) {}
+    })
+    setTimeout(() => { acted(); history.pushState(null, '', '#nested') }, 1000)
+  }
+  if (mode === 'stop') {
+    setTimeout(() => {
+      acted()
+      const t = setInterval(() => { try { parent.stop() } catch (e) {} }, 1)
+      setTimeout(() => clearInterval(t), 10000)
+    }, 1000)
+  }
+  // watcher is run in a window the probe holds: it records what that
+  // window can read of target() for 40 s, deduped and capped like seen.
+  const watcher = function (target) {
+    const logged = new Set()
+    const note = (where, v) => {
+      try {
+        const s = String(v)
+        if (!s.includes('k=')) return
+        const line = where + ': ' + s.slice(0, 300)
+        const cur = localStorage.getItem('rd-probe-stolen') || ''
+        if (logged.has(line) || cur.length > 8000) return
+        logged.add(line)
+        localStorage.setItem('rd-probe-stolen', cur + line + '\n')
+      } catch (e) {}
+    }
+    const stopAt = Date.now() + 40000
+    let docs = 0, last = null
+    const look = () => {
+      const T = target()
+      if (!T) return
+      try { note('held location', T.location.href) } catch (e) {}
+      try { note('held currentEntry', T.navigation.currentEntry.url) } catch (e) {}
+      try { note('held navigation timing', T.performance.getEntriesByType('navigation').map((x) => x.name).join(' ')) } catch (e) {}
+      try { if (T.document !== last) { last = T.document; docs++; localStorage.setItem('rd-probe-held-docs', String(docs)) } } catch (e) {}
+    }
+    const ch = new MessageChannel()
+    ch.port1.onmessage = () => { look(); if (Date.now() < stopAt) setTimeout(() => ch.port2.postMessage(0), 2) }
+    ch.port2.postMessage(0)
+    localStorage.setItem('rd-probe-held', 'running')
+  }
+  window.rdOpen = () => {
+    if (mode === 'popup') {
+      const w = window.open('', 'rdpop', 'popup,width=300,height=200')
+      if (!w) return 'blocked'
+      w.rdTop = top
+      w.document.write('<!doctype html><title>held</title><script>(' + watcher.toString() + ')(() => window.rdTop)<\/script>')
+      w.document.close()
+      acted()
+      return 'open'
+    }
+    if (mode === 'opener') {
+      const w = window.open('about:blank', 'rdw')
+      if (!w) return 'blocked'
+      watcher(() => w)
+      acted()
+      return 'open'
+    }
+    return 'no mode'
   }
   if (!mode) acted()
   d.ownSession = read(() => Object.entries(sessionStorage))

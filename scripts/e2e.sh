@@ -424,6 +424,9 @@ command -v node >/dev/null || die "node (24+) is needed for the end-to-end decry
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 # decrypt LINKFILE [PATH|--list]: decrypt the link in LINKFILE like a viewer.
 decrypt() { local f=$1; shift; node "$SCRIPTS/e2e-decrypt.mjs" "$@" < "$f"; }
+# content_of LINKFILE: the artifact's own address, which the link's intake
+# page on the app origin names (the link itself points at the app).
+content_of() { curl -fsS "${DOC[@]}" "$(sed 's/#.*//' "$1")" | sed -n 's/.*data-content="\([^"]*\)".*/\1/p'; }
 logged_uploads() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'path=/api/v1/uploads' || true; fi; }
 logged_requests() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'msg=http ' || true; fi; }
 EMARK="e2e-secret-$RANDOM-$RANDOM"
@@ -435,7 +438,13 @@ ELINKF="$WORK/e2e-link"
 python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$EOUT" > "$ELINKF"
 EID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])' <<<"$EOUT")
 EKEY=$(sed 's/.*#k=//' "$ELINKF")
-EURL=$(sed 's/#.*//' "$ELINKF")
+ELINK=$(sed 's/#.*//' "$ELINKF")
+case "$ELINK" in "$BASE/e/"*) ;; *) die "an e2e link is the app origin's intake page, got $ELINK";; esac
+EURL=$(content_of "$ELINKF")
+[ -n "$EURL" ] || die "the intake page names the artifact's address"
+ih=$(curl -fsS -o "$WORK/e2e-intake.html" -w '%header{cache-control} %header{referrer-policy} %header{cross-origin-opener-policy}' "${DOC[@]}" "$ELINK")
+[ "$ih" = "no-store no-referrer same-origin-allow-popups" ] || die "intake page headers: $ih"
+grep -qF -- "$EKEY" "$WORK/e2e-intake.html" && die "the intake page holds the key"
 [ "${#EKEY}" = 43 ] || die "share --e2e link has no 43-character key"
 grep -q 'end-to-end encrypted' "$WORK/e2e-share.err" || die "share --e2e notice"
 KS="$(dirname "$REDROP_CONFIG")/e2e-keys.json"
@@ -453,7 +462,7 @@ grep -q "$EMARK" <<<"$page" && die "viewer page holds plaintext"
 decrypt "$ELINKF" > "$WORK/e2e-index.out" || die "decrypting the start page"
 cmp -s "$WORK/e2e-index.out" "$WORK/e2e-site/index.html" || die "decrypted start page differs"
 [ "$(decrypt "$ELINKF" docs/n.txt)" = "note $EMARK" ] || die "decrypted docs/n.txt"
-printf '%s#k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' "$EURL" > "$WORK/e2e-wrong-link"
+printf '%s#k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' "$ELINK" > "$WORK/e2e-wrong-link"
 decrypt "$WORK/e2e-wrong-link" >/dev/null 2>&1 && die "a wrong key decrypted"
 # Every stored object, as the server serves it, is ciphertext.
 EVER=$(decrypt "$ELINKF" --list | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')
@@ -515,7 +524,7 @@ $R info "$EID" | grep -q "#k=$EKEY" || die "info prints the full link"
 # any request (review 33 re-check M2). A client that sends one anyway, once
 # or twice encoded, is not logged with it (checked with the log below).
 before=$(logged_requests)
-ESLUG=$(sed 's|^[a-z]*://||; s|\..*||' "$ELINKF")
+ESLUG=$(sed 's|.*/e/||; s|#.*||' "$ELINKF")
 for ref in "$EID%23k=$EKEY" "$ESLUG%23k=$EKEY" "$EID%23k%3D$EKEY" "$EID/%23k=$EKEY"; do
   for cmd in info "update" watch; do
     set +e
@@ -552,7 +561,7 @@ GOUT=$($R share "$WORK/e2e-site/docs/n.txt" --e2e --once --password-generate --j
 GLINKF="$WORK/e2e-gated-link"
 python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$GOUT" > "$GLINKF"
 GPW=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["password"])' <<<"$GOUT")
-GURL=$(sed 's/#.*//' "$GLINKF")
+GURL=$(content_of "$GLINKF")
 curl -fsS "${DOC[@]}" "$GURL" | grep -q 'password protected' || die "e2e gate"
 [ "$(code_of -H 'Sec-Fetch-Dest: empty' "${GURL}__redrop/v/1/manifest")" = 403 ] || die "ciphertext behind the gate"
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${GURL}__redrop/e2e-sw.js")" = 403 ] || die "worker behind the gate"
@@ -605,7 +614,7 @@ PY
   fi
   CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" E2E_ELSEWHERE="$BASE/healthz" "${BROWSER_CAP[@]}" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
   sed 's/^/    /' "$B/out.txt"
-  pass "e2e: in Chromium, the artifact's page reads no key through a same-tab reopen (also one it set up by rewriting the address), a bfcache restore or a fragment edit; damaged, encoded, %23 and ? links open nothing; gates keep it; SVG files are inert; revocation stops an open page"
+  pass "e2e: in Chromium, key intake on the app origin: the artifact, and windows it holds, read no key through a same-tab reopen, a popup, a window it opened, a bfcache restore or a fragment edit; damaged, encoded, %23 and ? links open nothing; gates work; SVG files are inert; revocation stops an open page"
 else
   printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi

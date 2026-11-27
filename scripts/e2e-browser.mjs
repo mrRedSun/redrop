@@ -7,7 +7,9 @@
 //   node scripts/e2e-browser.mjs links.json
 //
 // links.json holds {probe, password, once, svg}: {id, url} each (url is the
-// full link), plus password.password. The probe is scripts/e2e-browser-probe.html
+// full link: the app origin's intake page, https://<app>/e/<slug>#k=…),
+// plus password.password. Opening a link is the visitor's: the intake page,
+// its Open button (a click, a user gesture), then the artifact. The probe is scripts/e2e-browser-probe.html
 // shared as a folder with docs/two.html. Set REDROP_CLI (with REDROP_CONFIG)
 // to also check that revoking stops an open page. Each check prints ok or
 // FAIL; the exit code is 1 when any failed. Links stay out of the output.
@@ -17,7 +19,7 @@
 // (--unsafely-treat-insecure-origin-as-secure), since browsers give WebCrypto
 // and service workers to secure contexts alone.
 // The run is bounded: every DevTools call gives up after CALL_MS, the whole
-// run after RUN_MS, and each second re-check case gets its own browser
+// run after RUN_MS, and each re-check case gets its own browser
 // context, closed after it. scripts/e2e.sh also caps its memory.
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -30,7 +32,13 @@ const secrets = Object.values(links).map((l) => keyOf(l.url)).filter(Boolean)
 // hide masks keys in the output, and damaged ones (any run of key
 // characters that starts like a key).
 const hide = (s) => secrets.reduce((t, k) => t.replaceAll(k, '<KEY>').replace(new RegExp(k.slice(0, 12) + '[A-Za-z0-9_-]*', 'g'), '<KEY>'), String(s))
-const origins = [...new Set(Object.values(links).map((l) => new URL(l.url).origin))]
+// Each link's intake page names the artifact's own address.
+const content = {}
+for (const [name, l] of Object.entries(links)) {
+  const r = await fetch(l.url.split('#')[0], { headers: { 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate' }, signal: AbortSignal.timeout(10000) })
+  content[name] = (/data-content="([^"]+)"/.exec(await r.text()) || [])[1] || ''
+}
+const origins = [...new Set([...Object.values(links).map((l) => new URL(l.url).origin), ...Object.values(content).filter(Boolean).map((u) => new URL(u).origin)])]
   .filter((o) => o.startsWith('http:') && !/\/\/(localhost|[^/]*\.localhost)(:|$)/.test(o))
 const profile = mkdtempSync(join(tmpdir(), 'redrop-e2e-chromium-'))
 const args = ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${profile}`]
@@ -38,7 +46,7 @@ if (origins.length) args.push(`--unsafely-treat-insecure-origin-as-secure=${orig
 const chrome = spawn(process.env.CHROMIUM || 'chromium', [...args, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const CALL_MS = 20000
-const RUN_MS = 10 * 60 * 1000
+const RUN_MS = 15 * 60 * 1000
 let failed = 0
 const check = (name, ok, detail = '') => {
   if (!ok) failed++
@@ -74,6 +82,19 @@ async function visitor() {
   await b.ready
   const ctx = (await b.send('Target.createBrowserContext')).result.browserContextId
   const targetId = (await b.send('Target.createTarget', { url: 'about:blank', browserContextId: ctx })).result.targetId
+  const v = await tab(targetId)
+  // other returns another tab of this visitor's: a window a page opened.
+  v.other = async () => {
+    const all = (await b.send('Target.getTargets')).result?.targetInfos ?? []
+    const t = all.find((x) => x.type === 'page' && x.browserContextId === ctx && x.targetId !== targetId)
+    return t ? tab(t.targetId) : null
+  }
+  v.close = () => b.send('Target.disposeBrowserContext', { browserContextId: ctx })
+  return v
+}
+
+// tab drives one page target.
+async function tab(targetId) {
   const p = connect(`ws://127.0.0.1:${port}/devtools/page/${targetId}`)
   await p.ready
   const requests = []
@@ -89,7 +110,8 @@ async function visitor() {
   await p.send('Page.enable')
   await p.send('Runtime.enable')
   await p.send('Network.enable')
-  const evaluate = async (expression) => (await p.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })).result?.result?.value
+  // userGesture gives the page a click's activation (window.open needs it).
+  const evaluate = async (expression, userGesture = false) => (await p.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture })).result?.result?.value
   // waitFor polls an expression; the bound only catches a hang.
   const waitFor = async (expression, ms = 30000) => {
     for (let t = 0; t < ms; t += 200) { if (await evaluate(expression)) return true; await sleep(200) }
@@ -102,7 +124,15 @@ async function visitor() {
     await p.send('Page.navigate', { url })
     return waitFor(`window.rdOld === undefined && (${until})`, ms)
   }
-  return { ...p, evaluate, waitFor, open, requests, notCached, sameDocument, close: () => b.send('Target.disposeBrowserContext', { browserContextId: ctx }) }
+  // follow opens a full link like the visitor: the intake page, its Open
+  // button, then the artifact, which must satisfy until.
+  const follow = async (link, until, ms = 30000) => {
+    await p.send('Page.navigate', { url: link })
+    if (!(await waitFor(`(() => { const b = document.getElementById('rd-intake-open'); return !!b && !b.hidden })()`, 15000))) return false
+    await evaluate(`document.getElementById('rd-intake-open').click()`, true)
+    return waitFor(until, ms)
+  }
+  return { ...p, evaluate, waitFor, open, follow, requests, notCached, sameDocument }
 }
 const frameText = `(() => { try { return document.getElementById('rd-frame').contentDocument.body.innerText } catch (e) { return '' } })()`
 const frameData = `(() => { try { return JSON.stringify(document.getElementById('rd-frame').contentDocument.body.dataset) } catch (e) { return '{}' } })()`
@@ -135,8 +165,7 @@ try {
   {
     const key = keyOf(links.probe.url)
     const v = await visitor()
-    await v.send('Page.navigate', { url: links.probe.url })
-    check('the probe page decrypts in the frame', await v.waitFor(probeDone))
+    check('the probe page decrypts in the frame', await v.follow(links.probe.url, probeDone))
     const found = JSON.parse((await v.evaluate(frameData)) || '{}')
     for (const [route, value] of Object.entries(found)) {
       if (route === 'done') continue
@@ -158,9 +187,9 @@ try {
     // The full link again in the same tab (re-check B-2a), while the probe
     // runs in the frame: a new document, never a fragment change the open
     // artifact could watch.
-    check('the full link opened in the same tab decrypts', await v.open(links.probe.url, probeDone))
+    check('the full link opened in the same tab decrypts', await v.follow(links.probe.url, probeDone))
     check('the open artifact saw no key before the reopen', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
-    check('the full link reopened over the running probe decrypts', await v.open(links.probe.url, probeDone))
+    check('the full link reopened over the running probe decrypts', await v.follow(links.probe.url, probeDone))
     await sleep(500)
     check('the open artifact saw no key in the same-tab reopen', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
 
@@ -174,7 +203,7 @@ try {
       v.notCached.length = 0
       await v.send('Page.navigateToHistoryEntry', { entryId: history.entries[history.currentIndex - 1].id })
       check('back restores the live viewer from the back/forward cache', await v.waitFor(`window.rdLive === 1 && !!localStorage.getItem('rd-probe-restored') && ${probeDone}`, 15000), v.notCached.join(', '))
-      check('the full link opened over the restored viewer decrypts', await v.open(links.probe.url, probeDone))
+      check('the full link opened over the restored viewer decrypts', await v.follow(links.probe.url, probeDone))
       await sleep(500)
       check('the restored artifact saw no key', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
     } else {
@@ -184,9 +213,9 @@ try {
     // Damaged links after a good visit (re-check B-2b): any fragment that
     // starts with k= is a key attempt; a damaged one frames nothing, even
     // with the key stored, and leaves the address bar.
-    const base = links.probe.url.split('#')[0]
+    const base = content.probe
     for (const [name, bad] of [['a trailing .', key + '.'], ['a trailing )', key + ')'], ['a trailing %20', key + '%20'], ['its last character cut', key.slice(0, -1)]]) {
-      check(`the good link opens before the one with ${name}`, await v.open(links.probe.url, probeDone))
+      check(`the good link opens before the one with ${name}`, await v.follow(links.probe.url, probeDone))
       const shown = await v.open(`${base}#k=${bad}`, `!document.getElementById('rd-e2e-msg').hidden`, 15000)
       const state = JSON.parse((await v.evaluate(`JSON.stringify({ msg: document.getElementById('rd-e2e-msg').textContent, src: document.getElementById('rd-frame').src, href: location.href })`)) || '{}')
       check(`a key with ${name}, after a good visit, says the link is damaged`, shown && /damaged/.test(state.msg ?? ''), state.msg)
@@ -194,7 +223,7 @@ try {
       check(`  and leaves the address bar`, typeof state.href === 'string' && !state.href.includes('k=') && !state.href.includes(key.slice(0, 20)), state.href)
     }
     check('the artifact saw no key, whole or damaged, at any point', (await v.evaluate(stolen)) === '', await v.evaluate(stolen))
-    check('a good link still opens after the damaged ones', await v.open(links.probe.url, probeDone))
+    check('a good link still opens after the damaged ones', await v.follow(links.probe.url, probeDone))
 
     const leaked = v.requests.filter((r) => r.includes(key) || r.includes('#k=') || r.includes(key.slice(0, 20)))
     check('no request carried the key in its URL or Referer', leaked.length === 0, `${leaked.length} of ${v.requests.length}`)
@@ -206,7 +235,7 @@ try {
   // closes the context.
   {
     const key = keyOf(links.probe.url)
-    const base = links.probe.url.split('#')[0]
+    const base = content.probe
     const noKey = (v, label) => {
       const sent = v.requests.filter((r) => r.includes(key.slice(0, 20)) || r.includes('#k='))
       check(`${label}: no request carried the key`, sent.length === 0, `${sent.length} of ${v.requests.length}`)
@@ -217,8 +246,7 @@ try {
     }
     const goodVisit = async (label) => {
       const v = await visitor()
-      await v.send('Page.navigate', { url: links.probe.url })
-      check(`${label}: the good link opens first`, await v.waitFor(probeDone))
+      check(`${label}: the good link opens first`, await v.follow(links.probe.url, probeDone))
       return v
     }
 
@@ -259,7 +287,7 @@ try {
     for (const mode of ['late', 'hard', 'docopen']) {
       const v = await goodVisit(`[${mode}]`)
       await v.evaluate(`localStorage.setItem('rd-probe-mode', ${JSON.stringify(mode)})`)
-      const acted = await v.open(links.probe.url, `localStorage.getItem('rd-probe-acted') === ${JSON.stringify(mode)}`, 20000)
+      const acted = await v.follow(links.probe.url, `localStorage.getItem('rd-probe-acted') === ${JSON.stringify(mode)}`, 20000)
       check(`[${mode}] the probe acted`, acted)
       if (mode !== 'docopen') {
         // Rewriting the address is itself a navigation the viewer didn't
@@ -269,12 +297,65 @@ try {
       }
       await sleep(500)
       const before = await v.evaluate('location.href')
-      await v.send('Page.navigate', { url: links.probe.url })
-      await sleep(1500)
+      // The probe in the next page shouldn't act again before it is checked.
+      await v.evaluate(`localStorage.removeItem('rd-probe-mode')`)
+      check(`[${mode}] the full link opened in its tab decrypts`, await v.follow(links.probe.url, probeDone))
+      await sleep(500)
       const saw = (await v.evaluate(stolen)) + (await v.evaluate(liveHref))
       check(`[${mode}] the full link opened in its tab gives the page no key`, (await v.evaluate(stolen)) === '' && !(await v.evaluate(liveHref)).includes('k='), saw)
       check(`[${mode}]   and the address bar never holds it`, !(await v.evaluate('location.href')).includes('k='), `${before} -> ${await v.evaluate('location.href')}`)
       notInWindow(v, `[${mode}]`)
+      await v.close()
+    }
+
+    // The third re-check's routes (B-2a″, M5, m-6, n-4). With the key's
+    // intake on the app origin, a full link opened anywhere a page of the
+    // artifact holds a handle on loads a page of another origin, which no
+    // such handle can read; the key reaches the artifact's origin only as a
+    // non-extractable CryptoKey, through the helper the intake page opens.
+    for (const mode of ['capture-strip', 'nested', 'stop', 'popup', 'opener']) {
+      const v = await goodVisit(`[${mode}]`)
+      await v.evaluate(`localStorage.setItem('rd-probe-mode', ${JSON.stringify(mode)})`)
+      if (!(await v.follow(links.probe.url, probeDone))) check(`[${mode}] the probe runs`, false, await v.evaluate(pageText))
+      let held = null
+      if (mode === 'popup' || mode === 'opener') {
+        check(`[${mode}] the probe opened its window`, (await v.evaluate(`document.getElementById('rd-frame').contentWindow.rdOpen()`, true)) === 'open')
+        check(`[${mode}]   and watches it`, await v.waitFor(`localStorage.getItem('rd-probe-held') === 'running'`, 10000))
+        held = await v.other()
+      } else {
+        check(`[${mode}] the probe acted`, await v.waitFor(`localStorage.getItem('rd-probe-acted') === ${JSON.stringify(mode)}`, 10000))
+        await sleep(500)
+      }
+      if (mode === 'capture-strip') check(`[${mode}] the rewrite is refused and closes the page`, await v.waitFor(guardShown, 10000), await v.evaluate(pageText))
+      if (mode === 'capture-strip' || mode === 'nested') check(`[${mode}]   the address keeps the live marker`, (await v.evaluate('location.search')) === '?redrop-e2e=1', await v.evaluate('location.href'))
+      await v.evaluate(`localStorage.removeItem('rd-probe-mode')`)
+      if (mode === 'opener') {
+        // The visitor opens the link in the window the artifact opened.
+        check(`[${mode}] the link opens in the artifact's window`, !!held && (await held.follow(links.probe.url, probeDone)))
+      } else if (mode === 'stop') {
+        // The artifact may keep the reopen from loading (denial of service).
+        await v.follow(links.probe.url, probeDone, 5000)
+      } else {
+        check(`[${mode}] the full link opened in its tab decrypts`, await v.follow(links.probe.url, probeDone))
+      }
+      await sleep(1000)
+      const saw = (await v.evaluate(stolen)) + (await v.evaluate(liveHref))
+      check(`[${mode}] the artifact, and any window it holds, saw no key`, !saw.includes('k='), saw)
+      check(`[${mode}]   and the address bar never held it`, !(await v.evaluate('location.href')).includes('k='), await v.evaluate('location.href'))
+      notInWindow(v, `[${mode}]`)
+      noKey(v, `[${mode}]`)
+      await v.close()
+    }
+
+    // The intake page refuses a damaged link, at once and without opening
+    // anything.
+    for (const frag of [`k%3D${key}`, `k=${key}.`, `K=${key}`, `k=${key.slice(0, -1)}`]) {
+      const name = '#' + frag.replace(key, 'KEY').replace(key.slice(0, -1), 'KEY-1')
+      const v = await visitor()
+      await v.send('Page.navigate', { url: `${links.probe.url.split('#')[0]}#${frag}` })
+      const shown = await v.waitFor(`/damaged/.test((document.getElementById('rd-intake-msg') || {}).textContent || '')`, 10000)
+      check(`the intake page refuses ${name}`, shown && (await v.evaluate(`document.getElementById('rd-intake-open').hidden && !location.href.includes('#')`)) === true, await v.evaluate('location.href'))
+      check(`  and opens no window`, !(await v.other()))
       await v.close()
     }
 
@@ -305,8 +386,7 @@ try {
   // Gates keep the key (M1): the password, then a one-time link.
   {
     const v = await visitor()
-    await v.send('Page.navigate', { url: links.password.url })
-    check('the password gate is shown', await v.waitFor(`!!document.querySelector('input[name=password]')`))
+    check('the password gate is shown', await v.follow(links.password.url, `!!document.querySelector('input[name=password]')`))
     await v.evaluate(`(() => { document.querySelector('input[name=password]').value = ${JSON.stringify(links.password.password)}; document.querySelector('button[type=submit]').click() })()`)
     check('after the right password the page decrypts', await v.waitFor(`${frameText}.includes('pw-page-5150')`), await v.evaluate(pageText))
     check('and the key left the address bar', !(await v.evaluate('location.href')).includes('#k='))
@@ -314,22 +394,19 @@ try {
   }
   {
     const v = await visitor()
-    await v.send('Page.navigate', { url: links.once.url })
-    check('the one-time gate is shown', await v.waitFor(`!!document.querySelector('button[type=submit]')`))
+    check('the one-time gate is shown', await v.follow(links.once.url, `!!document.querySelector('button[type=submit]')`))
     await v.evaluate(`document.querySelector('button[type=submit]').click()`)
     check('after Open the one-time page decrypts', await v.waitFor(`${frameText}.includes('once-page-6160')`), await v.evaluate(pageText))
     await v.close()
     const second = await visitor()
-    await second.send('Page.navigate', { url: links.once.url })
-    check('a second visitor gets the miss', await second.waitFor(`(${pageText}).includes("doesn't exist")`), await second.evaluate(pageText))
+    check('a second visitor gets the miss', await second.follow(links.once.url, `(${pageText}).includes("doesn't exist")`), await second.evaluate(pageText))
     await second.close()
   }
 
   // An SVG file artifact is shown in an <img>, where its script can't run (m-A).
   {
     const v = await visitor()
-    await v.send('Page.navigate', { url: links.svg.url })
-    const shown = await v.waitFor(`(() => { try { const d = document.getElementById('rd-frame').contentDocument; return d.contentType === 'text/html' && d.querySelector('img') && d.querySelector('img').complete } catch (e) { return false } })()`)
+    const shown = await v.follow(links.svg.url, `(() => { try { const d = document.getElementById('rd-frame').contentDocument; return d.contentType === 'text/html' && d.querySelector('img') && d.querySelector('img').complete } catch (e) { return false } })()`)
     check('the SVG file is shown in an <img>', shown)
     await sleep(500)
     check('its script did not run', (await v.evaluate('document.title')) !== 'svg-script-ran', await v.evaluate('document.title'))
@@ -339,8 +416,7 @@ try {
   // Revoking stops an open page: the worker keeps nothing.
   if (process.env.REDROP_CLI) {
     const v = await visitor()
-    await v.send('Page.navigate', { url: links.probe.url })
-    await v.waitFor(`${frameText}.includes('probe-4471')`)
+    await v.follow(links.probe.url, `${frameText}.includes('probe-4471')`)
     execFileSync(process.env.REDROP_CLI, ['revoke', links.probe.id], { stdio: 'ignore' })
     await v.evaluate(`document.getElementById('rd-frame').contentDocument.getElementById('rel').click()`)
     check('after revocation the open page gets nothing more', await v.waitFor(`${frameText}.includes("doesn't exist")`), await v.evaluate(frameText))

@@ -7,9 +7,11 @@
 //   node scripts/e2e-decrypt.mjs --list < link.txt    prints the version's manifest as JSON
 //
 // The full link, with #k=<key>, comes on stdin, never on the command line
-// (shell history and process lists show arguments). The key stays in this
-// process: the script sends the server only what a browser would (the
-// page, the manifest, the object). Set REDROP_COOKIE to send a visit cookie
+// (shell history and process lists show arguments). The link is the app
+// origin's intake page (https://<app>/e/<slug>#k=…), which names the
+// artifact's own address; the script reads that address from it. The key
+// stays in this process: the script sends the server only what a browser
+// would (the intake page, the viewer page, the manifest, the object). Set REDROP_COOKIE to send a visit cookie
 // for a password-protected or view-limited link. Exit codes: 0 ok, 1
 // failure (including a wrong key or damaged content), 2 usage.
 import { readFileSync } from 'node:fs'
@@ -26,14 +28,21 @@ const context = vm.createContext({ crypto: globalThis.crypto, TextEncoder, TextD
 vm.runInContext(readFileSync(new URL('../internal/content/static/e2e.js', import.meta.url), 'utf8'), context)
 const E = context.RedropE2E
 
-const url = new URL(link)
-const { key: keyText } = E.splitFragment(url.hash.slice(1))
+const intake = new URL(link)
+const { key: keyText } = E.splitFragment(intake.hash.slice(1))
 if (!keyText) {
   console.error('the link has no #k= key')
   process.exit(2)
 }
-url.hash = ''
+intake.hash = ''
 const cookie = process.env.REDROP_COOKIE ? { Cookie: process.env.REDROP_COOKIE } : {}
+const intakePage = await fetch(intake, { headers: { 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', Accept: 'text/html' } })
+const content = /data-content="([^"]+)"/.exec(intakePage.ok ? await intakePage.text() : '')
+if (!content) {
+  console.error('the link is not an end-to-end encrypted link (no intake page at its address)')
+  process.exit(2)
+}
+const url = new URL(content[1])
 
 async function get(path, headers) {
   const res = await fetch(new URL(path, url), { headers: { ...cookie, ...headers }, redirect: 'manual' })
