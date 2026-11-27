@@ -17,11 +17,15 @@
   var note = document.getElementById('rd-intake-note')
   var content = page.getAttribute('data-content')
   var contentOrigin = new URL(content).origin
-  var hash = location.hash.slice(1)
+  var hash = location.hash.slice(1), query = location.search.slice(1)
   // The key leaves the address bar first, before anything asynchronous.
   history.replaceState(null, '', location.pathname)
   function say(text) { msg.textContent = text }
   var DAMAGED = 'This link\'s key is damaged. Open the complete link you were given, including the part after #.'
+  if (E && E.queryKeyAttempt(query)) {
+    say('This link\'s # was changed to ?, so the key in it was sent to this server as part of the address. Nothing was opened. Ask for the link again and open it exactly as you get it.')
+    return
+  }
   var parts = E ? E.splitFragment(hash) : { key: null, rest: '', damaged: true }
   if (parts.damaged) {
     say(DAMAGED)

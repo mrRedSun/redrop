@@ -694,10 +694,11 @@ next time someone opens the link. This is the known limit of every
 web-delivered end-to-end scheme, and redrop does not pretend otherwise. What
 a malicious server can still do without changing scripts: withhold or
 delete content, serve an older genuine version as the current one
-(rollback), refuse to serve a version, and see request timing. It cannot
-alter content, swap files between paths, versions or artifacts, or make a
-viewer show bytes the owner did not encrypt: every object is authenticated
-(see "Format").
+(rollback), refuse to serve a version, and see request timing. Without the
+key or derived object keys, it cannot alter content, swap files between
+paths, versions or artifacts, or make a viewer show bytes the owner did not
+encrypt: every object is authenticated (see "Format"). A script that ran
+with the key can supply derived object keys to such a server, as below.
 
 **Scripts inside the artifact** (its own code, an analytics tag, a CDN
 library, an XSS in a generated report) run on the artifact's origin, as for
@@ -723,11 +724,15 @@ intake on another origin):
   navigation guard"), so the artifact can't make the visitor's later edits
   of the address reach it either.
 
-They can *use* the non-extractable `CryptoKey` the viewer stores, while a
-page of the link is open in that browser: decrypt what they can fetch (the
-current version, and older ones only when the owner lets viewers open
-them), and send out what they decrypted. They can't copy the key out to
-use later or elsewhere. A browser test (`scripts/e2e-browser.mjs`) checks
+They can *use* the non-extractable `CryptoKey` the viewer stores: decrypt
+what they can fetch (the current version, and older ones only when the
+owner lets viewers open them), and send out what they decrypted. They
+can't copy the key itself, but they can derive and send out object keys.
+Those keys decrypt those objects later and can make objects that pass
+authentication for this artifact if they are ever stored on the server.
+A script that ran with the key is a reason to share a new artifact:
+neither `rotate` nor `update` changes the key. A browser test
+(`scripts/e2e-browser.mjs`) checks
 every place such a script could look, with a probe artifact that watches
 and one that acts: it rewrites the address (also from inside a capturing
 listener or the viewer's own update), replaces the functions the viewer
@@ -814,7 +819,9 @@ any URL the visitor opened; the viewer can't remove that.
   2. Its script takes the fragment off the address bar first
      (`history.replaceState`, before anything asynchronous), applies the
      key-attempt rule, and imports the key as a non-extractable HKDF
-     `CryptoKey`. The text lives only in that page's memory.
+     `CryptoKey`. The text stays on the app origin, in that page's memory
+     and its navigation-timing entry; browser history and address-bar
+     suggestions also keep the original full link.
   3. The visitor presses **Open**. That click lets the page open a small
      window on the artifact's origin, `/__redrop/e2e-intake`: redrop's
      helper page, served for any slug of the right form without a lookup,
@@ -830,6 +837,16 @@ any URL the visitor opened; the viewer can't remove that.
      check (a wrong one is dropped), gives it to the service worker
      (`postMessage`), and only then creates the frame. A key stored on an
      earlier visit is used when no fresh one is waiting.
+
+  The helper gives up after 30 seconds without a valid hand-off and
+  explains that it works only when an encrypted link opens it. It makes no
+  artifact lookup, so even an intake link for a plaintext or nonexistent
+  artifact can leave an unused intake key for up to 12 hours. This reveals
+  no artifact existence or metadata and stores no raw key. Scripts on the
+  artifact's origin can also overwrite that slot with their own key: the
+  next viewer refuses it once and drops it. This is an accepted same-origin
+  denial of service, like tampering with the viewer itself; reopening the
+  complete link supplies the right key again.
 
   Why a click and a window, not a hidden frame: the app origin and the
   content domain are different sites by design (see "Origins"), and
@@ -920,7 +937,12 @@ any URL the visitor opened; the viewer can't remove that.
   them. The viewer refuses such a path or query too. An encrypted bundle's
   file whose name holds a `#` can't be opened by a top-level link to its
   path; links
-  inside the frame still reach it.
+  inside the frame still reach it. On the app origin's intake page,
+  a key-like query gets the same explanation that `#` became `?`; the
+  script removes the query from the address bar before checking it, opens
+  no helper and forwards nothing. The key has already reached the app
+  server in that malformed request, so reverse-proxy query logging must
+  also be disabled there.
 * **Gates stay where they were.** The intake page and its helper run no
   gate and count no view: the key is stored before the visitor reaches the
   artifact, whose gate then works as for any link and counts the view

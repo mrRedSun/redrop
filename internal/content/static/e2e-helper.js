@@ -22,6 +22,10 @@
     try { opener.postMessage({ type: type }, app) } catch (e) { /* the opener went away */ }
   }
   var done = false
+  var timer = setTimeout(function () {
+    done = true
+    say('This window works only when an encrypted link opens it. Open the complete link you were given.')
+  }, 30000)
   window.addEventListener('message', function (e) {
     if (done || e.source !== opener || e.origin !== app || !e.data || e.data.type !== 'redrop-e2e-key') return
     var k = e.data.key
@@ -30,6 +34,7 @@
       return
     }
     done = true
+    clearTimeout(timer)
     E.keys.put(E.INTAKE_KEY, k, Date.now()).then(function () {
       reply('redrop-e2e-stored')
       window.close()

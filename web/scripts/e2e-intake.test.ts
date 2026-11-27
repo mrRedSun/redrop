@@ -38,7 +38,7 @@ class El {
 
 // everything records every value the script hands to the outside, so a test
 // can show the key's text is in none of them.
-function intakePage(fragment: string, opts: { blocked?: boolean } = {}) {
+function intakePage(fragment: string, opts: { blocked?: boolean; search?: string } = {}) {
   const calls: Array<[string, unknown[]]> = []
   const everything = () => JSON.stringify(calls, (_k, v) => (v instanceof CryptoKey ? '[CryptoKey]' : v))
   const els = {
@@ -47,7 +47,7 @@ function intakePage(fragment: string, opts: { blocked?: boolean } = {}) {
   }
   const listeners: Listener[] = []
   const popup = { postMessage: (m: unknown, origin: string) => calls.push(['popup.postMessage', [m, origin]]) }
-  const location = { pathname: '/e/amber-otter-quilt-river', hash: '#' + fragment, replace: (u: string) => calls.push(['location.replace', [u]]) }
+  const location = { pathname: '/e/amber-otter-quilt-river', search: opts.search ?? '', hash: '#' + fragment, replace: (u: string) => calls.push(['location.replace', [u]]) }
   const context = vm.createContext({
     document: { getElementById: (id: keyof typeof els) => els[id] ?? null },
     location, URL, isSecureContext: true, crypto: globalThis.crypto, CryptoKey: globalThis.CryptoKey,
@@ -107,17 +107,33 @@ await test('intake: a damaged or missing key opens nothing; a blocked window say
   assert.equal(blocked.els['rd-intake-open'].disabled, false)
 })
 
+await test('intake: a key whose # became ? gets the damaged-query explanation, not a missing-key error', async () => {
+  for (const search of [`?k=${KEY}`, `?x=1&k=${KEY}`, `?k%3D${KEY}`]) {
+    const p = intakePage('', { search })
+    await p.settled()
+    assert.match(p.els['rd-intake-msg'].textContent, /# was changed to \?/)
+    assert.match(p.els['rd-intake-msg'].textContent, /sent to this server/)
+    assert.equal(p.els['rd-intake-open'].hidden, true)
+    assert.equal(p.calls[0][0], 'history.replaceState')
+    assert.ok(!p.everything().includes(KEY), 'the query key is never echoed or forwarded')
+  }
+})
+
 function helperPage(opts: { opener?: boolean; storageFails?: boolean } = {}) {
   const sent: Array<[unknown, string]> = []
   const stored: Array<[string, unknown]> = []
   let closed = false
   const els = { 'rd-e2e-intake': new El({ 'data-app': APP }), 'rd-e2e-intake-msg': new El() }
   const listeners: Listener[] = []
+  const timers = new Map<number, () => void>()
+  let nextTimer = 0
   const opener = opts.opener === false ? null : { postMessage: (m: unknown, origin: string) => sent.push([m, origin]) }
   const context = vm.createContext({
     document: { getElementById: (id: keyof typeof els) => els[id] ?? null },
     crypto: globalThis.crypto, CryptoKey: globalThis.CryptoKey, TextEncoder, TextDecoder, atob, btoa, ReadableStream,
     opener, close: () => { closed = true },
+    setTimeout: (fn: () => void) => { timers.set(++nextTimer, fn); return nextTimer },
+    clearTimeout: (id: number) => timers.delete(id),
     addEventListener: (type: string, fn: Listener) => { if (type === 'message') listeners.push(fn) },
   })
   ;(context as Record<string, unknown>).window = context
@@ -134,7 +150,7 @@ function helperPage(opts: { opener?: boolean; storageFails?: boolean } = {}) {
     for (const fn of listeners) fn({ data, origin, source })
     await new Promise((r) => setTimeout(r, 10))
   }
-  return { els, sent, stored, message, closed: () => closed }
+  return { els, sent, stored, message, closed: () => closed, timeout: () => { for (const fn of timers.values()) fn() } }
 }
 
 await test('helper: takes one non-extractable CryptoKey from the app origin\'s opener, stores it, answers and closes', async () => {
@@ -156,6 +172,16 @@ await test('helper: takes one non-extractable CryptoKey from the app origin\'s o
   assert.equal(p.closed(), true)
   await p.message({ type: 'redrop-e2e-key', key: good })
   assert.equal(p.stored.length, 1, 'only one key')
+})
+
+await test('helper: an opener on another origin times out and a late key cannot be stored', async () => {
+  const p = helperPage()
+  await p.message({ type: 'redrop-e2e-key', key: KEY }, CONTENT)
+  p.timeout()
+  assert.match(p.els['rd-e2e-intake-msg'].textContent, /only when an encrypted link opens it/)
+  const good = await crypto.subtle.importKey('raw', new Uint8Array(32), 'HKDF', false, ['deriveBits', 'deriveKey'])
+  await p.message({ type: 'redrop-e2e-key', key: good })
+  assert.deepEqual(p.stored, [])
 })
 
 await test('helper: without an opener it does nothing; a storage failure is reported', async () => {

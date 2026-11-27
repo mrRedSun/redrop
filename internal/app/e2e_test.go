@@ -872,6 +872,10 @@ func TestE2EIntakeOnTheAppOrigin(t *testing.T) {
 			}
 		}
 	}
+	slash := h.raw("GET", "/e/"+slug+"/", "", nil)
+	if b := body(slash); slash.StatusCode != 200 || !strings.Contains(b, `data-content="`+a.URL+`"`) {
+		t.Fatalf("trailing-slash intake: %d %s", slash.StatusCode, b)
+	}
 	expectStatus(t, h.raw("GET", "/e/not_a_slug", "", nil), 404, "intake for a malformed slug")
 	r := h.raw("GET", "/e2e/intake.js", "", nil)
 	if js := body(r); r.StatusCode != 200 || !strings.Contains(js, "RedropE2E") || !strings.Contains(js, "rd-intake") || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") {

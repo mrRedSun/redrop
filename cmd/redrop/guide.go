@@ -272,9 +272,12 @@ keep the link working; a lost link and key mean lost content.
   the visitor presses Open, hands only that to the artifact's page through
   a small window that closes by itself. The key's text never reaches the
   artifact's origin, so scripts in the page (analytics, libraries) and
-  windows they open can't read it; they can only use the CryptoKey while
-  the page is open. The browser keeps it for 12 hours, and its history
-  keeps the full link.
+  windows they open can't read the key itself. They can derive and send
+  out object keys that decrypt those objects later and can forge objects
+  for this artifact if those objects are ever stored on the server.
+  A script that ran with the key is a reason to share a new artifact:
+  neither rotate nor update changes the key. The browser keeps the key
+  for 12 hours, and its history keeps the full link.
 - Viewing needs HTTPS, a browser that allows service workers, site storage
   and pop-ups for that click, and the Navigation API (current Chrome,
   Edge, Firefox, Safari). A link whose key is damaged (cut short,

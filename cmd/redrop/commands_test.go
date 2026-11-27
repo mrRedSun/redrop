@@ -427,6 +427,20 @@ func TestMarkdownUsageExitCodes(t *testing.T) {
 	}
 }
 
+func TestShareHelpE2EIntake(t *testing.T) {
+	cmd := shareCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Help(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"https://<server>/e/<slug>#k=", "Open", "pop-ups"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("share --help omits %q", want)
+		}
+	}
+}
+
 func TestArtifactSlug(t *testing.T) {
 	cases := map[string]string{
 		// links, both formats, with or without scheme, port, path, case
@@ -434,6 +448,8 @@ func TestArtifactSlug(t *testing.T) {
 		"https://AMBER-otter-quilt-river.usercontent.example:8443/": "amber-otter-quilt-river",
 		"amber-otter-quilt-river.usercontent.example/docs/a.txt":    "amber-otter-quilt-river",
 		"http://s3eybdkc67r7zegmb7qbugpmvy.usercontent.example/":    "s3eybdkc67r7zegmb7qbugpmvy",
+		// A page path that looks like an intake still names its host's artifact.
+		"https://amber-otter-quilt-river.usercontent.example/e/brave-lion-mint-cloud": "amber-otter-quilt-river",
 		// end-to-end encrypted links: the app origin's intake page
 		"https://redrop.example.com/e/amber-otter-quilt-river":    "amber-otter-quilt-river",
 		"redrop.example.com/e/amber-otter-quilt-river/":           "amber-otter-quilt-river",

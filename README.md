@@ -224,8 +224,11 @@ backup learns sizes, file counts and timing, never content, names or titles.
   non-extractable `CryptoKey` and, when the visitor presses **Open**, hands
   only that to the artifact's page through a small window that closes by
   itself. The key's text never reaches the artifact's origin, so scripts
-  in the page, or windows they open, can't read it; they can use the
-  `CryptoKey` while the page is open. redrop's viewer then decrypts in the
+  in the page, or windows they open, can't read the key itself. They can
+  derive and send out object keys that decrypt those objects later and can
+  forge objects for this artifact if those objects are ever stored on the
+  server. A script that ran with the key is a reason to share a new artifact;
+  neither `rotate` nor `update` changes the key. redrop's viewer decrypts in the
   browser through redrop's own service worker. The browser keeps the key
   for 12 hours, so reloads work; its history keeps the full link. A link
   whose key is damaged, encoded or cased differently, or whose `#` became

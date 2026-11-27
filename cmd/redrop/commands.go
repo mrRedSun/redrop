@@ -148,12 +148,12 @@ func artifactSlug(arg string) (string, error) {
 			raw = "https://" + raw
 		}
 		if u, err := url.Parse(raw); err == nil {
-			if s, ok := strings.CutPrefix(u.Path, api.E2EIntakePrefix); ok && ids.ValidSlug(strings.TrimSuffix(s, "/")) {
-				return strings.TrimSuffix(s, "/"), nil
-			}
 			label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
 			if ids.ValidSlug(label) {
 				return label, nil
+			}
+			if s, ok := strings.CutPrefix(u.Path, api.E2EIntakePrefix); ok && ids.ValidSlug(strings.TrimSuffix(s, "/")) {
+				return strings.TrimSuffix(s, "/"), nil
 			}
 		}
 	}
@@ -373,9 +373,11 @@ older version, a root-absolute link (/x.html) leads to the current version.
 quoting selected text; only you read them, with "redrop feedback ID".
 
 --e2e encrypts everything on this machine before upload. The key goes in
-the link after #k= (https://<slug>.<content-domain>/#k=…), which browsers
-never send to a server: the server stores only ciphertext. The link is then
-the secret, and a lost link means lost content (this machine keeps a copy
+the link after #k= (https://<server>/e/<slug>#k=…), which browsers
+never send to a server: the server stores only ciphertext. This intake page
+on the app origin needs an Open click and pop-ups allowed to hand the key
+to the artifact's origin as a non-extractable CryptoKey. The link is the
+secret, and a lost link means lost content (this machine keeps a copy
 of the key for "update" and "watch"). Viewing needs HTTPS. Passwords,
 expiry and view limits still work; SPA fallback, file listings and the
 dashboard preview don't. See "redrop guide".

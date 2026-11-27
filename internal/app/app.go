@@ -83,6 +83,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	api.Mount("/robots.txt", content.RobotsTxt)
 	intake := content.NewIntake(cfg)
 	api.Mount(apitypes.E2EIntakePrefix+"{slug}", intake.Page)
+	api.Mount(apitypes.E2EIntakePrefix+"{slug}/{$}", intake.Page)
 	api.Mount("/e2e/intake.js", intake.Script)
 	for _, p := range brand.Paths {
 		api.Mount(p, brand.Handler)
