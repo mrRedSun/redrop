@@ -59,7 +59,7 @@ func TestTunnelUsageErrorsNeedNoServer(t *testing.T) {
 // WebSocket with close (a code) or a problem status.
 func fakeTunnelAPI(t *testing.T, kind string, connectStatus int, closeCode websocket.StatusCode) *httptest.Server {
 	t.Helper()
-	art := api.Artifact{ID: "tid", URL: "https://amber-otter-quilt-river.usercontent.example/", Kind: kind, Title: "localhost:3000", Status: api.StatusActive}
+	art := api.Artifact{ID: "tunnelidabcdefgg", URL: "https://amber-otter-quilt-river.usercontent.example/", Kind: kind, Title: "localhost:3000", Status: api.StatusActive}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v1/tunnels":
@@ -71,9 +71,9 @@ func fakeTunnelAPI(t *testing.T, kind string, connectStatus int, closeCode webso
 			art.HasPassword = true
 			w.WriteHeader(201)
 			json.NewEncoder(w).Encode(art)
-		case r.Method == "GET" && r.URL.Path == "/api/v1/artifacts/tid":
+		case r.Method == "GET" && r.URL.Path == "/api/v1/artifacts/tunnelidabcdefgg":
 			json.NewEncoder(w).Encode(art)
-		case r.URL.Path == "/api/v1/tunnels/tid/connect":
+		case r.URL.Path == "/api/v1/tunnels/tunnelidabcdefgg/connect":
 			if connectStatus != 0 {
 				w.WriteHeader(connectStatus)
 				json.NewEncoder(w).Encode(map[string]any{"title": "Gone", "detail": "this tunnel is revoked", "status": connectStatus})
@@ -116,18 +116,18 @@ func TestTunnelJSONOutput(t *testing.T) {
 	if len(lines) != 2 || json.Unmarshal([]byte(lines[0]), &first) != nil || json.Unmarshal([]byte(lines[1]), &second) != nil {
 		t.Fatalf("output:\n%s", out)
 	}
-	if first.Event != "tunnel" || first.ID != "tid" || first.URL == "" || first.Password == "" || first.Target != "http://localhost:3000" || second.Event != "online" {
+	if first.Event != "tunnel" || first.ID != "tunnelidabcdefgg" || first.URL == "" || first.Password == "" || first.Target != "http://localhost:3000" || second.Event != "online" {
 		t.Fatalf("events: %+v %+v", first, second)
 	}
 }
 
 func TestTunnelReuseChecksTheKind(t *testing.T) {
 	srv := fakeTunnelAPI(t, api.KindHTML, 0, 0)
-	if code, _, _ := runTunnelCmd(t, srv, "3000", "--id", "tid"); code != exitUsage {
+	if code, _, _ := runTunnelCmd(t, srv, "3000", "--id", "tunnelidabcdefgg"); code != exitUsage {
 		t.Fatalf("--id of an HTML artifact: exit %d", code)
 	}
 	srv = fakeTunnelAPI(t, api.KindTunnel, http.StatusGone, 0)
-	if code, _, _ := runTunnelCmd(t, srv, "3000", "--id", "tid"); code != exitGone {
+	if code, _, _ := runTunnelCmd(t, srv, "3000", "--id", "tunnelidabcdefgg"); code != exitGone {
 		t.Fatalf("--id of a revoked tunnel: exit %d", code)
 	}
 }

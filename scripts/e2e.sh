@@ -732,7 +732,10 @@ TSLUG=$(python3 -I -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.a
 [ "$(code_of -b "$CJ" "${H[@]}" -d '{"e2e":true}' "$BASE/api/v1/tunnels")" = 400 ] || die "server accepted encrypted tunnel creation"
 [ "$(code_of -b "$CJ" "${H[@]}" -X PATCH -d '{"e2e":true}' "$BASE/api/v1/artifacts/$TID")" = 400 ] || die "server accepted encrypted tunnel settings"
 pass "tunnel encryption boundary: app intake stays syntax-only, helper and worker refused, encrypted creation/settings refused"
-$R list | grep -q "^$TID  *online  *tunnel" || die "redrop list shows the tunnel online"
+# Consume the whole CLI output before grep: a short-circuiting pipe can
+# SIGPIPE a long list, which pipefail would mistake for a failed assertion.
+$R list > "$WORK/tunnel-list.out"
+grep -q "^$TID  *online  *tunnel" "$WORK/tunnel-list.out" || die "redrop list shows the tunnel online"
 curl -fsS "${FRAME[@]}" "${TURL}page" | grep -q 'name="password"' || die "tunnel gate before the app"
 TJ="$WORK/ct"
 [ "$(code_of -c "$TJ" -H 'Sec-Fetch-Site: same-origin' --data-urlencode password=e2e-tunnel-password "${TURL}__redrop/open")" = 303 ] || die "tunnel unlock"
