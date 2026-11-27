@@ -348,17 +348,27 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 }
 
 // damagedE2ELink answers a top-level load of an end-to-end encrypted link
-// whose "#" became "%23" (or "%2523", ...), so its key arrived in the path
-// (review 33 re-check M3). The answer is fixed and comes before the gates:
-// no viewer, frame address or gate form is built from that path, and no
-// view counts. It reports whether it answered.
+// whose key arrived in the path or the query: its "#" became "%23" (or
+// "%2523", ...), or "?" (review 33 re-checks M3 and B-2b″). The answer is
+// fixed and comes before the gates: no viewer, frame address or gate form
+// is built from the request, and no view counts. It reports whether it
+// answered.
 func (h *Handler) damagedE2ELink(w http.ResponseWriter, r *http.Request, a *store.Artifact) bool {
-	if !a.E2E || !wantsViewer(r) || !e2e.HasEncodedFragment(r.URL.Path) {
+	if !a.E2E || !wantsViewer(r) {
+		return false
+	}
+	var changedTo string
+	switch {
+	case e2e.HasEncodedFragment(r.URL.Path):
+		changedTo = "%23"
+	case e2e.QueryKeyAttempt(r.URL.RawQuery):
+		changedTo = "?"
+	default:
 		return false
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	h.pages.message(w, http.StatusBadRequest, "This link is damaged",
-		"Its # was changed to %23, so the key in it was sent to this server as part of the address. Nothing was opened. Ask for the link again and open it exactly as you get it.")
+		"Its # was changed to "+changedTo+", so the key in it was sent to this server as part of the address. Nothing was opened. Ask for the link again and open it exactly as you get it.")
 	return true
 }
 

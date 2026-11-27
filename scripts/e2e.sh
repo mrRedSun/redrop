@@ -471,16 +471,17 @@ fi
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${EURL}__redrop/e2e-sw.js")" = 200 ] || die "worker script on the e2e host"
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${URL}__redrop/e2e-sw.js")" = 404 ] || die "worker script on a plaintext host"
 pass "e2e: viewer page, Node WebCrypto decryption, ciphertext-only objects, worker on e2e hosts only"
-# A link whose "#" became "%23" sends its key in the path: a top-level load
-# gets a fixed damaged-link page (no viewer, no gate, not cached), and the
-# server log check below covers it (second re-check of review 33, M3).
-for enc in %23 %2523; do
+# A link whose "#" became "%23" (or "?") sends its key in the path (or the
+# query): a top-level load gets a fixed damaged-link page (no viewer, no
+# gate, not cached), and the server log check below covers it (review 33
+# re-checks, M3 and B-2b″).
+for enc in %23 %2523 '?' '?x=1&'; do
   r=$(curl -s -o "$WORK/e2e-damaged.html" -w '%{http_code} %header{cache-control}' "${DOC[@]}" "${EURL}${enc}k=$EKEY")
   [ "$r" = "400 no-store" ] && grep -q 'This link is damaged' "$WORK/e2e-damaged.html" || die "a link whose # became $enc must get the damaged-link page (got $r)"
   grep -qF -- "$EKEY" "$WORK/e2e-damaged.html" && die "the damaged-link page echoes the key"
   grep -q 'rd-frame' "$WORK/e2e-damaged.html" && die "the damaged-link page frames the path"
 done
-pass "e2e: a link whose # became %23 or %2523 gets a fixed damaged-link page"
+pass "e2e: a link whose # became %23, %2523 or ? gets a fixed damaged-link page"
 
 # Plaintext never goes to an encrypted artifact (review 33 B-1). With the key
 # in this machine's store, update encrypts without --e2e; from the full link
@@ -604,7 +605,7 @@ PY
   fi
   CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" E2E_ELSEWHERE="$BASE/healthz" "${BROWSER_CAP[@]}" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
   sed 's/^/    /' "$B/out.txt"
-  pass "e2e: in Chromium, no script in the artifact reads the key, watching or acting, through a same-tab reopen, a bfcache restore or a fragment edit; damaged, encoded and %23 links open nothing; gates keep it; SVG files are inert; revocation stops an open page"
+  pass "e2e: in Chromium, the artifact's page reads no key through a same-tab reopen (also one it set up by rewriting the address), a bfcache restore or a fragment edit; damaged, encoded, %23 and ? links open nothing; gates keep it; SVG files are inert; revocation stops an open page"
 else
   printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi

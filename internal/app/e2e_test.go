@@ -693,9 +693,10 @@ func TestE2EPlaintextNeverUploaded(t *testing.T) {
 }
 
 // M3 of the second re-check of review 33: a link whose "#" became "%23"
-// (or "%2523") sends its key to the server in the path. A top-level load
+// (or "%2523") sends its key to the server in the path; and B-2b″ of the
+// third: one whose "#" became "?" sends it in the query. A top-level load
 // gets a fixed damaged-link page, before any gate: no viewer, no frame
-// address and no gate form built from the path, no view, no key in the
+// address and no gate form built from the request, no view, no key in the
 // answer or the log.
 func TestE2EKeyInThePathOpensNothing(t *testing.T) {
 	var logs syncBuffer
@@ -712,7 +713,11 @@ func TestE2EKeyInThePathOpensNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, a := range []*api.Artifact{open, gated} {
-		for _, p := range []string{"/%23k=" + key.String(), "/%2523k=" + key.String(), "/docs/%23k%3D" + key.String(), "/__redrop/v/1/%23k=" + key.String()} {
+		for _, p := range []string{
+			"/%23k=" + key.String(), "/%2523k=" + key.String(), "/docs/%23k%3D" + key.String(), "/__redrop/v/1/%23k=" + key.String(),
+			"/?k=" + key.String(), "/?x=1&k=" + key.String(), "/?K=" + key.String(), "/?k%3D" + key.String(),
+			"/?redrop-e2e=1&k=" + key.String(), "/docs/a.html?k=" + key.String(), "/__redrop/v/1/?k=" + key.String(),
+		} {
 			r := h.fetchContent(a.URL, p, nil, docHeaders...)
 			b := body(r)
 			if r.StatusCode != http.StatusBadRequest || !strings.Contains(b, "This link is damaged") || r.Header.Get("Cache-Control") != "no-store" {
@@ -730,14 +735,21 @@ func TestE2EKeyInThePathOpensNothing(t *testing.T) {
 	if got, err := c.GetArtifact(ctx, open.ID); err != nil || got.Views != 0 {
 		t.Fatalf("views after damaged links: %v %v", got, err)
 	}
-	// A link that merely has a "#" in a path is only refused on encrypted hosts.
+	// An ordinary query still opens the viewer, and keeps its parameters.
+	if r := h.fetchContent(open.URL, "/?q=1&page=2&redrop-e2e=1", nil, docHeaders...); r.StatusCode != http.StatusOK || viewerAttr(t, body(r), "src") != "/__redrop/v/1/?page=2&amp;q=1" {
+		t.Fatalf("an ordinary query: %d", r.StatusCode)
+	}
+	// A "#" in a path, or k= in a query, is only refused on encrypted hosts:
+	// a plaintext artifact's own query strings keep working.
 	plainFile := writeFile(t, t.TempDir(), "plain.html", "<p>plain</p>")
 	plain, err := c.Share(ctx, &client.Source{Path: plainFile}, client.PublishOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := h.fetchContent(plain.URL, "/%23k=x", nil, docHeaders...); r.StatusCode == http.StatusBadRequest {
-		t.Fatal("a plaintext artifact got the damaged-link page")
+	for _, p := range []string{"/%23k=x", "/?k=" + key.String()} {
+		if r := h.fetchContent(plain.URL, p, nil, docHeaders...); r.StatusCode == http.StatusBadRequest {
+			t.Fatalf("a plaintext artifact got the damaged-link page for %s", p)
+		}
 	}
 	if strings.Contains(logs.String(), key.String()) || strings.Contains(logs.String(), "%23") {
 		t.Fatalf("the key reached the log:\n%s", logs.String())
