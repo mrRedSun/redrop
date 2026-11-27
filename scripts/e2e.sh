@@ -64,6 +64,22 @@ TOKEN=$(curl -fsS -b "$CJ" "${H[@]}" -d '{"name":"e2e"}' "$BASE/api/v1/tokens" |
 pass "token created"
 printf %s "$TOKEN" | $R login --url "$BASE" --token-stdin >/dev/null; pass "cli login"
 
+# version: the CLI reports its own stamp and the server's, from /api/v1/version.
+SV=$(curl -fsS "$BASE/api/v1/version" | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')
+VOUT=$($R version --json)
+echo "$VOUT" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["cli"] and d["cli"] != "main", d
+assert d["server"] == sys.argv[1], (d, sys.argv[1])
+assert d["min_cli"] != "", d
+' "$SV" || die "redrop version --json: $VOUT (server reports $SV)"
+$R version | grep -q "^server $SV ($BASE)" || die "redrop version does not show the server version"
+if $R version 2>&1 >/dev/null | grep -q 'older than the minimum'; then
+  die "unexpected min-version warning for a matching CLI"
+fi
+pass "redrop version shows CLI and server versions ($SV)"
+
 # One-line setup from the token dialog: the real install.sh with REDROP_TOKEN,
 # in an isolated HOME/config/install dir with no redrop variables inherited.
 IH="$WORK/install-home"

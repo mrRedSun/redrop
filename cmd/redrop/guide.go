@@ -325,6 +325,39 @@ then "redrop feedback resolve ID COMMENT..." for the ones it addresses.
 Each artifact keeps a limited number of comments, open or resolved (500
 unless the server sets another limit); delete old ones to make room.
 
+## Staying current
+
+    redrop version               # CLI and server versions; warns when a
+                                 # release CLI is below the server's minimum
+    redrop self-update --check   # show the latest release, change nothing
+    redrop self-update           # download it, verify SHA256SUMS, replace
+    redrop self-update --version v1.2.3   # a specific release (older too)
+
+Releases are tagged vX.Y.Z in the project's GitHub repository. Each one
+carries binaries for Linux, macOS and Windows (amd64 and arm64), a
+SHA256SUMS file, and provenance attestations. self-update downloads the
+binary for this OS and CPU, checks it against SHA256SUMS, and only then
+replaces the running file (an atomic rename; on Windows the old binary is
+renamed aside). --check answers in update_available with --json. Installing
+an older release with --version works (it is the rollback path) and prints
+a downgrade warning.
+
+self-update refuses a binary in a system or package-manager directory
+(/usr/bin, Homebrew's Cellar, the Nix store, ...) or a directory it cannot
+write to: update through the package manager or rerun the installer instead.
+
+Versions: a tagged build reports vX.Y.Z. A CLI installed from a server's
+/install.sh usually reports 0.0.0-main+<commit>, a build of the development
+branch that matches that server. Such a CLI is not compared with releases:
+"redrop version" never warns about it, and self-update replaces it only
+with an explicit --version. A "dev" version is a local go build.
+
+Trust: SHA256SUMS comes from the same GitHub release as the binary, so it
+catches corruption, not a replaced release; authenticity rests on HTTPS to
+GitHub. Non-HTTPS requests and redirects are refused. For an independent
+check, run: gh attestation verify <binary> --repo mrRedSun/redrop
+REDROP_GITHUB_API points self-update at another API root (HTTPS only).
+
 ## Exit codes
 
     0  success
