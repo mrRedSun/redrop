@@ -25,6 +25,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
+	"github.com/mrRedSun/redrop/internal/e2e"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/netutil"
 	"github.com/mrRedSun/redrop/internal/security"
@@ -304,6 +305,9 @@ func (h *Handler) countView(w http.ResponseWriter, r *http.Request, a *store.Art
 // serve answers a path of the artifact link: the viewer page, the file page,
 // or the current version's files.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
+	if h.damagedE2ELink(w, r, a) {
+		return
+	}
 	d, ok := h.admit(w, r, a)
 	if !ok {
 		return
@@ -343,11 +347,29 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 	}
 }
 
+// damagedE2ELink answers a top-level load of an end-to-end encrypted link
+// whose "#" became "%23" (or "%2523", ...), so its key arrived in the path
+// (review 33 re-check M3). The answer is fixed and comes before the gates:
+// no viewer, frame address or gate form is built from that path, and no
+// view counts. It reports whether it answered.
+func (h *Handler) damagedE2ELink(w http.ResponseWriter, r *http.Request, a *store.Artifact) bool {
+	if !a.E2E || !wantsViewer(r) || !e2e.HasEncodedFragment(r.URL.Path) {
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	h.pages.message(w, http.StatusBadRequest, "This link is damaged",
+		"Its # was changed to %23, so the key in it was sent to this server as part of the address. Nothing was opened. Ask for the link again and open it exactly as you get it.")
+	return true
+}
+
 // serveOldVersion answers /__redrop/v/<N>/<path>: version N's files, only
 // when the owner lets viewers open older versions; otherwise the identical
 // miss. A top-level page load of a framed artifact goes to the viewer form,
 // <path>?redrop-version=N.
 func (h *Handler) serveOldVersion(w http.ResponseWriter, r *http.Request, a *store.Artifact, rest string) {
+	if h.damagedE2ELink(w, r, a) {
+		return
+	}
 	num, sub, _ := strings.Cut(rest, "/")
 	n, err := strconv.Atoi(num)
 	if err != nil || n <= 0 || num != strconv.Itoa(n) {

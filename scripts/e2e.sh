@@ -471,6 +471,16 @@ fi
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${EURL}__redrop/e2e-sw.js")" = 200 ] || die "worker script on the e2e host"
 [ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${URL}__redrop/e2e-sw.js")" = 404 ] || die "worker script on a plaintext host"
 pass "e2e: viewer page, Node WebCrypto decryption, ciphertext-only objects, worker on e2e hosts only"
+# A link whose "#" became "%23" sends its key in the path: a top-level load
+# gets a fixed damaged-link page (no viewer, no gate, not cached), and the
+# server log check below covers it (second re-check of review 33, M3).
+for enc in %23 %2523; do
+  r=$(curl -s -o "$WORK/e2e-damaged.html" -w '%{http_code} %header{cache-control}' "${DOC[@]}" "${EURL}${enc}k=$EKEY")
+  [ "$r" = "400 no-store" ] && grep -q 'This link is damaged' "$WORK/e2e-damaged.html" || die "a link whose # became $enc must get the damaged-link page (got $r)"
+  grep -qF -- "$EKEY" "$WORK/e2e-damaged.html" && die "the damaged-link page echoes the key"
+  grep -q 'rd-frame' "$WORK/e2e-damaged.html" && die "the damaged-link page frames the path"
+done
+pass "e2e: a link whose # became %23 or %2523 gets a fixed damaged-link page"
 
 # Plaintext never goes to an encrypted artifact (review 33 B-1). With the key
 # in this machine's store, update encrypts without --e2e; from the full link

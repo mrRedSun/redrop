@@ -692,6 +692,58 @@ func TestE2EPlaintextNeverUploaded(t *testing.T) {
 	}
 }
 
+// M3 of the second re-check of review 33: a link whose "#" became "%23"
+// (or "%2523") sends its key to the server in the path. A top-level load
+// gets a fixed damaged-link page, before any gate: no viewer, no frame
+// address and no gate form built from the path, no view, no key in the
+// answer or the log.
+func TestE2EKeyInThePathOpensNothing(t *testing.T) {
+	var logs syncBuffer
+	h := newHarnessWith(t, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})), Options{})
+	c := client.New(h.srv.URL, h.setupAdmin())
+	ctx := context.Background()
+	page := writeFile(t, t.TempDir(), "page.html", "<p>"+e2eSecret+"</p>")
+	open, key, err := c.ShareE2E(ctx, &client.Source{Path: page}, client.PublishOptions{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gated, _, err := c.ShareE2E(ctx, &client.Source{Path: page}, client.PublishOptions{Password: "hunter22"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []*api.Artifact{open, gated} {
+		for _, p := range []string{"/%23k=" + key.String(), "/%2523k=" + key.String(), "/docs/%23k%3D" + key.String(), "/__redrop/v/1/%23k=" + key.String()} {
+			r := h.fetchContent(a.URL, p, nil, docHeaders...)
+			b := body(r)
+			if r.StatusCode != http.StatusBadRequest || !strings.Contains(b, "This link is damaged") || r.Header.Get("Cache-Control") != "no-store" {
+				t.Fatalf("%s: %d %q %s", p, r.StatusCode, r.Header.Get("Cache-Control"), b)
+			}
+			if strings.Contains(b, key.String()) || strings.Contains(b, "rd-frame") || strings.Contains(b, "password") {
+				t.Fatalf("%s: the answer holds the key, a frame or a gate: %s", p, b)
+			}
+		}
+		// A frame or a script isn't a link anyone opened: the usual answers.
+		if r := h.fetchContent(a.URL, "/%23k="+key.String(), nil, frameHeaders...); r.StatusCode == http.StatusBadRequest {
+			t.Fatal("a frame request got the damaged-link page")
+		}
+	}
+	if got, err := c.GetArtifact(ctx, open.ID); err != nil || got.Views != 0 {
+		t.Fatalf("views after damaged links: %v %v", got, err)
+	}
+	// A link that merely has a "#" in a path is only refused on encrypted hosts.
+	plainFile := writeFile(t, t.TempDir(), "plain.html", "<p>plain</p>")
+	plain, err := c.Share(ctx, &client.Source{Path: plainFile}, client.PublishOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := h.fetchContent(plain.URL, "/%23k=x", nil, docHeaders...); r.StatusCode == http.StatusBadRequest {
+		t.Fatal("a plaintext artifact got the damaged-link page")
+	}
+	if strings.Contains(logs.String(), key.String()) || strings.Contains(logs.String(), "%23") {
+		t.Fatalf("the key reached the log:\n%s", logs.String())
+	}
+}
+
 // M2 of review 33: a fragment a client sent encoded in a path (an
 // end-to-end key pasted where an ID belongs) never reaches the log, encoded
 // once (%23) or more (%2523: what a client that path-escapes "ID%23k=..."
