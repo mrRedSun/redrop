@@ -272,8 +272,11 @@ keep the link working; a lost link and key mean lost content.
   scripts in the page (analytics, libraries) can't read the key; they can
   only use it while the page is open. The browser keeps that CryptoKey for
   12 hours, and its history keeps the full link. A link whose key is
-  damaged (cut short, or with characters added) opens nothing, even in a
-  browser that has the key: copy the whole link again.
+  damaged (cut short, characters added, percent-encoded, a different
+  case) or whose # became %23 opens nothing, even in a browser that has
+  the key: copy the whole link again. A link opened again in a tab where
+  its page is open closes the page; open it in a new tab. The browser
+  needs the Navigation API (current Chrome, Edge, Firefox, Safari).
 - This protects against the server's storage being read, not against a
   compromised live server, which could serve a viewer that leaks the key.
 

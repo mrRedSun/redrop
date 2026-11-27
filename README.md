@@ -223,7 +223,11 @@ backup learns sizes, file counts and timing, never content, names or titles.
   page still runs on its own origin. Scripts in the page can't read the
   key, but can use it while the page is open. The browser keeps the key
   for 12 hours, so reloads work; its history keeps the full link. A link
-  whose key is damaged opens nothing, even where the key is kept.
+  whose key is damaged, encoded or cased differently, or whose `#` became
+  `%23`, opens nothing, even where the key is kept. Opening the link again
+  in a tab where its page is open closes the page instead, so open it in a
+  new tab. Viewing also needs a browser with the Navigation API (current
+  Chrome, Edge, Firefox and Safari).
 - **Limit:** this protects stored data, not visits through a compromised
   live server, which could serve a viewer that leaks the key. Design and
   format: [`docs/DESIGN.md`](docs/DESIGN.md#end-to-end-encrypted-links).
