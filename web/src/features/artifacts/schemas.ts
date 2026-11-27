@@ -9,7 +9,8 @@ export type ArtifactStatus = typeof ArtifactStatus.Type
 export const Artifact = Schema.Struct({
   id: Schema.String,
   title: Schema.String,
-  kind: Schema.Literals(['html', 'file', 'bundle']),
+  /** `tunnel`: a live app served from the owner's computer by `redrop tunnel`; no files or versions. */
+  kind: Schema.Literals(['html', 'file', 'bundle', 'tunnel']),
   status: ArtifactStatus,
   /** Secret link. Present for the owner only; admin views use AdminArtifact (no url field at all). */
   url: Schema.String,
@@ -40,12 +41,17 @@ export const Artifact = Schema.Struct({
   e2e: Schema.Boolean,
   /** End-to-end encrypted only: the link to give out, on this server's own origin, without its `#k=` key. */
   e2e_link: Schema.optionalKey(Schema.String),
+  /** Tunnels only: the owner's `redrop tunnel` is connected. Always false for other kinds. */
+  online: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
 
 /** The link people open: an end-to-end encrypted artifact's goes through this server's key intake page. */
 export const shareLink = (a: { readonly url: string; readonly e2e: boolean; readonly e2e_link?: string }): string =>
   a.e2e && a.e2e_link ? a.e2e_link : a.url
+
+/** A tunnel's connection, for labels: online while its `redrop tunnel` runs. */
+export const tunnelState = (a: { readonly online: boolean }): string => (a.online ? 'online' : 'offline')
 
 /** The status as shown to people: an administrator's revocation is named as such. */
 export const statusLabel = (a: { readonly status: ArtifactStatus; readonly revoked_by_admin: boolean }): string =>
@@ -201,17 +207,18 @@ export const settingsDefaults = (a: Artifact, spa: boolean): ArtifactSettingsInp
  * Form -> PATCH body. Keep omits expiry/password instead of resetting
  * them. Explicit TTL choices are relative to the submission time. `spa`
  * only applies to bundles. The viewer switches are always sent, so saving
- * stores the values the owner saw as the artifact's own.
+ * stores the values the owner saw as the artifact's own. Tunnels have no
+ * view limit or older versions, so those are never sent for them.
  */
 export const toUpdateRequest = (v: ArtifactSettings, kind: Artifact['kind']): UpdateArtifactRequest => ({
   title: v.title,
-  max_views: v.maxViews,
+  ...(kind !== 'tunnel' && { max_views: v.maxViews }),
   ...(v.ttl !== 'keep' && { ttl: v.ttl }),
   ...(v.passwordAction === 'set' && { password: v.password }),
   ...(v.passwordAction === 'remove' && { password: '' }),
-  ...(v.resetViews && { reset_views: true }),
+  ...(v.resetViews && kind !== 'tunnel' && { reset_views: true }),
   ...(kind === 'bundle' && { spa: v.spa }),
   info_button: v.infoButton,
-  viewer_old_versions: v.oldVersions,
+  ...(kind !== 'tunnel' && { viewer_old_versions: v.oldVersions }),
   feedback: v.feedback,
 })

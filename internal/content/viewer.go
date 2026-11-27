@@ -67,13 +67,16 @@ func serveViewerAsset(w http.ResponseWriter, r *http.Request) bool {
 // /__redrop/v/<N>/ for an older version). Directory redirects and missing
 // paths answer as they would without the viewer; only real pages get it.
 func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifact, snap sharing.Snapshot, d sharing.Decision) {
-	switch t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind {
-	case sharing.TargetRedirect:
-		redirect(w, r, withQuery(t.Location, r.URL.RawQuery), http.StatusMovedPermanently)
-		return
-	case sharing.TargetNotFound:
-		h.pages.notFound(w)
-		return
+	// A tunnel has no stored paths: the app answers every one, in the frame.
+	if !sharing.IsTunnel(a) {
+		switch t := h.sharing.ResolvePath(r.Context(), snap, r.URL.Path); t.Kind {
+		case sharing.TargetRedirect:
+			redirect(w, r, withQuery(t.Location, r.URL.RawQuery), http.StatusMovedPermanently)
+			return
+		case sharing.TargetNotFound:
+			h.pages.notFound(w)
+			return
+		}
 	}
 	h.countView(w, r, a, d)
 	frameSrc := withoutParams(r.URL, paramVersion, paramInfo)

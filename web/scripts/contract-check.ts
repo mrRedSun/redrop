@@ -65,9 +65,10 @@ const program = Effect.gen(function* () {
 
   const list = yield* artifacts.list({ q: '', status: 'all' })
   check('artifact list decodes', true)
-  // e2e may have left the newest artifact revoked; the report and
-  // revocation checks below need one that is still live.
-  const first = list.find((a) => a.status === 'active') ?? list[0]
+  // Tunnels have no files or versions to check, and e2e may have left the
+  // newest artifact revoked; the report and revocation checks below need one
+  // that is still live and has content.
+  const first = list.find((a) => a.status === 'active' && a.kind !== 'tunnel') ?? list[0]
   if (first) {
     const a = yield* artifacts.get(first.id)
     const versions = yield* artifacts.versions(a.id)
@@ -130,6 +131,8 @@ const program = Effect.gen(function* () {
     check('system report filter excludes visitors', systemQueue.items.every((r) => r.source === 'system'))
     const all = yield* admin.artifacts('', 'all')
     check('admin artifacts decode without links', all.every((a) => !('url' in a)))
+    const tunnels = yield* admin.tunnels
+    check('admin tunnels decode without links', tunnels.every((t) => !('url' in t) && all.some((a) => a.id === t.id && a.online)))
     // An administrator's revocation: the owner sees it and cannot undo it.
     if (first && first.status === 'active') {
       const revoked = yield* admin.setArtifactRevoked(first.id, true)

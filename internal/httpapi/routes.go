@@ -6,6 +6,8 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-fuego/fuego"
 	"github.com/go-fuego/fuego/option"
+
+	"github.com/mrRedSun/redrop/pkg/api"
 )
 
 type routeOpts = []func(*fuego.BaseRoute)
@@ -25,6 +27,7 @@ func (a *API) routes() {
 
 	anyAuthOpts := routeOpts{option.Middleware(a.requireAuth(anyAuth)), option.Security(bearerOrSession...)}
 	sessionOpts := routeOpts{option.Middleware(a.requireAuth(sessionOnly)), option.Security(sessionSec)}
+	tokenOpts := routeOpts{option.Middleware(a.requireAuth(tokenOnly)), option.Security(openapi3.SecurityRequirement{"bearer": {}})}
 	adminOpts := routeOpts{option.Middleware(a.requireAuth(adminOnly)), option.Security(sessionSec)}
 	jsonOnly := option.RequestContentType("application/json")
 	publicWrite := routeOpts{option.Middleware(a.csrfOnly), option.Middleware(a.authBody), jsonOnly}
@@ -100,6 +103,13 @@ func (a *API) routes() {
 	fuego.Put(art, "/{id}/live/{session}", a.holdLive, with(anyAuthOpts, op("holdLive", "Start or renew a watch session's live reload lease")...)...)
 	fuego.Delete(art, "/{id}/live/{session}", a.releaseLive, with(anyAuthOpts, op("releaseLive", "End a watch session's live reload lease")...)...)
 
+	// Tunnels (DESIGN.md "Tunnels"): artifacts of kind tunnel, served live by
+	// the owner's redrop tunnel over the connect WebSocket.
+	tun := fuego.Group(v1, "/tunnels", option.Tags("tunnels"))
+	fuego.Post(tun, "", a.createTunnel, with(anyAuthJSON, append(op("createTunnel", "Create a tunnel artifact"), option.DefaultStatusCode(http.StatusCreated))...)...)
+	fuego.GetStd(tun, "/{id}/connect", a.connectTunnel, with(tokenOpts, append(op("connectTunnel", "Connect a tunnel (WebSocket carrying a yamux session; API token only)"),
+		option.Header(api.TunnelSessionHeader, "Random value chosen once per CLI process"))...)...)
+
 	// Administration.
 	adm := fuego.Group(v1, "/admin", option.Tags("admin"))
 	fuego.Get(adm, "/stats", a.admin.stats, with(adminOpts, op("adminStats", "Server usage")...)...)
@@ -113,6 +123,8 @@ func (a *API) routes() {
 		option.Query("q", "Search"), option.Query("status", "active, expired, exhausted, revoked, or all"))...)...)
 	fuego.Patch(adm, "/artifacts/{id}", a.admin.updateArtifact, with(adminJSON, op("adminUpdateArtifact", "Revoke or restore any artifact")...)...)
 	fuego.Delete(adm, "/artifacts/{id}", a.admin.deleteArtifact, with(adminOpts, op("adminDeleteArtifact", "Delete any artifact")...)...)
+	fuego.Get(adm, "/tunnels", a.admin.listTunnels, with(adminOpts, op("adminListTunnels", "Connected tunnels (metadata only)")...)...)
+	fuego.Delete(adm, "/tunnels/{id}", a.admin.endTunnel, with(adminOpts, op("adminEndTunnel", "End a tunnel's connection; revoke it to keep it off")...)...)
 
 	// Abuse reports (DESIGN.md "Abuse handling"): the public form's endpoint
 	// and the admin queue.

@@ -113,8 +113,10 @@ func serveAsset(w http.ResponseWriter, r *http.Request, a viewerAsset) {
 type helperData struct{ App string }
 
 // e2eIntakeHelper answers /__redrop/e2e-intake on an artifact's host, for
-// any slug of the right form and without a lookup, like the intake page.
-// It holds no artifact data: it only takes a CryptoKey from the app origin
+// a live end-to-end encrypted artifact only (ServeHTTP gives every other
+// slug the identical miss). The app-origin intake remains syntax-only.
+// This page holds no artifact data: it only takes a CryptoKey from the app
+// origin
 // and stores it for this origin's viewer.
 func (h *Handler) e2eIntakeHelper(w http.ResponseWriter, r *http.Request, slug string) {
 	self := strings.TrimSuffix(h.cfg.ArtifactURL(slug), "/")

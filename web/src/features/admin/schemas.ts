@@ -46,9 +46,24 @@ export const AdminArtifact = Schema.Struct({
   revoked_by_admin: Schema.Boolean,
   /** End-to-end encrypted: nobody on the server can read the content. */
   e2e: Schema.Boolean,
+  /** Tunnels only: the owner's `redrop tunnel` is connected. */
+  online: Schema.Boolean,
 })
 export type AdminArtifact = typeof AdminArtifact.Type
 export const AdminArtifactList = ListOf(AdminArtifact)
+
+/** A connected tunnel (GET /admin/tunnels): metadata only, never the link. */
+export const AdminTunnel = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  owner_username: Schema.String,
+  token_name: Schema.String,
+  connected_at: Timestamp,
+  streams: Schema.Number,
+  bytes_this_hour: Schema.Number,
+})
+export type AdminTunnel = typeof AdminTunnel.Type
+export const AdminTunnelList = ListOf(AdminTunnel)
 
 /** One audited action on a report. */
 export const ReportAction = Schema.Struct({

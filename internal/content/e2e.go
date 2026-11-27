@@ -48,7 +48,7 @@ var e2eWorker = func() viewerAsset {
 // artifact, after its gates. Every other host gets the 404 every service
 // worker script request gets.
 func (h *Handler) e2eWorkerScript(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
-	if !a.E2E {
+	if !a.E2E || sharing.IsTunnel(a) {
 		h.pages.notFound(w)
 		return
 	}

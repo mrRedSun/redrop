@@ -824,8 +824,19 @@ any URL the visitor opened; the viewer can't remove that.
      suggestions also keep the original full link.
   3. The visitor presses **Open**. That click lets the page open a small
      window on the artifact's origin, `/__redrop/e2e-intake`: redrop's
-     helper page, served for any slug of the right form without a lookup,
-     with a policy that allows only its own script and no framing.
+     helper page, with a policy that allows only its own script and no
+     framing. The content handler serves it only for a live end-to-end
+     encrypted artifact, after one slug lookup like any visit (no gate,
+     no view). Every other slug, unknown, gone, plaintext or a tunnel,
+     gets the identical miss and spends miss budget, so the helper is no
+     cheaper oracle than the link itself, and no key is ever stored on a
+     tunnel's or a plaintext artifact's origin. Someone who has the link
+     but not its password can tell from the helper that it is encrypted;
+     the link is the secret that gives this away. A refused slug gets
+     "Not found" in the small window; the intake page offers Open again
+     after its 30-second wait. A valid visit grant still permits the
+     helper during a one-time visit, as it permits the content. The
+     app-origin intake stays syntax-only and reveals nothing about its slug.
   4. The helper says it is ready to its opener, on the app origin only.
      The intake page sends it the `CryptoKey` by `postMessage`, to the
      artifact's origin only, and only to that popup. The helper takes it
@@ -839,11 +850,10 @@ any URL the visitor opened; the viewer can't remove that.
      earlier visit is used when no fresh one is waiting.
 
   The helper gives up after 30 seconds without a valid hand-off and
-  explains that it works only when an encrypted link opens it. It makes no
-  artifact lookup, so even an intake link for a plaintext or nonexistent
-  artifact can leave an unused intake key for up to 12 hours. This reveals
-  no artifact existence or metadata and stores no raw key. Scripts on the
-  artifact's origin can also overwrite that slot with their own key: the
+  explains that it works only when an encrypted link opens it. Because the
+  helper answers only live encrypted artifacts, an intake link for a
+  plaintext, unknown or tunnel slug stores nothing (fourth re-check n-1).
+  Scripts on the artifact's origin can also overwrite that slot with their own key: the
   next viewer refuses it once and drops it. This is an accepted same-origin
   denial of service, like tampering with the viewer itself; reopening the
   complete link supplies the right key again.
@@ -1860,6 +1870,489 @@ Authentication and not-found errors use the normal CLI exit codes. Cancellation
 returns success. The command creates immutable versions; it does not squash
 history or inject live-reload code into uploaded artifacts.
 
+## Tunnels
+
+`redrop tunnel 3000` shares an app that is still running on the owner's
+computer (a dev server with hot reload, an API, a webhook receiver) through a
+link of the same shape as an artifact link. It answers issue #25.
+
+### Decisions
+
+* **A tunnel is an artifact of kind `tunnel`.** It has a four-word slug on
+  the content domain, an owner, a title, an expiry, an optional password,
+  revoke and admin revocation, and it shows in `redrop list` and the
+  dashboard. It uses the same code paths as other artifacts: slug lookup,
+  `sharing.Decide`, the gate and `Open`, the identical miss, the view log,
+  owner preview, rotation and deletion. There is no second access check.
+  * The kind lives where every kind lives, on the version row. A tunnel has
+    exactly one version, kind `tunnel`, with no files and zero bytes. No
+    migration is needed.
+  * Refused for tunnels, with `400`: a view limit (`max_views`, `--once`),
+    older versions, the SPA flag, new versions, activating or deleting a
+    version, and a live reload lease (`redrop watch`). They don't fit a
+    live app.
+  * Tunnels use no storage, so they never count against a quota. Counting
+    their traffic against the quota is not done.
+* **The link works while `redrop tunnel` runs.** The CLI keeps one
+  WebSocket to the app origin open, and visitors' requests travel through
+  it to the local target. When the CLI is not connected, the tunnel is
+  *offline*.
+* **Viewer frame: as for HTML.** `sharing.modeFor` gives tunnels the frame
+  when the info button is on. A top-level `GET` or `HEAD` page load gets
+  the viewer page, which frames the same path; the address bar follows the
+  frame, and `--no-info` or `?redrop-info=0` is the direct view. The info
+  panel says "Live app" instead of listing versions, size and files.
+  Feedback works as for HTML. Other methods (a form that posts to
+  `_top`) go straight to the app. Nothing is injected into a proxied
+  response.
+* **`/__redrop/` stays reserved.** Reserved paths are answered before a
+  request can reach the proxy, so the app can never serve the viewer's
+  script, the gate, `open`, `preview` or `feedback`. A path that only
+  becomes reserved after cleaning (`/x/../__redrop/`) gets the identical
+  miss instead of reaching the app.
+* **Single node.** The registry of connected tunnels is in the server's
+  memory. One redrop process serves every tunnel; several processes behind
+  a load balancer would each see only the CLIs connected to them, and
+  visitors would get the offline page from the others. Running several
+  instances against one data directory is not supported anyway (see
+  "Disk budgets and upload expiry"). Restarting the server drops every
+  tunnel; the CLIs reconnect.
+
+### Protocol
+
+```text
+visitor ──HTTPS──▶ Cloudflare ─▶ Traefik ─▶ redrop content handler
+                                                │  gates, then the proxy
+                                                ▼
+                         yamux stream (one HTTP/1.1 exchange per stream)
+                                                │
+          WebSocket /api/v1/tunnels/{id}/connect on the app origin
+                                                │
+                                                ▼
+                        redrop tunnel (CLI) ──HTTP──▶ 127.0.0.1:3000
+```
+
+1. `POST /api/v1/tunnels` creates the artifact (title, TTL, password,
+   info button, feedback). `--id` reuses one instead, after checking that
+   it is a tunnel.
+2. The CLI opens `GET /api/v1/tunnels/{id}/connect` as a WebSocket with
+   its API token in `Authorization: Bearer`. Session cookies are not
+   accepted there: a browser can't set that header on a WebSocket, so no
+   web page can open a tunnel with a visitor's session. The CLI also sends
+   `X-Redrop-Tunnel-Session`, a random value chosen once per process.
+3. Before upgrading, the server checks the token, ownership, kind, that the
+   link is live (not expired or revoked), that tunnels are on, the
+   per-user limit, and that no other process holds the tunnel. Failures
+   are ordinary JSON problems: `401` (token), `403` (tunnels off, or a
+   session instead of a token), `404`, `400` (not a tunnel), `410`
+   (revoked or expired), `409` `tunnel_in_use`, `429` `tunnel_limit`.
+4. After the upgrade, the WebSocket carries one
+   [yamux](https://github.com/hashicorp/yamux) session. The server is the
+   yamux client and opens one stream per visitor request; the CLI accepts
+   streams. Only the server opens streams: the first stream the CLI opens
+   ends the connection (`1008`). The server rejects it without serving or
+   reading it; otherwise it could hold up to a window of data, outside
+   every limit, for as long as the session lasts.
+5. Each stream carries exactly one HTTP/1.1 exchange, written and read by
+   Go's `net/http`: the server's `httputil.ReverseProxy` dials by opening a
+   stream (keep-alives off), and the CLI serves the session as a
+   `net.Listener` with `http.Server` and its own `ReverseProxy` to the
+   target. A `101 Switching Protocols` answer turns the stream into a raw
+   byte pipe, which is how WebSocket upgrades (dev-server hot reload) work
+   end to end.
+
+**Framing.** WebSocket binary messages carry the yamux byte stream; their
+boundaries mean nothing. yamux frames have a 12-byte header (version,
+type, flags, stream ID, length) and carry data, window updates, pings and
+go-away. Inside a stream the bytes are plain HTTP/1.1, so chunked bodies,
+trailers, `HEAD` and ranges behave as they would on a socket. No framing
+was invented for this. A visitor's `Expect: 100-continue` is answered by
+the server itself and is not sent on.
+
+**Flow control.** yamux gives every stream a 256 KiB window (its
+minimum). A sender may have at most one window of unacknowledged data per
+stream, and the receiver grants more only as its reader consumes. A slow
+visitor therefore stops the app's writes after 256 KiB, and a slow app
+stops the visitor's upload the same way. Bodies are copied in 32 KiB
+pieces and never held whole. A peer that sends past the window breaks the
+session (yamux enforces it).
+
+**Keepalive.** Both ends send a yamux ping every 30 seconds, as WebSocket
+data, so Cloudflare (which drops a WebSocket after about 100 idle seconds)
+keeps the connection. The answer may take 30 seconds (yamux's default is
+10): it waits in the same send queue as data frames, and a slow uplink with
+many streams sending must not look like a dead peer. A dead peer is noticed
+within about a minute.
+
+**Frames from the CLI.** The server reads the header of every frame the
+CLI sends before yamux does (`internal/tunnel/frames.go`). yamux v0.1.2,
+the latest release, answers each ping in a goroutine of its own that may
+wait 30 seconds to send, so a ping flood is a goroutine flood: 400,000
+pings, under 5 MB, took a 768 MB server down in under a second. A CLI may
+send 10 pings at once and one a second after that, far more than its
+keepalive; past that its connection ends (`1008`).
+
+**Cancellation and stream ends.** The server never half-closes a stream
+it still uses, so its end of a stream means the request is over: the
+visitor left, the visitor stopped reading (below), or access changed.
+* The CLI then closes its end at once. It cancels the request to the
+  local app and ends a write blocked on a full window, for a WebSocket's
+  other direction too. That takes about a round trip.
+* The server, after closing its end, reads and discards what the CLI
+  still sends until the CLI's end arrives. Only then is the stream gone,
+  and only then are its slots released (see "Limits"), so up to a
+  window of unread data per stream is always counted by a slot.
+* The CLI sees the server's end only when something reads the stream.
+  While it is still writing a request body to an app that hasn't read it
+  (an upload handler that authenticates or queues first), nothing does.
+  So a stream the CLI hasn't closed 10 seconds after the server's end is
+  reset, alone: the session drops it, with anything it buffered, and the
+  CLI is told to reset it too. Its slots go then; the connection and its
+  other streams go on. yamux v0.1.2 has no reset of its own, so the
+  server hands its session a reset frame between two of the CLI's frames,
+  as if the CLI had sent it, and sends one to the CLI between two of its
+  own; a ping makes the CLI send a frame soon.
+* After a reset the CLI may still deliver what it had in flight, at most
+  the stream's window (256 KiB). A CLI that sends more on a reset stream
+  ignored the reset: its connection ends (`1008`).
+* yamux's own close timer is off: it marks a timed-out stream closed
+  before dropping it, and a FIN from the CLI in between tears the whole
+  session down.
+* Go's `http.Transport` lets a dial outlive the request that started it.
+  Such a dial opens no stream once the request's slot is released;
+  otherwise its stream would release the slot a second time, and the
+  slots would stop counting the streams that exist.
+* yamux v0.1.2 deadlocks when two goroutines read one stream at once, so
+  reads of a stream are made one at a time.
+
+**Ending a tunnel.** The server closes the WebSocket with a code the CLI
+understands (`pkg/api`):
+
+| Code | Meaning | CLI |
+|---|---|---|
+| `1001` going away | server shutdown | reconnects |
+| `4001` | ended: revoked, deleted, expired, owner disabled, token deleted, or ended by an administrator | prints the reason and exits 7 |
+| `4002` | replaced by a newer connection of the same process | reconnects |
+| `1008` | protocol violation: the CLI opened a stream, pinged too often, or ignored a stream reset | reconnects (an honest CLI never gets it) |
+
+**Reconnects.** The CLI reconnects after any other failure with jittered
+exponential backoff from 1 to 30 seconds, reset after a connection that
+lasted a minute. A `Retry-After` is honoured up to 10 minutes. A
+connection with the same session value replaces the old one at once, so
+a CLI is never locked out by its own dead connection. A different process
+gets `409` while the tunnel is connected and keeps retrying with a note,
+so a second `redrop tunnel --id` waits until the first stops. `401`,
+`403`, `404`, `410` and the per-user limit end the command.
+
+**Checks after registering.** Revokes, admin revocations, disabled
+accounts and deleted tokens end a connected tunnel through the registry,
+which only knows a tunnel once it is registered. A change that lands
+between the connect checks and the registration would find nothing to
+end, so the server runs the checks again once the link is registered:
+the token, the account and the artifact. A failure gives the reservation
+up; otherwise the newest access generation and expiry apply. Changes are
+also applied to the registry in the order they were committed: each
+reads the row again under one lock, so two TTL changes racing can't leave
+the older expiry armed.
+
+**Choice of libraries.**
+
+* `github.com/hashicorp/yamux` v0.1.2: maintained by HashiCorp and used in
+  Consul, Nomad, Vault and Boundary; per-stream flow control with the
+  receive window enforced; keepalive; stream open and half-close
+  timeouts; no dependencies. Each stream is a `net.Conn`, so the standard
+  HTTP client, server and reverse proxy run over it unchanged. HTTP/2 over
+  the WebSocket was the alternative: it also multiplexes with flow
+  control, but proxying WebSocket upgrades over it needs extended
+  `CONNECT` on both ends. `smux` is similar to yamux but less widely used.
+* `github.com/coder/websocket` v1.8.15 (formerly `nhooyr.io/websocket`):
+  maintained by Coder, context-aware, no dependencies, and it has a
+  `NetConn` adapter made for tunnelling a protocol over a WebSocket. Coder
+  runs yamux over it in production. `gorilla/websocket` has neither the
+  adapter nor contexts.
+
+### What the app receives
+
+The server prepares each request before it enters the tunnel:
+
+* **Removed:** redrop's own cookies (`__Host-rd_visit`, `_preview`,
+  `_seen`, `_direct`; `rd_*` on plain-HTTP development servers); every
+  hop-by-hop header (`Connection` and what it names, `Keep-Alive`,
+  `Proxy-Connection`, `Proxy-Authorization`, `TE`, `Trailer`,
+  `Transfer-Encoding`, `Upgrade` unless the request is an upgrade);
+  `Forwarded` and every `X-Forwarded-*` header (the visitor's, and
+  Traefik's own such as `X-Forwarded-Server` and `-Port`); `X-Real-Ip`,
+  `True-Client-Ip`, `Client-Ip`, `X-Client-Ip`, `X-Cluster-Client-Ip`,
+  `X-Forwarded` (no suffix), `Proxy-Client-Ip`, `WL-Proxy-Client-Ip`,
+  `Fastly-Client-Ip`, `X-Original-Forwarded-For`, `X-ProxyUser-Ip`, `Via`
+  (client addresses under the names proxies and app servers read),
+  `X-Original-Url`, `X-Rewrite-Url`, `X-Original-Host`, `X-Host` (URL and
+  host overrides some frameworks honour), `CDN-Loop`, every `CF-*`
+  header, the configured client-IP and country headers; every header
+  whose name has an underscore, which CGI-style app servers read as the
+  dashed name (`X_Forwarded_For` would replace `X-Forwarded-For`); and
+  `Expect`.
+* **Set:** `X-Forwarded-For` to the client address the server resolved for
+  its rate limits (`REDROP_TRUSTED_PROXIES`, `REDROP_TRUSTED_HOPS`), never
+  the visitor's own list; `X-Forwarded-Host` to the tunnel's host;
+  `X-Forwarded-Proto` to the content domain's scheme. This is the
+  visitor's full address, as the issue asks: the owner's app sees what
+  any web server would, while redrop's own view log keeps only a network
+  label and a country.
+* **Kept:** `Authorization` (redrop never uses it on content hosts, so it
+  belongs to the app), the app's own cookies, `Origin`, `Referer`, and
+  every other header.
+* **Host.** The CLI sends the target as `Host` (`localhost:3000`), the name
+  the owner typed, because dev servers such as Vite refuse unknown hosts.
+  The public host is in `X-Forwarded-Host`. An app that checks `Origin`
+  against `Host` has to read `X-Forwarded-Host`.
+* **Query.** `redrop-info` and `redrop-version` are the link's own
+  parameters and are not passed on.
+
+### What visitors receive
+
+The app's response goes back unchanged, apart from these headers and
+informational responses:
+
+* **1xx:** dropped. The server answers a visitor's `Expect:
+  100-continue` itself, and `103 Early Hints` is only a hint. A `101`
+  (WebSocket) goes through. redrop's headers are applied when the final
+  response (or the `101`) is written, not set beforehand: Go's
+  `ReverseProxy` clears the header map after each 1xx it forwards, which
+  would otherwise take `Cache-Control: private` and the rest off the
+  final response.
+* **Trailers:** dropped. They would skip the rules below (a trailer
+  `Set-Cookie` with a `Domain`), and browsers make no use of them.
+
+* **`Set-Cookie`:** the `Domain` attribute is removed, so every cookie is
+  host-only on the tunnel's own origin and can't reach other artifacts. A
+  cookie named like one of redrop's is dropped. Nothing else in the cookie
+  changes.
+* **Same as artifacts, forced:** `X-Robots-Tag`, `Referrer-Policy:
+  no-referrer` (the slug is the secret), `X-Content-Type-Options:
+  nosniff`, and HSTS on HTTPS. The app's own values for them are dropped.
+* **`Clear-Site-Data`:** dropped. Its `"cookies"` clears cookies for the
+  whole registrable domain, and the content domain is one site: it would
+  clear visitors' grants for every artifact.
+* **Caching:** `Cache-Control: private, no-cache`, or `private, no-store`
+  when the app said `no-store`. The app's `Expires`, `CDN-Cache-Control`,
+  `Cloudflare-CDN-Cache-Control` and `Surrogate-Control` are dropped.
+  Cloudflare would otherwise cache a `public` response and serve it
+  without the password check. Browsers still revalidate with the app's
+  `ETag` or `Last-Modified`.
+* **`Content-Security-Policy`:** redrop's `frame-ancestors 'self'
+  <dashboard>` is added next to the app's own policy, so the viewer frame
+  and the dashboard preview work. An app that sends `frame-ancestors
+  'none'` or `X-Frame-Options: DENY` can only be opened with `--no-info`.
+* **Not forced (would break apps):** artifacts' `Permissions-Policy`
+  (camera, microphone, geolocation, payment, USB off) is not sent, so an
+  app under development can use them. `Cross-Origin-Resource-Policy:
+  same-site` is sent only when the app sent none.
+* No service worker: a content host never serves a service worker script,
+  tunnels included.
+
+### Visitor requests
+
+The content handler answers a tunnel host like any artifact host. The
+changes are in what follows the access check:
+
+1. Misses, the miss budget, reserved paths, icons and robots are as for
+   every artifact host. Before this change, any method but `GET` and
+   `HEAD` on a non-reserved path got `405` without a lookup. It now gets a
+   lookup: tunnels take every method. Other kinds still answer `405`, and
+   gone links the identical miss, so a `POST` reveals no more than a `GET`
+   and spends the miss budget the same way.
+2. `sharing.Decide` and the gate, unchanged. A visitor without access
+   gets the gate (pages) or `403` (anything else). Gone links get the
+   identical miss.
+3. `Sec-Fetch-Site: same-site` requests are refused (`403`), except `GET`
+   and `HEAD` navigations. They come from another artifact or tunnel on
+   the content domain, where `SameSite=Lax` cookies (redrop's visit
+   cookie and the app's own) would ride along, so another user's page
+   could act as the visitor (CSRF). A link from another artifact still
+   opens. Requests from other sites keep the browser's usual rules, as on
+   any website.
+4. Not connected: `503` "This tunnel is offline", a plain redrop page.
+   Only visitors who passed step 2 see it, so whether a tunnel is online
+   is never visible without access.
+5. Otherwise the proxy. The favicon follows the icon rule: with proof of
+   access it comes from the app, otherwise the redrop icon. The icon paths
+   get steps 3 and 4 too: a same-site request gets the redrop icon, and
+   the link's own parameters are not passed on.
+
+Views are counted as for HTML: one per top-level page load (ungated) or
+per Open (gated). Subresources, frames, WebSockets and API calls never
+count.
+
+### Limits
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `REDROP_TUNNELS_PER_USER` | 3 | connected tunnels per user; `0` turns tunnels off |
+| `REDROP_TUNNEL_ARTIFACTS_PER_USER` | 20 | tunnel artifacts a user keeps, in any state, until deleted |
+| `REDROP_TUNNEL_STREAMS` | 32 | open requests and WebSockets per tunnel |
+| `REDROP_TUNNEL_STREAMS_TOTAL` | 256 | the same across the server |
+| `REDROP_TUNNEL_MAX_REQUEST_SIZE` | 100MB | request body, under Cloudflare's 100 MB limit |
+| `REDROP_TUNNEL_MAX_RESPONSE_SIZE` | 1GB | response body |
+| `REDROP_TUNNEL_BYTES_PER_HOUR` | 2GB | bytes both ways per user, over all their tunnels, fixed one-hour window |
+| `REDROP_TUNNEL_RESPONSE_TIMEOUT` | 90s | one budget per request: the wait for a free slot, then (once the request is sent) the app's wait to send response headers |
+| `REDROP_TUNNEL_IDLE_TIMEOUT` | 100s | a request or WebSocket with no bytes either way |
+
+* **Streams.** A request waits for a free slot for up to the response
+  timeout, then gets `503`. At most as many requests wait per tunnel as it has
+  slots; more get `503` at once. A slot is held from the request's start
+  until its stream is gone, after the request has ended too (see
+  "Cancellation and stream ends"), so the slots count every stream that
+  exists. The server-wide total therefore bounds memory: each stream
+  holds at most a 256 KiB receive window plus about 40 KiB of copy
+  buffers, so 256 streams stay under 80 MB, well inside the container's
+  768 MB. The admin view's `streams` are the slots in use.
+* **Visitors who stop reading.** Every write to the visitor, a hijacked
+  WebSocket's included, must finish within the idle timeout, or the
+  request ends and its slots go. A visitor who reads very slowly is not
+  cut: a 32 KiB write within the idle timeout (about 330 bytes a second
+  at 100 s) keeps the request going, and so does an upload trickled in a
+  byte per idle period. Such a visitor holds that tunnel's slots, never
+  more than its 32, and the waiting bound keeps the queue short.
+* **Sizes.** A declared body over the limit gets `413` (request) or `502`
+  (response) before anything is sent. A chunked body that grows past it
+  is cut off there.
+* **Bandwidth.** Counted as bytes flow, through `security.Limiter` keyed by
+  the owner, so a fresh tunnel doesn't start a fresh budget. When the
+  hour's budget runs out, open streams are cut and new requests to any of
+  the owner's tunnels get `429` with `Retry-After` until the window ends.
+* **Count.** Tunnels take no storage, so the quota doesn't bound them; a
+  user keeps at most `REDROP_TUNNEL_ARTIFACTS_PER_USER` of them, and a
+  new one past that gets `409 tunnel_count_limit` (reuse one with `--id`,
+  or delete one).
+* **Time.** A request gets the response timeout once: what it spent
+  waiting for a slot is taken from what the app then has to send its
+  headers, counted from when the whole request reached the app. Past it:
+  `504`. Cloudflare gives up at about 100 seconds, so the default answers
+  first. Upload time doesn't count, as it doesn't for Cloudflare.
+  Idle streams are closed. Streaming responses and WebSockets may run for
+  as long as bytes keep moving; behind Cloudflare, an idle WebSocket is
+  closed after about 100 seconds anyway, and hot-reload clients reconnect.
+* **The WebSocket itself** has no size limit per message (yamux bounds what
+  a peer may send) and is kept alive by the pings above.
+
+### Lifecycle and moderation
+
+* **Owner.** Ctrl-C ends the tunnel (the CLI closes the WebSocket
+  normally). Revoking, deleting or expiring the artifact ends the
+  connection at once; the CLI exits. Changing the password or rotating the
+  link closes the streams that were let in under the old access (open
+  WebSockets included), so an open hot-reload connection can't outlive a
+  password change.
+* **Expiry** is a timer on the connection, set again when the TTL changes.
+  Requests check it anyway (`Decide`).
+* **Tokens.** Deleting the API token a tunnel connected with ends the
+  tunnel, and so does the token's expiry.
+* **Admins.** The admin artifact list shows tunnels with their owner and
+  online state, like every artifact (metadata only). `GET
+  /api/v1/admin/tunnels` lists the connected ones, and `DELETE
+  /api/v1/admin/tunnels/{id}` ends one: the CLI exits with "ended by an
+  administrator" and may connect again. To keep it off, revoke it; an
+  admin revocation stays out of the owner's reach as for any artifact.
+  Disabling a user ends their tunnels, and their token no longer connects.
+* **Shutdown.** The server ends every tunnel with `1001` before it stops,
+  and the CLIs reconnect to the next process.
+
+### Dial safety (CLI)
+
+* The CLI dials only the target the owner named. It resolves the target
+  once at start and pins the addresses; every request goes to them, never
+  to a host from the request (`Proxy` is off, so `HTTP_PROXY` is not used
+  either). Redirects from the app go back to the visitor; the CLI follows
+  none.
+* Targets: `3000`, `host:3000`, `[::1]:3000`, `http://host:3000`. A bare
+  port, `localhost` and `*.localhost` mean `127.0.0.1` and `::1` without
+  asking DNS, tried in that order (dev servers listen on either). HTTPS
+  targets, paths and other schemes are usage errors.
+* **Classes.** Every address is loopback, private (RFC 1918, CGNAT, link
+  local, IPv6 unique local and link local) or public. A link-local IPv6
+  target keeps its zone (`[fe80::1%eth0]:3000`) for dialing; the `Host`
+  header has none. Unspecified,
+  multicast and broadcast addresses are refused. A name must resolve to a
+  single class: a name that returns both a loopback and a LAN address is
+  refused, so DNS can't move the target to another class than the one it
+  resolved to. Only loopback is allowed by default. Anything else needs
+  `--allow-remote-target`, and the CLI warns that anyone with the link can
+  reach that address through the owner's computer.
+
+### Logging
+
+The server logs that a tunnel connected and disconnected (artifact ID,
+user, reason, duration), admin ends, and a CLI ended for a protocol
+violation. It never logs request headers, bodies, paths or query strings
+of tunnel traffic; proxy failures are logged at debug level with the
+artifact ID and the failure kind only. The connect endpoint is an
+app-origin API call and is logged once, by path, like every API call. The
+CLI prints one stderr line per request with `--log`: method, the path
+percent-encoded as on the wire (so a visitor can't write terminal escapes
+or fake lines to the owner's terminal), without the query, the final
+status (not a `103`) and duration.
+
+### Threat model
+
+* **A tunnel serves anything the owner's computer returns,** including
+  phishing pages and malware. Only invited accounts can open tunnels, the
+  admin view shows the owner, and the moderation tools are the artifact
+  ones: revoke, delete, disable the user, plus ending a connection.
+  `REDROP_TUNNELS_PER_USER=0` turns the feature off.
+* **Reaching the owner's network.** The server never connects to the
+  owner's computer; the CLI connects out. The CLI dials one pinned target,
+  loopback unless the owner opts in, so a link can't be turned into a way
+  into the owner's LAN by accident. Everyone with the link (and the
+  password) can use the app as the owner would locally: the app's own
+  authentication is its business.
+* **The server trusts the CLI no more than an artifact's bytes.** The
+  response is untrusted content on an isolated origin with the headers
+  above. A hostile CLI can waste its own tunnel's slots (and with them
+  some of the server-wide ones) and its owner's bandwidth. What it can
+  make the server buffer is bounded by the slots, since every stream holds
+  one until it is gone. A stream it opens itself, a ping flood, or data
+  on a stream it was told to reset ends its connection; a closed stream
+  it keeps open is reset after 10 seconds.
+* **Other artifacts on the content domain** are same-site. A tunnel can't
+  set cookies for them (`Domain` removed). Their same-site requests to a
+  tunnel are refused except navigations. They can still set
+  parent-domain cookies that the browser sends to the tunnel, which the
+  app then receives (cookie tossing), as for artifacts ("Domains and
+  isolation"); a content domain on the Public Suffix List ends that.
+* **Abuse of resources.** The per-user counts (connected and kept),
+  per-tunnel and total streams, sizes, timeouts and the per-user hourly
+  byte budget bound one user's cost. A visitor of a tunnel can hold that
+  tunnel's slots, not other tunnels', and only while bytes move (a
+  visitor who stops reading is cut after the idle timeout). The
+  server-wide total is shared, so someone with links to eight tunnels can
+  keep it full with requests that keep moving data.
+* **Credentials.** The API token stays in the CLI and the WebSocket
+  request header; the session value is not a secret. Visitors' cookies
+  for redrop never reach the app.
+
+### Testing and rollback
+
+Go tests run the whole path in one process: a real server handler, the
+CLI's agent over a real WebSocket, and a local `httptest` app. They cover
+the multiplexer, reconnects and backoff, visitor cancellation, every
+limit, a WebSocket upgrade end to end, password, expiry and revoke parity
+with HTML artifacts, the offline page after the access check, header
+hygiene, and 300 MB each way through the tunnel with the heap staying
+bounded. They also cover a CLI that opens streams, floods pings (reading
+the answers or not) or ignores a stream reset, 1xx responses and
+`Expect`, response trailers, visitors who stop reading (responses and
+WebSockets) or leave with a full window, a stream stuck behind an app that
+doesn't read its upload (reset alone, the connection stays), a CLI that
+keeps writing after the server's end, the shared response budget, an
+access change before the headers, the checks after registering, and the
+per-user budget. The e2e script tunnels a small HTTP and WebSocket server
+with a password set.
+
+Rolling back the binary leaves tunnel artifacts in the database. An older
+server reads their kind as an unknown one and shows an empty file listing
+on the link; an older dashboard fails to decode them. Delete tunnels, or
+revoke them, before rolling back.
 ## Abuse handling
 
 The content domain serves arbitrary HTML from invited users. One phishing

@@ -398,8 +398,13 @@ try {
     await v.evaluate(`document.querySelector('button[type=submit]').click()`)
     check('after Open the one-time page decrypts', await v.waitFor(`${frameText}.includes('once-page-6160')`), await v.evaluate(pageText))
     await v.close()
+    // A used-up link gets no helper: its small window shows the identical
+    // miss, and no key is stored for the gone link.
     const second = await visitor()
-    check('a second visitor gets the miss', await second.follow(links.once.url, `(${pageText}).includes("doesn't exist")`), await second.evaluate(pageText))
+    await second.follow(links.once.url, 'true', 1000)
+    let gone = null
+    for (let t = 0; t < 15000 && !gone; t += 200) { gone = await second.other(); if (!gone) await sleep(200) }
+    check('a second visitor gets the miss', !!gone && (await gone.waitFor(`(${pageText}).includes("doesn't exist")`, 15000)), gone ? await gone.evaluate(pageText) : 'no window')
     await second.close()
   }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/notify"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/internal/tunnel"
 )
 
 // Actor is who performs an owner operation.
@@ -29,6 +30,9 @@ type Actor struct {
 	Quota     int64
 	TokenID   string // set when acting through an API token
 	TokenName string
+	// TokenExpires is when that token stops working (nil = never); a tunnel
+	// it connects ends then.
+	TokenExpires *time.Time
 }
 
 type Service struct {
@@ -66,7 +70,9 @@ type Service struct {
 	scanOnce      sync.Once
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
 
-	live *liveHub // live reload leases and open streams (live.go)
+	tunnels    *tunnel.Registry // live tunnel connections (SetTunnels); nil = none
+	tunnelSync sync.Mutex       // orders syncTunnel's read-then-apply (see there)
+	live       *liveHub         // live reload leases and open streams (live.go)
 }
 
 // scanJob is one committed publication waiting for its upload checks. The

@@ -266,6 +266,8 @@ type Artifact struct {
 	// E2ELink is in owner views of end-to-end encrypted artifacts only.
 	E2ELink     string `json:"e2e_link,omitempty" description:"End-to-end encrypted only: the link to give out, on the app origin, without its #k= key"`
 	NextVersion int    `json:"next_version,omitempty" description:"Owner only: the number the next published version gets"`
+	// Online is set for a tunnel whose redrop tunnel command is connected.
+	Online bool `json:"online" description:"Tunnels only: the owner's redrop tunnel is connected; always false for other kinds"`
 }
 
 type ArtifactList struct {

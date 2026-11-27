@@ -31,7 +31,7 @@ func principalFrom(ctx context.Context) *accounts.Principal {
 // actorFrom adapts the principal for the sharing service.
 func actorFrom(ctx context.Context) sharing.Actor {
 	p := principalFrom(ctx)
-	a := sharing.Actor{UserID: p.UserID(), Username: p.Username(), Quota: p.QuotaBytes()}
+	a := sharing.Actor{UserID: p.UserID(), Username: p.Username(), Quota: p.QuotaBytes(), TokenExpires: p.TokenExpiresAt()}
 	a.TokenID, a.TokenName = p.Token()
 	return a
 }
@@ -77,6 +77,7 @@ const (
 	anyAuth     access = iota // dashboard session or API token
 	sessionOnly               // dashboard session
 	adminOnly                 // admin session (optionally SSO-only)
+	tokenOnly                 // API token (the tunnel WebSocket: no web page can send one)
 )
 
 func (a *API) requireAuth(level access) func(http.Handler) http.Handler {
@@ -112,6 +113,10 @@ func authorize(p caller, level access, requireSSO bool) error {
 	case sessionOnly:
 		if p.IsToken() {
 			return apperr.Forbidden("this endpoint requires a dashboard session, not an API token")
+		}
+	case tokenOnly:
+		if !p.IsToken() {
+			return apperr.Forbidden("this endpoint requires an API token")
 		}
 	case adminOnly:
 		if !p.CanAdmin(false) {

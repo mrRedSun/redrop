@@ -16,7 +16,7 @@ import * as artifacts from '../atoms'
 import { E2EBadge } from '../components/e2e'
 import { LinkActions } from '../components/link-actions'
 import { StatusBadge } from '../components/status-badge'
-import { defaultFilter, filterFromSearch, type Artifact } from '../schemas'
+import { defaultFilter, filterFromSearch, tunnelState, type Artifact } from '../schemas'
 
 const statusTabs = ['all', 'active', 'expired', 'exhausted', 'revoked'] as const
 
@@ -93,10 +93,10 @@ function ArtifactTable({ rows, stale, filtered }: { rows: Artifact[] | undefined
           ),
         },
         { header: 'Status', cell: (a) => <StatusBadge artifact={a} /> },
-        { header: 'Kind', className: 'hidden md:table-cell', cell: (a) => <span className="text-muted-foreground">{a.kind}</span> },
+        { header: 'Kind', className: 'hidden md:table-cell', cell: (a) => <span className="text-muted-foreground">{a.kind === 'tunnel' ? `tunnel, ${tunnelState(a)}` : a.kind}</span> },
         { header: 'Views', cell: (a) => (a.max_views ? `${a.views} / ${a.max_views}` : a.views) },
         { header: 'Expires', className: 'hidden md:table-cell', cell: (a) => (a.expires_at ? relativeTime(a.expires_at) : 'never') },
-        { header: 'Size', className: 'hidden lg:table-cell text-right', cell: (a) => formatBytes(a.size) },
+        { header: 'Size', className: 'hidden lg:table-cell text-right', cell: (a) => (a.kind === 'tunnel' ? '—' : formatBytes(a.size)) },
         { header: '', className: 'w-10', cell: (a) => <LinkActions artifact={a} /> },
       ]}
     />

@@ -6,8 +6,8 @@ set -euo pipefail
 BASE=${BASE:-http://$(hostname -I | awk '{print $1}'):8080}
 WORK=$(mktemp -d)
 # A watcher and a live stream started below are ours: stop them if a check
-# fails first.
-trap '[ -z "${WPID:-}" ] || kill "$WPID" 2>/dev/null; [ -z "${SPID:-}" ] || kill "$SPID" 2>/dev/null; rm -rf "${WORK:?}"' EXIT
+# fails first. So are a tunnel and its local test app.
+trap 'for p in "${WPID:-}" "${SPID:-}" "${TPID:-}" "${APID:-}"; do [ -z "$p" ] || kill "$p" 2>/dev/null; done; rm -rf "${WORK:?}"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
 R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
@@ -654,6 +654,117 @@ else
   printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi
 
+# tunnel: a tiny local HTTP and WebSocket app, shared with redrop tunnel and a
+# password, fetched through the link as a browser would; offline while the
+# CLI is stopped, back on the same link with --id, and ended by a revoke.
+cat > "$WORK/tunnel_app.py" <<'PY'
+import base64, hashlib, http.server, json
+class App(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    def log_message(self, *args): pass
+    def do_GET(self):
+        if self.headers.get('Upgrade', '').lower() == 'websocket':
+            return self.websocket()
+        h = self.headers
+        self.reply(json.dumps({'path': self.path, 'host': h.get('Host'), 'xfh': h.get('X-Forwarded-Host'), 'cookie': h.get('Cookie')}))
+    def do_POST(self):
+        self.reply('posted ' + self.rfile.read(int(self.headers.get('Content-Length', 0))).decode())
+    def reply(self, body):
+        b = body.encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def websocket(self):
+        key = self.headers['Sec-WebSocket-Key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+        self.send_response(101)
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', base64.b64encode(hashlib.sha1(key.encode()).digest()).decode())
+        self.end_headers()
+        self.wfile.flush()
+        head = self.rfile.read(2)
+        mask = self.rfile.read(4)
+        data = bytes(b ^ mask[i % 4] for i, b in enumerate(self.rfile.read(head[1] & 0x7f)))
+        out = b'echo: ' + data
+        self.wfile.write(bytes([0x81, len(out)]) + out)
+        self.wfile.flush()
+        self.close_connection = True
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), App)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PY
+cat > "$WORK/ws_client.py" <<'PY'
+import base64, os, socket, sys, urllib.parse
+link, cookie = sys.argv[1], sys.argv[2]
+u = urllib.parse.urlsplit(link)
+s = socket.create_connection((u.hostname, u.port or 80), timeout=30)
+s.sendall(('GET /hmr HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+           'Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nCookie: %s\r\n'
+           'Sec-Fetch-Dest: websocket\r\nSec-Fetch-Mode: websocket\r\nSec-Fetch-Site: same-origin\r\n\r\n'
+           % (u.netloc, base64.b64encode(os.urandom(16)).decode(), cookie)).encode())
+f = s.makefile('rb')
+status = f.readline()
+if b' 101 ' not in status:
+    sys.exit('handshake: %r' % status)
+while f.readline() not in (b'\r\n', b''):
+    pass
+msg, mask = b'hello', os.urandom(4)
+s.sendall(bytes([0x81, 0x80 | len(msg)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(msg)))
+head = f.read(2)
+print(f.read(head[1] & 0x7f).decode())
+PY
+python3 "$WORK/tunnel_app.py" > "$WORK/tunnel_app.port" & APID=$!
+wait_until 30 test -s "$WORK/tunnel_app.port" || die "local test app did not start"
+TPORT=$(cat "$WORK/tunnel_app.port")
+printf 'e2e-tunnel-password' > "$WORK/tpw"
+$R tunnel "$TPORT" --password-file "$WORK/tpw" --title e2e-tunnel --ttl 1h --log --json > "$WORK/tunnel.out" 2> "$WORK/tunnel.err" & TPID=$!
+wait_until 60 grep -q '"event":"online"' "$WORK/tunnel.out" || { cat "$WORK/tunnel.err"; die "tunnel did not come online"; }
+read -r TID TURL < <(head -1 "$WORK/tunnel.out" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["event"]=="tunnel" and d["target"].endswith(":'"$TPORT"'"),d;print(d["id"],d["url"])')
+[ -n "${TURL:-}" ] || die "tunnel --json first line"
+python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$TURL" | grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' || die "tunnel link is not four words: $TURL"
+$R info "$TID" --json | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["kind"]=="tunnel" and d["online"] and d["has_password"] and not d["e2e"] and not d.get("e2e_link"),d' || die "tunnel info"
+TSLUG=$(python3 -I -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$TURL")
+[ "$(code_of "$BASE/e/$TSLUG")" = 200 ] || die "app intake must remain syntax-only for tunnels"
+[ "$(code_of "${DOC[@]}" "${TURL}__redrop/e2e-intake")" = 404 ] || die "tunnel served the key intake helper"
+[ "$(code_of -H 'Sec-Fetch-Dest: serviceworker' -H 'Service-Worker: script' "${TURL}__redrop/e2e-sw.js")" = 404 ] || die "tunnel served the decrypting worker"
+[ "$(code_of -b "$CJ" "${H[@]}" -d '{"e2e":true}' "$BASE/api/v1/tunnels")" = 400 ] || die "server accepted encrypted tunnel creation"
+[ "$(code_of -b "$CJ" "${H[@]}" -X PATCH -d '{"e2e":true}' "$BASE/api/v1/artifacts/$TID")" = 400 ] || die "server accepted encrypted tunnel settings"
+pass "tunnel encryption boundary: app intake stays syntax-only, helper and worker refused, encrypted creation/settings refused"
+$R list | grep -q "^$TID  *online  *tunnel" || die "redrop list shows the tunnel online"
+curl -fsS "${FRAME[@]}" "${TURL}page" | grep -q 'name="password"' || die "tunnel gate before the app"
+TJ="$WORK/ct"
+[ "$(code_of -c "$TJ" -H 'Sec-Fetch-Site: same-origin' --data-urlencode password=e2e-tunnel-password "${TURL}__redrop/open")" = 303 ] || die "tunnel unlock"
+curl -fsS -b "$TJ" "${FRAME[@]}" "${TURL}some/page?x=1&redrop-info=0" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["path"]=="/some/page?x=1" and d["host"]=="localhost:'"$TPORT"'" and d["cookie"] is None, d
+assert d["xfh"]==sys.argv[1], d' "$(python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).netloc)' "$TURL")" || die "request through the tunnel"
+[ "$(curl -fsS -b "$TJ" -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Site: same-origin' -d 'abc' "${TURL}form")" = "posted abc" ] || die "POST through the tunnel"
+vp=$(curl -fsS -b "$TJ" "${DOC[@]}" "${TURL}some/page")
+grep -q '<iframe id="rd-frame"[^>]* src="/some/page"' <<<"$vp" && grep -q 'Live app' <<<"$vp" || die "tunnel viewer page"
+grep -q 'data-e2e\|End-to-end encrypted\|id="rd-size"' <<<"$vp" && die "tunnel got the encrypted viewer or a stored-file panel"
+[ "$(python3 "$WORK/ws_client.py" "$TURL" "rd_visit=$(awk '$6=="rd_visit"{print $7}' "$TJ")")" = "echo: hello" ] || die "WebSocket through the tunnel"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$TJ" -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Site: same-site' "${TURL}api")" = 403 ] || die "same-site request to a tunnel"
+grep -q '^GET /some/page 200 ' "$WORK/tunnel.err" || die "tunnel --log line"
+grep -q 'x=1' "$WORK/tunnel.err" && die "tunnel --log printed a query"
+kill -TERM "$TPID"
+TRC=0; wait "$TPID" || TRC=$?
+TPID=
+[ "$TRC" = 0 ] || die "tunnel exit $TRC after SIGTERM, want 0"
+[ "$(code_of -b "$TJ" "${FRAME[@]}" "${TURL}page")" = 503 ] || die "offline page after the password"
+curl -fsS "${FRAME[@]}" "${TURL}page" | grep -q 'name="password"' || die "gate, not the offline page, without the password"
+$R tunnel "$TPORT" --id "$TURL" --json > "$WORK/tunnel2.out" 2>&1 & TPID=$!
+wait_until 60 grep -q '"event":"online"' "$WORK/tunnel2.out" || { cat "$WORK/tunnel2.out"; die "tunnel --id did not come online"; }
+head -1 "$WORK/tunnel2.out" | grep -q "\"url\":\"$TURL\"" || die "tunnel --id kept the link"
+curl -fsS -b "$TJ" "${FRAME[@]}" "${TURL}again" | grep -q '"/again"' || die "request after reconnecting with --id"
+$R revoke "$TID" >/dev/null
+TRC=0; wait "$TPID" || TRC=$?
+TPID=
+[ "$TRC" = 7 ] || die "tunnel exit $TRC after revoke, want 7"
+[ "$(code_of -b "$TJ" "${FRAME[@]}" "${TURL}again")" = 404 ] || die "revoked tunnel is the miss"
+kill "$APID" 2>/dev/null; APID=
+pass "tunnel: password gate, requests, POST, viewer, WebSocket, --log, offline page, --id, revoke ends it (exit 7)"
 # abuse reports: the gate page links the report form on the app origin
 # (page in the fragment); the endpoint takes same-origin JSON only and
 # answers an unknown link like a real one; the admin queue shows the report

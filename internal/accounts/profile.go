@@ -231,5 +231,9 @@ func (s *Service) CreateToken(ctx context.Context, p *Principal, name, ttl strin
 }
 
 func (s *Service) RevokeToken(ctx context.Context, p *Principal, id string) error {
-	return mapStore(s.db.DeleteToken(ctx, p.user.ID, id))
+	if err := s.db.DeleteToken(ctx, p.user.ID, id); err != nil {
+		return mapStore(err)
+	}
+	s.tokenDeleted(id)
+	return nil
 }

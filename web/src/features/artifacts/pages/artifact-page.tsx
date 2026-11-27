@@ -21,7 +21,7 @@ import { PreviewPanel } from '../components/preview-panel'
 import { SettingsForm } from '../components/settings-form'
 import { StatusBadge } from '../components/status-badge'
 import { VersionsPanel } from '../components/versions-panel'
-import { shareLink, type Artifact } from '../schemas'
+import { shareLink, tunnelState, type Artifact } from '../schemas'
 
 /** One artifact: link, stats, settings, versions, files, access log, preview. */
 export function Component() {
@@ -29,6 +29,7 @@ export function Component() {
   // Suspends until loaded; a NotFound lands in the route error boundary.
   const artifact = useAtomSuspense(artifacts.detail(id)).value
   const versions = useAtomValue(artifacts.versions(id))
+  const tunnel = artifact.kind === 'tunnel'
 
   return (
     <>
@@ -37,7 +38,7 @@ export function Component() {
       </Button>
       <PageHeader
         title={<span className="flex items-center gap-3">{artifact.title || artifact.id}<StatusBadge artifact={artifact} />{artifact.e2e && <E2EBadge />}</span>}
-        description={`${artifact.kind} · created ${formatDate(artifact.created_at)}${artifact.token_name ? ` via ${artifact.token_name}` : ''}`}
+        description={`${tunnel ? `tunnel, ${tunnelState(artifact)}` : artifact.kind} · created ${formatDate(artifact.created_at)}${artifact.token_name ? ` via ${artifact.token_name}` : ''}`}
         actions={<LinkActions artifact={artifact} afterDelete="list" />}
       />
       {artifact.revoked_by_admin && (
@@ -58,12 +59,21 @@ export function Component() {
           {artifact.e2e && <E2ELinkNote id={artifact.id} />}
         </CardContent>
       </Card>
+      {tunnel && (
+        <Alert className="mb-6">
+          <AlertDescription>
+            {artifact.online
+              ? 'A redrop tunnel is connected: the link shows the app running on its owner\'s computer.'
+              : <>No redrop tunnel is connected, so visitors who get past the password see "This tunnel is offline". Start it again with <code>redrop tunnel PORT --id {artifact.id}</code>.</>}
+          </AlertDescription>
+        </Alert>
+      )}
       <Stats artifact={artifact} />
       <Tabs defaultValue="settings" className="mt-6">
         <TabsList>
           <TabsTrigger value="settings">Settings</TabsTrigger>
-          <TabsTrigger value="versions">Versions ({artifact.versions})</TabsTrigger>
-          <TabsTrigger value="files">Files ({artifact.files})</TabsTrigger>
+          {!tunnel && <TabsTrigger value="versions">Versions ({artifact.versions})</TabsTrigger>}
+          {!tunnel && <TabsTrigger value="files">Files ({artifact.files})</TabsTrigger>}
           <TabsTrigger value="log">Access log</TabsTrigger>
           <TabsTrigger value="feedback">Feedback</TabsTrigger>
           <TabsTrigger value="preview">Preview</TabsTrigger>
@@ -98,7 +108,9 @@ function Stats({ artifact: a }: { artifact: Artifact }) {
         value={a.expires_at ? relativeTime(a.expires_at) : 'never'}
         hint={a.purge_at ? `content deleted ${formatDate(a.purge_at)}` : a.has_password ? 'password protected' : undefined}
       />
-      <StatCard label="Size" value={formatBytes(a.size)} hint={`v${a.version} live · ${formatBytes(a.total_size)} across ${a.versions} version(s)`} />
+      {a.kind === 'tunnel'
+        ? <StatCard label="Tunnel" value={tunnelState(a)} hint="served live by redrop tunnel" />
+        : <StatCard label="Size" value={formatBytes(a.size)} hint={`v${a.version} live · ${formatBytes(a.total_size)} across ${a.versions} version(s)`} />}
     </div>
   )
 }

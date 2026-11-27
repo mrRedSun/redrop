@@ -30,7 +30,7 @@ const (
 // modeFor is the only place that decides which kinds get the frame.
 func modeFor(kind string, infoOn, encrypted bool) Mode {
 	switch {
-	case encrypted:
+	case encrypted && kind != api.KindTunnel:
 		return ModeEncrypted
 	case kind == api.KindFile:
 		return ModeFilePage

@@ -21,8 +21,9 @@ func fieldNames(v any) []string {
 // TestViewerInfoFields pins what the info panel may tell a visitor
 // (DESIGN.md "Info panel"). Adding a field here needs a privacy decision.
 func TestViewerInfoFields(t *testing.T) {
+	// Tunnel is what the visitor sees anyway: a running app.
 	if got, want := fieldNames(ViewerInfo{}), []string{"CanOpen", "Current", "ExpiresAt", "Files", "Latest", "MaxViews", "Password",
-		"Published", "Revisions", "Size", "Title", "Version", "ViewsLeft"}; !reflect.DeepEqual(got, want) {
+		"Published", "Revisions", "Size", "Title", "Tunnel", "Version", "ViewsLeft"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ViewerInfo fields changed:\n got %v\nwant %v", got, want)
 	}
 	// A revision is a number, a time and the owner's note: never sizes,
@@ -47,6 +48,9 @@ func TestModeFor(t *testing.T) {
 		{api.KindFile, true, false, ModeFilePage}, {api.KindFile, false, false, ModeFilePage},
 		{api.KindHTML, true, true, ModeEncrypted}, {api.KindBundle, false, true, ModeEncrypted},
 		{api.KindFile, true, true, ModeEncrypted}, {api.KindFile, false, true, ModeEncrypted},
+		// Tunnels get the frame as HTML does, never the encrypted viewer.
+		{api.KindTunnel, true, false, ModeFramed}, {api.KindTunnel, false, false, ModeDirect},
+		{api.KindTunnel, true, true, ModeFramed}, {api.KindTunnel, false, true, ModeDirect},
 	} {
 		if got := modeFor(tc.kind, tc.info, tc.e2e); got != tc.want {
 			t.Errorf("modeFor(%s, %v, %v) = %v, want %v", tc.kind, tc.info, tc.e2e, got, tc.want)
