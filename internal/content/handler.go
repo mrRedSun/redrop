@@ -30,6 +30,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
+	"github.com/mrRedSun/redrop/internal/tunnel"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
 
@@ -48,6 +49,7 @@ type Handler struct {
 	install http.Handler // installers and CLI downloads, also served on the apex
 	misses  *security.TokenBucket
 	posts   *security.TokenBucket // viewer feedback posts per client
+	tunnels *tunnel.Registry      // live tunnel connections (WithTunnels); nil = all offline
 }
 
 func New(sh *sharing.Service, cfg *config.Config, clients *netutil.ClientResolver, log *slog.Logger, installers http.Handler) *Handler {
@@ -153,8 +155,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.feedback(w, r, slug)
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && r.URL.Path == reservedPrefix+"open") {
+	rest, reserved := strings.CutPrefix(r.URL.Path, reservedPrefix)
+	otherMethod := r.Method != http.MethodGet && r.Method != http.MethodHead
+	if otherMethod && reserved && !(r.Method == http.MethodPost && rest == "open") {
 		methodNotAllowed(w)
+		return
+	}
+	if otherMethod && !reserved {
+		h.otherMethod(w, r, slug)
 		return
 	}
 	a, err := h.sharing.Lookup(r.Context(), slug)
@@ -162,7 +170,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.miss(w, r)
 		return
 	}
-	if rest, reserved := strings.CutPrefix(r.URL.Path, reservedPrefix); reserved {
+	if reserved {
 		switch {
 		case rest == "preview":
 			h.preview(w, r, a)
@@ -178,6 +186,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serve(w, r, a)
+}
+
+// otherMethod answers a method other than GET and HEAD on a path outside the
+// reserved space. Only tunnels take them. For every other link the answer is
+// the generic 405, as before tunnels; a link that doesn't resolve to an
+// available artifact also spends miss budget, like every miss, so probing
+// with other methods costs what probing with GET does.
+func (h *Handler) otherMethod(w http.ResponseWriter, r *http.Request, slug string) {
+	a, err := h.sharing.Lookup(r.Context(), slug)
+	d := sharing.ShowGone
+	if err == nil {
+		d = h.sharing.Decide(a, sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}, time.Now())
+	}
+	switch {
+	case d == sharing.ShowGone:
+		if !h.misses.Take(h.clients.Network(r)) {
+			h.tooManyMisses(w)
+			return
+		}
+		methodNotAllowed(w)
+	case !sharing.IsTunnel(a):
+		methodNotAllowed(w)
+	default:
+		h.serve(w, r, a)
+	}
 }
 
 // methodNotAllowed is the answer to a method an artifact host doesn't take
@@ -320,6 +353,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 			h.miss(w, r)
 			return
 		}
+	}
+	if sharing.IsTunnel(a) {
+		h.serveTunnel(w, r, a, snap, d, direct)
+		return
 	}
 	old := snap.Version != a.CurrentVersion
 	switch {
@@ -583,7 +620,13 @@ func (h *Handler) favicon(w http.ResponseWriter, r *http.Request, slug string) {
 		if a, err := h.sharing.Lookup(r.Context(), slug); err == nil {
 			d := h.sharing.Decide(a, grants, time.Now())
 			proven := d == sharing.ServeOwnerPreview || (d == sharing.Serve && (sharing.Gated(a) || h.sharing.Seen(a, seen)))
-			if proven {
+			if proven && sharing.IsTunnel(a) {
+				// The app's own icon, when its tunnel is connected, under
+				// the same rules as the tunnel's other paths.
+				if !sameSiteRefused(r) && h.tunnels != nil && h.tunnels.Serve(w, withoutLinkParams(r), h.tunnelVisit(r, a)) {
+					return
+				}
+			} else if proven {
 				if t := h.sharing.ResolvePath(r.Context(), sharing.CurrentSnapshot(a), r.URL.Path); t.Kind == sharing.TargetFile {
 					h.sendFile(w, r, t.File, false)
 					return

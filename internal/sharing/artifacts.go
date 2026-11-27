@@ -352,6 +352,9 @@ func (s *Service) addVersion(ctx context.Context, actor Actor, id string, c Cont
 	if err != nil {
 		return Artifact{}, nil, err
 	}
+	if IsTunnel(a) {
+		return Artifact{}, nil, errTunnelVersions()
+	}
 	if err := attempt.admit(); err != nil {
 		return Artifact{}, nil, err
 	}
@@ -375,6 +378,11 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
 		return Artifact{}, err
+	}
+	if IsTunnel(a) {
+		if err := tunnelPatch(p); err != nil {
+			return Artifact{}, err
+		}
 	}
 	var u store.ArtifactUpdate
 	if p.Title != nil {
@@ -411,6 +419,7 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	s.syncTunnel(ctx, a.ID)
 	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
@@ -424,6 +433,7 @@ func (s *Service) Rotate(ctx context.Context, actor Actor, id string) (Artifact,
 	if err := s.db.UpdateArtifact(ctx, a.ID, store.ArtifactUpdate{RotateSlug: true}); err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	s.syncTunnel(ctx, a.ID)
 	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
@@ -436,6 +446,7 @@ func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
 	if err := s.db.DeleteArtifact(ctx, a.ID); err != nil {
 		return mapStore(err)
 	}
+	s.syncTunnel(ctx, a.ID)
 	s.log.Info("artifact deleted", "id", a.ID, "user", actor.Username)
 	s.changed(a.ID)
 	return nil
@@ -474,6 +485,9 @@ func (s *Service) ActivateVersion(ctx context.Context, actor Actor, id string, n
 	if err != nil {
 		return Artifact{}, err
 	}
+	if IsTunnel(a) {
+		return Artifact{}, errTunnelVersions()
+	}
 	if err := s.db.SetCurrentVersion(ctx, a.ID, number); err != nil {
 		return Artifact{}, mapStore(err)
 	}
@@ -485,6 +499,9 @@ func (s *Service) DeleteVersion(ctx context.Context, actor Actor, id string, num
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
 		return err
+	}
+	if IsTunnel(a) {
+		return errTunnelVersions()
 	}
 	if number == a.CurrentVersion {
 		return apperr.Conflict("cannot delete the current version; make another version current first")

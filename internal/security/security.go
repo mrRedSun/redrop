@@ -240,7 +240,11 @@ func limiterKey(key string) string {
 }
 
 // Allow records a hit and reports whether the key is within its limit.
-func (l *Limiter) Allow(key string) bool {
+func (l *Limiter) Allow(key string) bool { return l.AllowN(key, 1) }
+
+// AllowN records n hits at once, such as bytes against a byte budget, and
+// reports whether the key is still within its limit.
+func (l *Limiter) AllowN(key string, n int) bool {
 	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -258,8 +262,19 @@ func (l *Limiter) Allow(key string) bool {
 		l.hits[key] = e
 	}
 	b := e.Value.(*bucket)
-	b.n++
+	b.n += n
 	return b.n <= l.limit
+}
+
+// Count is how many hits key has in its current window (0 when it has none).
+func (l *Limiter) Count(key string) int {
+	key = limiterKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e, ok := l.hits[key]; ok && !l.expired(e.Value.(*bucket), l.now()) {
+		return e.Value.(*bucket).n
+	}
+	return 0
 }
 
 // Wait is how long until key may be allowed again: the end of its window,

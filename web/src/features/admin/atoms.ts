@@ -55,6 +55,10 @@ export const deleteArtifact = Atom.family((id: string) =>
   mutation((_: void) => endpoints.deleteArtifact(id), { invalidates: ['admin', 'artifacts'], success: 'Artifact deleted' }),
 )
 
+export const endTunnel = Atom.family((id: string) =>
+  mutation((_: void) => endpoints.endTunnel(id), { invalidates: ['admin', 'artifacts'], success: 'Tunnel ended; revoke it to keep it off' }),
+)
+
 /** Key: `${status}|${source}|${page}`. Only scalar keys enter the atom family. */
 export const reports = Atom.family((key: string) => {
   const [status, source, page] = key.split('|')

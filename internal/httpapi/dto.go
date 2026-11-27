@@ -19,8 +19,14 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 		HasPassword: m.HasPassword, MaxViews: m.MaxViews, Views: m.Views, Previews: m.Previews,
 		LastViewedAt: m.LastViewedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, ExpiresAt: m.ExpiresAt,
 		PurgeAt: m.PurgeAt, TokenName: m.TokenName, InfoButton: m.InfoButton,
-		OldVersions: m.OldVersions, Feedback: m.Feedback, RevokedByAdmin: m.RevokedByAdmin,
+		OldVersions: m.OldVersions, Feedback: m.Feedback, RevokedByAdmin: m.RevokedByAdmin, Online: m.Online,
 	}
+}
+
+// tunnelDTO has no link to copy: sharing.AdminTunnel carries none.
+func tunnelDTO(t sharing.AdminTunnel) api.Tunnel {
+	return api.Tunnel{ID: t.ID, Title: t.Title, OwnerUsername: t.OwnerUsername, TokenName: t.TokenName,
+		ConnectedAt: t.ConnectedAt, Streams: t.Streams, BytesThisHour: t.BytesThisHour}
 }
 
 func artifactDTO(a sharing.Artifact) api.Artifact {

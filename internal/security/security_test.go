@@ -193,3 +193,28 @@ func TestLimiterWait(t *testing.T) {
 		t.Fatalf("after the wait: %v", w)
 	}
 }
+
+// AllowN charges a byte budget in pieces; Count reads what the window has
+// used, and a new window starts from zero.
+func TestLimiterAllowN(t *testing.T) {
+	l, clock := newTestLimiter(t, 100, time.Hour, 10, RefuseNew)
+	if !l.AllowN("t", 60) || l.Count("t") != 60 {
+		t.Fatalf("first charge: count %d", l.Count("t"))
+	}
+	if !l.AllowN("t", 40) {
+		t.Fatal("charge up to the limit refused")
+	}
+	if l.AllowN("t", 1) {
+		t.Fatal("charge past the limit allowed")
+	}
+	if l.Count("t") != 101 || l.Count("unknown") != 0 {
+		t.Fatalf("counts: %d %d", l.Count("t"), l.Count("unknown"))
+	}
+	if w := l.Wait("t"); w <= 0 || w > time.Hour+time.Second {
+		t.Fatalf("wait %v", w)
+	}
+	clock.add(time.Hour + time.Second)
+	if l.Count("t") != 0 || !l.AllowN("t", 100) {
+		t.Fatal("new window did not start from zero")
+	}
+}

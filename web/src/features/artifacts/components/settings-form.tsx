@@ -27,6 +27,7 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
   })
   const passwordAction = useWatch({ control: form.control, name: 'passwordAction' })
   const infoButton = useWatch({ control: form.control, name: 'infoButton' })
+  const tunnel = artifact.kind === 'tunnel'
   return (
     <Form {...form}>
       <form onSubmit={onSubmit} className="max-w-xl space-y-6">
@@ -74,23 +75,27 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             </FormItem>
           )} />
         )}
-        <FormField control={form.control} name="maxViews" render={({ field }) => (
-          <FormItem>
-            <FormLabel>View limit</FormLabel>
-            <FormControl><Input inputMode="numeric" {...field} /></FormControl>
-            <FormDescription>0 = unlimited, 1 = one-time link. {artifact.views} view(s) so far.</FormDescription>
-            <FormMessage />
-          </FormItem>
-        )} />
-        <FormField control={form.control} name="resetViews" render={({ field }) => (
-          <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
-            <div className="space-y-0.5">
-              <FormLabel>Reset view count</FormLabel>
-              <FormDescription>Start counting from zero again (revives a used-up link).</FormDescription>
-            </div>
-            <FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl>
-          </FormItem>
-        )} />
+        {!tunnel && (
+          <FormField control={form.control} name="maxViews" render={({ field }) => (
+            <FormItem>
+              <FormLabel>View limit</FormLabel>
+              <FormControl><Input inputMode="numeric" {...field} /></FormControl>
+              <FormDescription>0 = unlimited, 1 = one-time link. {artifact.views} view(s) so far.</FormDescription>
+              <FormMessage />
+            </FormItem>
+          )} />
+        )}
+        {!tunnel && (
+          <FormField control={form.control} name="resetViews" render={({ field }) => (
+            <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <FormLabel>Reset view count</FormLabel>
+                <FormDescription>Start counting from zero again (revives a used-up link).</FormDescription>
+              </div>
+              <FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl>
+            </FormItem>
+          )} />
+        )}
         {artifact.kind === 'bundle' && (
           <FormField control={form.control} name="spa" render={({ field }) => (
             <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
@@ -107,22 +112,26 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             <div className="space-y-0.5">
               <FormLabel>Show info button</FormLabel>
               <FormDescription>
-                A small "i" in the corner shows viewers the title, version, expiry, remaining views, size, and the version list with the change notes of new versions. Never who shared it.
+                {tunnel
+                  ? 'A small "i" in the corner shows viewers the title, expiry, and that this is a live app. Never who shared it.'
+                  : 'A small "i" in the corner shows viewers the title, version, expiry, remaining views, size, and the version list with the change notes of new versions. Never who shared it.'}
                 {artifact.kind !== 'file' && ' Pages open in redrop\'s viewer, with the content in a frame; off serves them directly.'}
               </FormDescription>
             </div>
             <FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl>
           </FormItem>
         )} />
-        <FormField control={form.control} name="oldVersions" render={({ field }) => (
-          <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
-            <div className="space-y-0.5">
-              <FormLabel>Viewers can open older versions</FormLabel>
-              <FormDescription>{infoButton ? 'The info panel links each kept version. Off: viewers see the list only.' : 'Needs the info button.'}</FormDescription>
-            </div>
-            <FormControl><Switch checked={field.value} disabled={!infoButton} onCheckedChange={field.onChange} /></FormControl>
-          </FormItem>
-        )} />
+        {!tunnel && (
+          <FormField control={form.control} name="oldVersions" render={({ field }) => (
+            <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <FormLabel>Viewers can open older versions</FormLabel>
+                <FormDescription>{infoButton ? 'The info panel links each kept version. Off: viewers see the list only.' : 'Needs the info button.'}</FormDescription>
+              </div>
+              <FormControl><Switch checked={field.value} disabled={!infoButton} onCheckedChange={field.onChange} /></FormControl>
+            </FormItem>
+          )} />
+        )}
         <FormField control={form.control} name="feedback" render={({ field }) => (
           <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
             <div className="space-y-0.5">

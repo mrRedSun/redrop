@@ -54,6 +54,7 @@ func (m *Moderation) SetRevoked(ctx context.Context, admin, id string, revoked b
 		return AdminArtifact{}, apperr.Internal(err)
 	}
 	m.s.log.Info("admin changed artifact", "admin", admin, "id", id, "owner", a.OwnerUsername, "revoked", revoked)
+	m.s.syncTunnel(ctx, id)
 	return m.s.adminView(a), nil
 }
 
@@ -62,6 +63,7 @@ func (m *Moderation) Delete(ctx context.Context, admin, id string) error {
 	if err := m.s.db.DeleteArtifact(ctx, id); err != nil {
 		return mapStore(err)
 	}
+	m.s.syncTunnel(ctx, id)
 	m.s.log.Info("admin deleted artifact", "admin", admin, "id", id)
 	m.s.changed(id)
 	return nil

@@ -60,6 +60,15 @@ func (p *Principal) Token() (id, name string) {
 	return p.token.ID, p.token.Name
 }
 
+// TokenExpiresAt is when the API token stops working (nil for no expiry and
+// for dashboard sessions).
+func (p *Principal) TokenExpiresAt() *time.Time {
+	if p.token == nil {
+		return nil
+	}
+	return p.token.ExpiresAt
+}
+
 // CanAdmin reports whether admin operations are allowed for this principal.
 func (p *Principal) CanAdmin(requireSSO bool) bool {
 	if p.user.Role != api.RoleAdmin || p.IsToken() {
@@ -91,6 +100,8 @@ type Service struct {
 
 	ssoMu     sync.Mutex
 	providers map[string]*provider
+
+	revocations Revocations // told about disabled users and deleted tokens; may be nil
 }
 
 // maxLimiterKeys bounds each rate limiter's table. A key costs at most about

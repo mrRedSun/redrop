@@ -306,10 +306,17 @@ func (m *Moderation) SetReportStatus(ctx context.Context, admin, id, status stri
 // RevokeReported revokes the reported artifact as an administrator (the
 // owner can't undo it) and resolves its open reports.
 func (m *Moderation) RevokeReported(ctx context.Context, admin, id string) (AdminReport, error) {
+	r, err := m.s.db.ReportByID(ctx, id)
+	if err != nil {
+		return AdminReport{}, reportErr(err)
+	}
 	detail, err := m.s.db.RevokeReported(ctx, id, admin)
 	if err != nil {
 		return AdminReport{}, reportErr(err)
 	}
+	// The queue revokes straight in the store, so the registry hears about
+	// it here rather than through syncTunnel.
+	m.s.syncTunnel(ctx, r.ArtifactID)
 	m.s.log.Info("admin revoked reported artifact", "admin", admin, "report", id, "detail", detail)
 	return m.report(ctx, id)
 }
@@ -322,6 +329,13 @@ func (m *Moderation) SuspendReportedOwner(ctx context.Context, admin, id string)
 	detail, err := m.s.db.SuspendReported(ctx, id, admin)
 	if err != nil {
 		return AdminReport{}, reportErr(err)
+	}
+	// The suspension disables the owner directly in the store, so their
+	// tunnels are ended here rather than through the accounts service.
+	if m.s.tunnels != nil {
+		if r, err := m.s.db.ReportByID(ctx, id); err == nil {
+			m.s.tunnels.EndUser(r.OwnerID)
+		}
 	}
 	m.s.log.Info("admin suspended reported owner", "admin", admin, "report", id, "detail", detail)
 	return m.report(ctx, id)

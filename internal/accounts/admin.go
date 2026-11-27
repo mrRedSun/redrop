@@ -86,6 +86,7 @@ func (a *Administration) UpdateUser(ctx context.Context, admin *Principal, userI
 		if err := s.db.DeleteUserSessions(ctx, u.ID, ""); err != nil {
 			return User{}, apperr.Internal(err)
 		}
+		s.userDisabled(u.ID)
 	}
 	// Suspending and unsuspending are queue-relevant actions: a suspended
 	// owner's reports were auto-resolved, and undoing that must leave a

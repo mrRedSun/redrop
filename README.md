@@ -27,6 +27,9 @@ cross-platform CLI that agents drive.
   back with `redrop feedback` (see [Feedback](#feedback)). Off by default.
 - Artifacts can't register service workers (a worker would outlive
   revocation). Everything else behaves as a normal web page on its own origin.
+- `redrop tunnel 3000` shares an app still running on your computer (a dev
+  server with hot reload, an API, a webhook receiver) through the same kind of
+  private link, for as long as the command runs (see [Tunnels](#tunnels)).
 
 ## Read first
 
@@ -45,6 +48,7 @@ cross-platform CLI that agents drive.
 | `pkg/api`, `pkg/client` | Wire types and the Go client library used by the CLI |
 | `internal/accounts`, `internal/sharing` | Services holding the business rules |
 | `internal/httpapi`, `internal/content` | HTTP transports for the API and artifact domains |
+| `internal/tunnel` | Live tunnel connections: the registry, the yamux sessions, and the reverse proxy |
 | `internal/store`, `internal/blob` | SQLite persistence and content-addressed file storage |
 | `web/` | Dashboard, built into `internal/webui/dist` and embedded in the server |
 | `scripts/` | Dev server and end-to-end test |
@@ -200,6 +204,52 @@ off, or all sessions in use) is retried at the renewal interval, so fixing
 the cause restores live reload without restarting `watch`. See
 [`docs/DESIGN.md`](docs/DESIGN.md#live-reload).
 
+### Tunnels
+
+```sh
+redrop tunnel 3000                                  # http://localhost:3000 -> a private link
+redrop tunnel 5173 --password-generate --ttl 2h     # Vite, with hot reload
+redrop tunnel 127.0.0.1:8080 --title "API" --log    # one stderr line per request
+redrop tunnel 5173 --id k2j4m9qx7d4a                # the same link as last time
+```
+
+A tunnel is an artifact of kind `tunnel` with its own four-word link. Requests
+to the link travel over one WebSocket that `redrop tunnel` keeps open to the
+server, to the app on your computer, and back; the server never connects to
+your computer. Ctrl-C ends it. While it isn't connected, visitors who get past
+the password see "This tunnel is offline", and `redrop list` and the dashboard
+show it offline. It reconnects by itself after network trouble; `--id` keeps
+the link across restarts.
+
+The link has the artifact protections: expiry, password, revoke, the info
+panel with the viewer frame (`--no-info` serves the app directly), and admin
+moderation. A view limit and `--once` don't apply. WebSockets work end to end,
+so dev-server hot reload does. Nothing is added to the app's pages.
+
+- **Only this computer by default.** A port means `localhost` (`127.0.0.1`,
+  then `::1`). Another address needs `--allow-remote-target` and prints a
+  warning: everyone with the link can reach it through your computer. The
+  target is resolved once and pinned.
+- **What the app sees:** `Host` is the target you named (`localhost:5173`, so
+  Vite's host check passes); `X-Forwarded-Host` is the link's host,
+  `X-Forwarded-For` the visitor's full address as the server resolved it,
+  and `X-Forwarded-Proto` the link's scheme. Other forwarding and client-IP
+  headers (`Forwarded`, `Via`, `X-Real-Ip`, `Proxy-Client-Ip` and the like),
+  URL and host overrides (`X-Original-Url`, `X-Host`, ...), and header names
+  with an underscore, are removed. redrop's own cookies are never sent to the
+  app, and a `Domain` on the app's cookies is removed, as is a
+  `Clear-Site-Data` from the app. `1xx` responses from the app (such as
+  `103 Early Hints`) and response trailers are not passed on.
+- **Limits** (server settings, below): 3 connected and 20 kept tunnels per
+  user, 32 open requests per tunnel, 100 MB requests, 1 GB responses, 2 GB per
+  user per hour over all their tunnels, and about 90 seconds for the app to
+  start answering. A visitor who stops reading is cut after the idle
+  timeout. A request stuck behind an app that hasn't read its upload is
+  reset on its own after the idle timeout; the tunnel stays connected.
+
+The server keeps connected tunnels in memory: run one redrop process. See
+[`docs/DESIGN.md`](docs/DESIGN.md#tunnels) for the protocol and threat model.
+
 ## Develop
 
 Requires Go 1.26 and Node 24.
@@ -240,6 +290,12 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_LIVE_LEASE` | `60s` (15s to 10m): how long a `redrop watch` session's live reload lease lasts; the CLI renews it every third of that |
 | `REDROP_LIVE_KEEPALIVE` | `20s` (1s to 29s): keep-alive interval of live reload streams; keep it under your proxies' idle timeout (Cloudflare: about 100 s) |
 | `REDROP_LIVE_MAX_STREAMS`, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` | `1000`, `100`: open live reload streams on the server and per artifact (plus one quarter of the server cap per artifact owner, 32 watch leases per owner, and 16 per client network); beyond them viewers get no live reload |
+| `REDROP_TUNNELS_PER_USER` | `3`: tunnels one user may have connected; `0` turns tunnels off |
+| `REDROP_TUNNEL_ARTIFACTS_PER_USER` | `20`: tunnels one user may keep, connected or not, until deleted |
+| `REDROP_TUNNEL_STREAMS`, `REDROP_TUNNEL_STREAMS_TOTAL` | `32`, `256`: open requests and WebSockets per tunnel, and across the server (each holds at most about 300 KB) |
+| `REDROP_TUNNEL_MAX_REQUEST_SIZE`, `REDROP_TUNNEL_MAX_RESPONSE_SIZE` | `100MB`, `1GB`: one request or response body through a tunnel |
+| `REDROP_TUNNEL_BYTES_PER_HOUR` | `2GB`: traffic per user, over all their tunnels, both ways, per hour |
+| `REDROP_TUNNEL_RESPONSE_TIMEOUT`, `REDROP_TUNNEL_IDLE_TIMEOUT` | `90s`, `100s`: how long a request waits for a free slot, and then for the app to start answering; a request or WebSocket that moves no bytes is closed after the idle time |
 
 ## Abuse handling
 
@@ -295,6 +351,12 @@ Live reload streams (`/__redrop/live`, `text/event-stream`) stay open while
 `redrop watch` runs. Proxies must pass them unbuffered (Traefik and Cloudflare
 do; redrop also sends `X-Accel-Buffering: no`) and must not close a
 connection that is idle for less than `REDROP_LIVE_KEEPALIVE`.
+
+Tunnels need WebSockets on both hosts: `redrop tunnel` connects to
+`/api/v1/tunnels/{id}/connect` on the dashboard host, and visitors' own
+WebSockets (hot reload) reach tunnel links on the content domain. Traefik and
+Cloudflare pass them without extra settings. The CLI and server ping every 30
+seconds, under Cloudflare's 100-second idle limit.
 ### Client addresses
 
 Sign-in, link lookups, artifact passwords and link misses are limited per

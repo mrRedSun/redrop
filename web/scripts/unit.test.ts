@@ -9,7 +9,7 @@ import { safeNext } from '@/app/paths'
 import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
 import * as artifactEndpoints from '@/features/artifacts/endpoints'
-import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, statusLabel, toUpdateRequest } from '@/features/artifacts/schemas'
+import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, statusLabel, toUpdateRequest, tunnelState } from '@/features/artifacts/schemas'
 import { Stats, AdminArtifact, CreateInviteForm, Report, ReportList, reportFilterFromSearch, reportSearch, reportedLink, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import * as adminEndpoints from '@/features/admin/endpoints'
 import * as reportEndpoints from '@/features/reports/endpoints'
@@ -107,7 +107,7 @@ await test('viewer settings: defaults from the artifact and both are always sent
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: new Date(), updated_at: new Date(), expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false,
+    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false, online: false,
   } as const
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.infoButton, true)
@@ -123,12 +123,29 @@ await test('viewer settings: defaults from the artifact and both are always sent
   assert(Option.isNone(Schema.decodeUnknownOption(Artifact)({ ...artifact, viewer_old_versions: undefined, created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z' })), 'the field is required on the wire')
 })
 
+await test('tunnels: decode as their own kind and never send a view limit or older versions', () => {
+  const tunnel = Schema.decodeUnknownSync(Artifact)({
+    id: 't1', title: 'localhost:3000', kind: 'tunnel', status: 'active', url: 'https://x.usercontent.example/', has_password: true,
+    max_views: 0, views: 0, previews: 0, files: 0, size: 0, total_size: 0, version: 1, versions: 1,
+    created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z', expires_at: null, last_viewed_at: null, purge_at: null,
+    info_button: true, viewer_old_versions: false, feedback: false, revoked_by_admin: false, online: true,
+  })
+  assert.equal(tunnelState(tunnel), 'online')
+  assert.equal(tunnelState({ ...tunnel, online: false }), 'offline')
+  const values = Schema.decodeUnknownSync(ArtifactSettingsForm)({ ...settingsDefaults(tunnel, false), resetViews: true, ttl: '1d' })
+  const body = toUpdateRequest(values, 'tunnel')
+  assert.deepEqual(body, { title: 'localhost:3000', ttl: '1d', info_button: true, feedback: false })
+  const wire: Record<string, unknown> = { ...Schema.encodeSync(Artifact)(tunnel) }
+  delete wire.online
+  assert(Option.isNone(Schema.decodeUnknownOption(Artifact)(wire)), 'online is required on the wire')
+})
+
 await test('feedback setting: defaults from the artifact, always sent explicitly, required on the wire', () => {
   const artifact = Schema.decodeUnknownSync(Artifact)({
     id: 'a1', title: 'Report', kind: 'html', status: 'active', url: 'https://x.usercontent.example/', has_password: false,
     max_views: 0, views: 0, previews: 0, files: 1, size: 10, total_size: 10, version: 1, versions: 1,
     created_at: '2026-11-13T12:00:00Z', updated_at: '2026-11-13T12:00:00Z', expires_at: null, last_viewed_at: null, purge_at: null,
-    info_button: true, viewer_old_versions: false, feedback: true, revoked_by_admin: false,
+    info_button: true, viewer_old_versions: false, feedback: true, revoked_by_admin: false, online: false,
   })
   const defaults = settingsDefaults(artifact, false)
   assert.equal(defaults.feedback, true)
@@ -184,14 +201,14 @@ await test('an administrator\'s revocation is named and required on the wire', (
   assert.equal(statusLabel({ status: 'revoked', revoked_by_admin: false }), 'revoked')
   assert.equal(statusLabel({ status: 'active', revoked_by_admin: false }), 'active')
   const timestamp = '2026-11-13T12:00:00Z'
-  const meta = { id: 'test', title: 'Report', kind: 'html', status: 'revoked', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null }
+  const meta = { id: 'test', title: 'Report', kind: 'html', status: 'revoked', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, online: false }
   assert(Schema.decodeUnknownSync(AdminArtifact)({ ...meta, revoked_by_admin: true }).revoked_by_admin)
   assert(Option.isNone(Schema.decodeUnknownOption(AdminArtifact)(meta)), 'the field is required on the wire')
 })
 
 await test('metadata decoding strips links and token lists strip secrets', () => {
   const timestamp = '2026-11-13T12:00:00Z'
-  const decoded = Schema.decodeUnknownSync(AdminArtifact)({ id: 'test', title: 'Report', kind: 'html', status: 'active', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, revoked_by_admin: false, url: 'must-be-stripped' })
+  const decoded = Schema.decodeUnknownSync(AdminArtifact)({ id: 'test', title: 'Report', kind: 'html', status: 'active', owner_username: 'fixture', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1, versions: 1, created_at: timestamp, expires_at: null, last_viewed_at: null, revoked_by_admin: false, online: false, url: 'must-be-stripped' })
   assert(!('url' in decoded))
   const token = { id: 'test', name: 'fixture', prefix: 'fixture', artifacts: 0, created_at: timestamp, expires_at: null, last_used_at: null, secret: 'test-only-value' }
   assert.equal(Schema.decodeUnknownSync(CreatedToken)(token).secret.toString(), '<redacted>')
@@ -288,7 +305,7 @@ const reportWire = (over: Record<string, unknown> = {}) => ({
 
 await test('admin reports decode; the artifact stays metadata only; only http(s) links are links', () => {
   const artifact = { id: 'a1', title: 't', kind: 'html', status: 'revoked', owner_username: 'bob', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1,
-    versions: 1, created_at: '2026-11-18T10:00:00Z', expires_at: null, last_viewed_at: null, revoked_by_admin: true, url: 'https://secret.example/' }
+    versions: 1, created_at: '2026-11-18T10:00:00Z', expires_at: null, last_viewed_at: null, revoked_by_admin: true, online: false, url: 'https://secret.example/' }
   const r = Schema.decodeUnknownSync(Report)(reportWire({ artifact }))
   assert.equal(r.details, '<img src=x onerror=alert(1)>')
   assert(r.artifact && !('url' in r.artifact))

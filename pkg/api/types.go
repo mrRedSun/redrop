@@ -222,6 +222,8 @@ type Artifact struct {
 	Feedback      bool       `json:"feedback" description:"Whether viewers can leave comments from the info panel (only while the info button is shown)"`
 	// RevokedByAdmin is set when an administrator revoked the artifact.
 	RevokedByAdmin bool `json:"revoked_by_admin" description:"An administrator revoked it (status revoked); only an administrator can restore it"`
+	// Online is set for a tunnel whose redrop tunnel command is connected.
+	Online bool `json:"online" description:"Tunnels only: the owner's redrop tunnel is connected; always false for other kinds"`
 }
 
 type ArtifactList struct {

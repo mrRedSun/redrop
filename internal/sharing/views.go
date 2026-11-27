@@ -40,6 +40,7 @@ type ArtifactMeta struct {
 	InfoButton     bool   // effective: the artifact's setting or the server default
 	OldVersions    bool   // viewers may open older versions
 	Feedback       bool   // viewers may leave comments (the owner's setting)
+	Online         bool   // a tunnel whose redrop tunnel is connected
 }
 
 // Artifact is the owner's view: metadata plus the secret link.
@@ -121,7 +122,7 @@ func (s *Service) meta(a *store.Artifact, now time.Time) ArtifactMeta {
 		HasPassword: a.PasswordHash != "", MaxViews: a.MaxViews, Views: a.Views, Previews: a.Previews,
 		LastViewedAt: a.LastViewedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt, ExpiresAt: a.ExpiresAt,
 		PurgeAt: s.purgeAt(a, status), TokenName: a.TokenName, InfoButton: s.infoButton(a), OldVersions: a.OldVersions, Feedback: a.Feedback,
-		RevokedByAdmin: a.AdminRevoked,
+		RevokedByAdmin: a.AdminRevoked, Online: s.tunnelOnline(a),
 	}
 }
 
@@ -150,6 +151,7 @@ type ViewerInfo struct {
 	Current   int   // the current version's number
 	Latest    int   // the highest retained version number ("version N of Latest")
 	CanOpen   bool  // viewers may open older versions
+	Tunnel    bool  // a running app, not stored files or versions
 	Revisions []Revision
 }
 
@@ -168,7 +170,7 @@ func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snaps
 	info := ViewerInfo{
 		Title: a.Title, Version: shown.Version, Published: shown.Published, ExpiresAt: a.ExpiresAt,
 		Password: a.PasswordHash != "", Size: shown.Size, Files: shown.Files,
-		Current: a.CurrentVersion, Latest: a.CurrentVersion, CanOpen: s.oldVersionsOpen(a),
+		Current: a.CurrentVersion, Latest: a.CurrentVersion, CanOpen: s.oldVersionsOpen(a), Tunnel: IsTunnel(a),
 	}
 	if a.MaxViews > 0 {
 		info.MaxViews, info.ViewsLeft = a.MaxViews, max(a.MaxViews-a.Views, 0)
