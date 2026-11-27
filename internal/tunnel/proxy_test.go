@@ -354,7 +354,10 @@ func TestHeaderHygiene(t *testing.T) {
 		"Cookie", "__Host-rd_visit=secret; app=1;  other=2", "Authorization", "Bearer app-token", "Connection", "X-Hop", "X-Hop", "1",
 		"Proxy-Authorization", "x", "Keep-Alive", "timeout=5",
 		"X-Forwarded-Port", "1234", "X-Forwarded-Prefix", "/evil", "X-Forwarded-Server", "evil", "X-Forwarded-Ssl", "on",
-		"X_Forwarded_For", "6.6.6.6", "X_Real_IP", "6.6.6.6", "Client-Ip", "6.6.6.6", "X-Client-Ip", "6.6.6.6")
+		"X_Forwarded_For", "6.6.6.6", "X_Real_IP", "6.6.6.6", "Client-Ip", "6.6.6.6", "X-Client-Ip", "6.6.6.6",
+		"X-Forwarded", "for=6.6.6.6", "Proxy-Client-IP", "6.6.6.6", "WL-Proxy-Client-IP", "6.6.6.6", "Fastly-Client-IP", "6.6.6.6",
+		"X-Original-Forwarded-For", "6.6.6.6", "X-ProxyUser-Ip", "6.6.6.6", "Via", "1.1 evil", "X-Original-URL", "/evil",
+		"X-Rewrite-URL", "/evil", "X-Original-Host", "evil", "X-Host", "evil")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,6 +370,8 @@ func TestHeaderHygiene(t *testing.T) {
 		"Host":             strings.TrimPrefix(f.app.URL, "http://"),
 		"X-Forwarded-Port": "", "X-Forwarded-Prefix": "", "X-Forwarded-Server": "", "X-Forwarded-Ssl": "",
 		"X_forwarded_for": "", "X_real_ip": "", "Client-Ip": "", "X-Client-Ip": "",
+		"X-Forwarded": "", "Proxy-Client-Ip": "", "Wl-Proxy-Client-Ip": "", "Fastly-Client-Ip": "", "X-Original-Forwarded-For": "",
+		"X-Proxyuser-Ip": "", "Via": "", "X-Original-Url": "", "X-Rewrite-Url": "", "X-Original-Host": "", "X-Host": "",
 	}
 	for k, v := range want {
 		if got := strings.Join(h.Values(k), ","); got != v {
@@ -384,6 +389,32 @@ func TestHeaderHygiene(t *testing.T) {
 		if got := strings.Join(r.Header.Values(k), ","); got != v {
 			t.Errorf("visitor got %s %q, want %q", k, got, v)
 		}
+	}
+}
+
+// TestResponseTrailersAreDropped: trailers would skip the header rules,
+// so an app's trailers never reach the visitor.
+func TestResponseTrailersAreDropped(t *testing.T) {
+	f := newFixture(t, testLimits(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", "Set-Cookie, X-Checksum")
+		io.WriteString(w, "body")
+		w.(http.Flusher).Flush()
+		w.Header().Set("Set-Cookie", "t=1; Domain=usercontent.example")
+		w.Header().Set("X-Checksum", "abc")
+		w.Header().Set(http.TrailerPrefix+"X-Late", "1")
+	}))
+	f.connect(owner("t1", "u1"))
+	r, err := f.request(context.Background(), "GET", "t1", "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil || string(b) != "body" {
+		t.Fatalf("body %q %v", b, err)
+	}
+	if len(r.Trailer) != 0 || r.Header.Get("Trailer") != "" {
+		t.Fatalf("trailers reached the visitor: %v, announced %q", r.Trailer, r.Header.Get("Trailer"))
 	}
 }
 

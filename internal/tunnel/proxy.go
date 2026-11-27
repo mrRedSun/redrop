@@ -159,8 +159,12 @@ func (p *proxy) stopHeaderTimer() {
 }
 
 // proxyRemoved are request headers that describe the visitor's path to
-// redrop, not the visitor's request to the app.
-var proxyRemoved = []string{"Forwarded", "X-Real-Ip", "True-Client-Ip", "Client-Ip", "X-Client-Ip", "X-Cluster-Client-Ip", "Cdn-Loop",
+// redrop, not the visitor's request to the app: client addresses under the
+// names proxies and app servers use, and the original-URL and host
+// overrides some frameworks honour.
+var proxyRemoved = []string{"Forwarded", "X-Forwarded", "X-Real-Ip", "True-Client-Ip", "Client-Ip", "X-Client-Ip", "X-Cluster-Client-Ip",
+	"Proxy-Client-Ip", "Wl-Proxy-Client-Ip", "Fastly-Client-Ip", "X-Original-Forwarded-For", "X-Proxyuser-Ip", "Via", "Cdn-Loop",
+	"X-Original-Url", "X-Rewrite-Url", "X-Original-Host", "X-Host",
 	// The server answers Expect: 100-continue itself.
 	"Expect"}
 
@@ -200,6 +204,9 @@ func (p *proxy) modifyResponse(resp *http.Response) error {
 		return errAccessChanged
 	}
 	cleanResponseHeader(p.own, resp.Header, p.v.Reserved)
+	// Trailers would skip the header rules (a Set-Cookie with a Domain).
+	// Browsers make no use of them, so they are dropped.
+	resp.Trailer = nil
 	if resp.StatusCode == http.StatusSwitchingProtocols || resp.Request.Method == http.MethodHead {
 		return nil
 	}
@@ -208,9 +215,23 @@ func (p *proxy) modifyResponse(resp *http.Response) error {
 		return errResponseTooLarge
 	}
 	if resp.Body != nil && resp.Body != http.NoBody {
-		resp.Body = &limitedBody{ReadCloser: resp.Body, left: max, err: errResponseTooLarge}
+		resp.Body = &noTrailers{ReadCloser: &limitedBody{ReadCloser: resp.Body, left: max, err: errResponseTooLarge}, resp: resp}
 	}
 	return nil
+}
+
+// noTrailers clears the response's trailers when the proxy closes the
+// body: the transport sets them when the body ends, and the proxy copies
+// them to the visitor after closing it.
+type noTrailers struct {
+	io.ReadCloser
+	resp *http.Response
+}
+
+func (b *noTrailers) Close() error {
+	err := b.ReadCloser.Close()
+	b.resp.Trailer = nil
+	return err
 }
 
 // forcedHeaders are set by the content handler for every content response
