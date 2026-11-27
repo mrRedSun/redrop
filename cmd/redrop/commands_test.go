@@ -434,6 +434,10 @@ func TestArtifactSlug(t *testing.T) {
 		"https://AMBER-otter-quilt-river.usercontent.example:8443/": "amber-otter-quilt-river",
 		"amber-otter-quilt-river.usercontent.example/docs/a.txt":    "amber-otter-quilt-river",
 		"http://s3eybdkc67r7zegmb7qbugpmvy.usercontent.example/":    "s3eybdkc67r7zegmb7qbugpmvy",
+		// end-to-end encrypted links: the app origin's intake page
+		"https://redrop.example.com/e/amber-otter-quilt-river":    "amber-otter-quilt-river",
+		"redrop.example.com/e/amber-otter-quilt-river/":           "amber-otter-quilt-river",
+		"https://redrop.example.com/e/s3eybdkc67r7zegmb7qbugpmvy": "s3eybdkc67r7zegmb7qbugpmvy",
 		// bare slugs
 		"amber-otter-quilt-river":     "amber-otter-quilt-river",
 		" s3eybdkc67r7zegmb7qbugpmvy": "s3eybdkc67r7zegmb7qbugpmvy",
@@ -451,6 +455,8 @@ func TestArtifactSlug(t *testing.T) {
 		"https://redrop.example.com/artifacts/abc",
 		"https://amber-otter-quilt.usercontent.example/",
 		"https://amber-otter-quilt-river-stone.usercontent.example/",
+		"https://redrop.example.com/e/amber-otter-quilt",
+		"https://redrop.example.com/e/",
 		"https://s3eybdkc67r7zegmb7qbugpmv.usercontent.example/",
 		"https://amber-0tter-quilt-river.usercontent.example/",
 		"usercontent.example",

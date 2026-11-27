@@ -299,7 +299,10 @@ func withKeyLink(a *api.Artifact) *api.Artifact {
 		return a
 	}
 	out := *a
-	out.URL = client.E2ELink(a.URL, key)
+	if a.E2ELink == "" {
+		return a
+	}
+	out.URL = client.E2ELink(a.E2ELink, key)
 	return &out
 }
 

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -145,13 +144,18 @@ func (s *cliServer) decrypt(t *testing.T, a *api.Artifact, n int, path string) s
 	if err != nil || !ok {
 		t.Fatalf("key in %q: %v", a.URL, err)
 	}
-	u, err := url.Parse(a.URL)
-	if err != nil {
-		t.Fatal(err)
+	// The link is the app origin's intake page; the objects are on the
+	// artifact's host, named by the link's slug.
+	if !strings.HasPrefix(a.URL, "http://app.test/e/") {
+		t.Fatalf("not an intake link: %q", a.URL)
+	}
+	slug, err := artifactSlug(a.URL)
+	if err != nil || slug == "" {
+		t.Fatalf("slug of %q: %v", a.URL, err)
 	}
 	get := func(name string) []byte {
 		req, _ := http.NewRequest(http.MethodGet, s.url+"/__redrop/v/"+strconv.Itoa(n)+"/"+name, nil)
-		req.Host = u.Host
+		req.Host = slug + ".content.test"
 		req.Header.Set("Sec-Fetch-Dest", "empty")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

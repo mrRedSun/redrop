@@ -41,9 +41,10 @@ func NewE2EKey() (E2EKey, error) { return e2e.NewKey(rand.Reader) }
 // ParseE2EKey reads a key in its link form (43 characters of base64url).
 func ParseE2EKey(s string) (E2EKey, error) { return e2e.ParseKey(s) }
 
-// E2ELink returns the artifact link with key in its fragment: the link to
-// give people. The server never sees the fragment.
-func E2ELink(artifactURL string, key E2EKey) string { return e2e.Link(artifactURL, key) }
+// E2ELink returns the link to give people: an end-to-end encrypted
+// artifact's E2ELink (its intake page on the app origin) with key in its
+// fragment. The server never sees the fragment.
+func E2ELink(e2eLink string, key E2EKey) string { return e2e.Link(e2eLink, key) }
 
 // E2EKeyFromLink returns the key in a link's #k= fragment; ok is false when
 // the link has none.
@@ -87,7 +88,7 @@ func (c *Client) ReserveArtifact(ctx context.Context) (*api.ArtifactReservation,
 // called with the reserved artifact ID and the key before anything is
 // uploaded; its error aborts the share, so a key that could not be saved
 // never protects published content. The returned key is the only way to
-// read the artifact: give out E2ELink(a.URL, key).
+// read the artifact: give out E2ELink(a.E2ELink, key).
 func (c *Client) ShareE2E(ctx context.Context, src *Source, opts PublishOptions, remember func(id string, key E2EKey) error, progress Progress) (*api.Artifact, E2EKey, error) {
 	var key E2EKey
 	if src.SPA {

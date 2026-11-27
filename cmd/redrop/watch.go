@@ -126,7 +126,7 @@ is uploaded. --e2e insists that the artifact is encrypted.`,
 				publish := opts.OnPublish
 				opts.OnPublish = func(r client.WatchResult) {
 					shown := *r.Artifact
-					shown.URL = client.E2ELink(shown.URL, key)
+					shown.URL = client.E2ELink(shown.E2ELink, key)
 					r.Artifact = &shown
 					publish(r)
 				}

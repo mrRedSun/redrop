@@ -216,14 +216,15 @@ func TestPrintedLinkCarriesTheStoredKey(t *testing.T) {
 	useConfigPath(t, filepath.Join(t.TempDir(), "config.json"))
 	g.server = testServer
 	k := newTestKey(t)
-	a := &api.Artifact{ID: "aaaaaaaaaaaaaaaa", URL: "https://amber-otter-quilt-river.usercontent.example/", E2E: true}
+	a := &api.Artifact{ID: "aaaaaaaaaaaaaaaa", URL: "https://amber-otter-quilt-river.usercontent.example/", E2E: true,
+		E2ELink: "https://redrop.example.com/e/amber-otter-quilt-river"}
 	if got := withKeyLink(a); got.URL != a.URL {
 		t.Fatalf("no stored key, link %s", got.URL)
 	}
 	if err := saveKey(testServer, a.ID, k); err != nil {
 		t.Fatal(err)
 	}
-	if got := withKeyLink(a); got.URL != client.E2ELink(a.URL, k) || a.URL == got.URL {
+	if got := withKeyLink(a); got.URL != "https://redrop.example.com/e/amber-otter-quilt-river#k="+k.String() {
 		t.Fatalf("link with key %s", got.URL)
 	}
 	plain := &api.Artifact{ID: a.ID, URL: a.URL}

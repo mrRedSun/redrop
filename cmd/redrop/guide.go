@@ -219,7 +219,7 @@ the upload, share and update start over once, then fail with exit code 1.
 
 ## End-to-end encryption (--e2e)
 
-    redrop share report.html --e2e          # prints https://<slug>.<content-domain>/#k=<key>
+    redrop share report.html --e2e          # prints https://<server>/e/<slug>#k=<key>
     redrop update ID report.html            # same link, encrypted with the saved key
     redrop watch ID ./site
     redrop update - report.html < link.txt  # the full link on stdin, on another machine
@@ -266,17 +266,20 @@ keep the link working; a lost link and key mean lost content.
   --title; --title and --note are stored in plaintext), and seeking in
   videos over 64 MiB.
 - Markdown is rendered locally as usual, then encrypted.
-- Viewing needs HTTPS and a browser that allows service workers and site
-  storage. The viewer turns the key into a non-extractable CryptoKey,
-  removes it from the address bar and reloads before showing the page, so
-  scripts in the page (analytics, libraries) can't read the key; they can
-  only use it while the page is open. The browser keeps that CryptoKey for
-  12 hours, and its history keeps the full link. A link whose key is
-  damaged (cut short, characters added, percent-encoded, a different
-  case) or whose # became %23 or ? opens nothing, even in a browser that has
-  the key: copy the whole link again. A link opened again in a tab where
-  its page is open closes the page; open it in a new tab. The browser
-  needs the Navigation API (current Chrome, Edge, Firefox, Safari).
+- The link is a page on the server's own address (https://<server>/e/...),
+  which must be reachable by everyone the link is for. It takes the key
+  off the address bar, turns it into a non-extractable CryptoKey and, when
+  the visitor presses Open, hands only that to the artifact's page through
+  a small window that closes by itself. The key's text never reaches the
+  artifact's origin, so scripts in the page (analytics, libraries) and
+  windows they open can't read it; they can only use the CryptoKey while
+  the page is open. The browser keeps it for 12 hours, and its history
+  keeps the full link.
+- Viewing needs HTTPS, a browser that allows service workers, site storage
+  and pop-ups for that click, and the Navigation API (current Chrome,
+  Edge, Firefox, Safari). A link whose key is damaged (cut short,
+  characters added, percent-encoded, a different case) or whose # became
+  %23 or ? opens nothing: copy the whole link again.
 - This protects against the server's storage being read, not against a
   compromised live server, which could serve a viewer that leaks the key.
 

@@ -130,7 +130,8 @@ func resolveID(ctx context.Context, c *client.Client, arg string) (string, error
 }
 
 // artifactSlug returns the slug named by a link (https://<slug>.<content-domain>/,
-// scheme optional) or a bare slug, and "" for an artifact ID. Anything else
+// or an end-to-end encrypted link https://<app>/e/<slug>; scheme optional)
+// or a bare slug, and "" for an artifact ID. Anything else
 // is a usage error that doesn't echo the argument: it may hold a key whose
 // "#" was percent-encoded (ID%23k=...), and only an ID, a slug or a link's
 // slug ever goes to the server.
@@ -147,6 +148,9 @@ func artifactSlug(arg string) (string, error) {
 			raw = "https://" + raw
 		}
 		if u, err := url.Parse(raw); err == nil {
+			if s, ok := strings.CutPrefix(u.Path, api.E2EIntakePrefix); ok && ids.ValidSlug(strings.TrimSuffix(s, "/")) {
+				return strings.TrimSuffix(s, "/"), nil
+			}
 			label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
 			if ids.ValidSlug(label) {
 				return label, nil
@@ -447,7 +451,7 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 				if err != nil {
 					return mapErr(err)
 				}
-				a.URL = client.E2ELink(a.URL, key)
+				a.URL = client.E2ELink(a.E2ELink, key)
 				e2eNotice(keysPath())
 			} else if a, err = c.Share(cmd.Context(), src, opts, progressFn()); err != nil {
 				return mapErr(err)
