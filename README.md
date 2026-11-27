@@ -224,7 +224,7 @@ backup learns sizes, file counts and timing, never content, names or titles.
   key, but can use it while the page is open. The browser keeps the key
   for 12 hours, so reloads work; its history keeps the full link. A link
   whose key is damaged, encoded or cased differently, or whose `#` became
-  `%23`, opens nothing, even where the key is kept. Opening the link again
+  `%23` or `?`, opens nothing, even where the key is kept. Opening the link again
   in a tab where its page is open closes the page instead, so open it in a
   new tab. Viewing also needs a browser with the Navigation API (current
   Chrome, Edge, Firefox and Safari).

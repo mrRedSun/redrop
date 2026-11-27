@@ -702,17 +702,34 @@ viewer show bytes the owner did not encrypt: every object is authenticated
 library, an XSS in a generated report) run on the viewer's origin, as for
 plain artifacts. They share the viewer's window, so they can read
 anything it holds and rewrite its address, and can replace any function
-or getter on it. They still can't obtain the key:
-* the viewer never keeps its text, and its navigation records never held
-  it (see "Where the key goes in the browser");
-* no fragment that could hold a key, whole, damaged, encoded or in another
-  case, reaches the frame (see "Fragment grammar");
-* once the frame exists, no URL reaches the viewer's window at all: its
-  navigation guard cancels every change of the page's address that the
-  viewer didn't make, before the URL changes, and ends the page (see "The
-  navigation guard"). A full link opened in the tab of an open page, a
-  fragment typed after its address, or the artifact rewriting the address
-  so that a later full link would be a fragment change, all end there.
+or getter on it. They can't obtain the key by any route but the two
+open ones below:
+* the viewer never keeps its text, and the frame never loads a page whose
+  navigation records held it (see "Where the key goes in the browser");
+* no fragment or query that could hold a key, whole, damaged, encoded or
+  in another case, reaches the frame (see "Key attempts" and "A link
+  whose `#` became `%23` or `?`");
+* once the frame exists, no URL reaches the viewer's window by a
+  same-document navigation: its navigation guard cancels every change of
+  the page's address that the viewer didn't make, before the URL changes,
+  and ends the page (see "The navigation guard"). A full link opened in
+  the tab of an open page when that is a fragment change, a fragment typed
+  after its address, and the artifact rewriting the address so that a
+  later full link would be a fragment change, all end there.
+
+**Open: a window holding the tab** (review 33 third re-check, B-2a″,
+pending the owner's decision). A script in the artifact that opened a
+window (a popup, or a new tab with `target=_blank`; it needs one click in
+the artifact) keeps a handle on the visitor's tab. When the visitor later
+opens the full link in that tab, the new viewer document is a different
+document, so the guard never sees it. The URL, key included, is in that
+document's `location`, `navigation.currentEntry` and navigation timing
+entry from the moment it commits, before any viewer script runs, and
+the window reads it there. No same-origin measure closes this: the
+server never sees the fragment, and `Cross-Origin-Opener-Policy` doesn't
+cut a same-origin handle (`same-origin` and `noopener-allow-popups` were
+tried). It is the same cause as the residual below. The options are key
+intake on another origin or a written waiver.
 
 They can *use* the non-extractable `CryptoKey` the viewer stores, while a
 page of the link is open in that browser: decrypt what they can fetch (the
@@ -728,13 +745,14 @@ is opened in its tab.
 opened a window (`window.open`) and kept the reference can read the
 address of any page of its origin that loads there. If the visitor then
 opens the full link in that window, the script can read the key while the
-viewer's first page loads, until its `history.replaceState`. The viewer
-calls that first, before anything asynchronous, which keeps the window
-short, but it can't close it: any same-origin window holding a reference
-can read a URL that arrives on the artifact's origin. Closing it would
-take moving key intake to another origin. The same holds for a script that
-calls `location.assign` with a full link in a window it can reach: it
-would need the key to begin with.
+viewer's first page loads. `history.replaceState`, which the viewer calls
+first, before anything asynchronous, takes it out of `location`, but the
+page's navigation timing entry keeps the URL as loaded until the viewer's
+reload. Any same-origin window holding a reference can read a URL that
+arrives on the artifact's origin. Closing it would take moving key intake
+to another origin. The same holds for a script that calls
+`location.assign` with a full link in a window it can reach: it would need
+the key to begin with.
 
 **The key is permanent.** It is the same for every version, and `rotate`
 keeps it (only the slug changes). There is no way to change an artifact's
@@ -763,17 +781,23 @@ any URL the visitor opened; the viewer can't remove that.
   (`/a.html#k=…&part` opens `/a.html#part`). A fragment without a key is
   all rest.
 * **Key attempts.** Any fragment that could hold a key is a key attempt
-  (review 33 re-checks, B-2b and B-2b'). The fragment is percent-decoded
-  as often as that changes it (up to 8 times; only escapes of ASCII
-  characters, so a malformed one doesn't stop the rest), then matched for:
-  * `k=` in either case, at the start or after any character that is not a
-    letter or digit (`K=…`, `&k=…`, ` k=…`, `x&k=…`, `/a.html?k=…`, and
-    encoded forms such as `k%3D…`, `%6B=…` and `k%253D…`);
+  (review 33 re-checks, B-2b, B-2b' and m-7). The fragment is
+  percent-decoded as often as that changes it (up to 8 times; only escapes
+  of ASCII characters, so a malformed one doesn't stop the rest). Every
+  non-ASCII character, and every escape of a non-ASCII byte left, then
+  reads as a space. The result is matched for:
+  * `k` in either case, at the start or after any character that is not a
+    letter or digit, then up to 3 characters that are neither, then `=` or
+    `:` (`K=…`, `&k=…`, ` k=…`, `x&k=…`, `/a.html?k=…`, `k =…`, `k:…`, and
+    encoded forms such as `k%3D…`, `%6B=…`, `k%253D…` and a zero-width
+    space `k%E2%80%8B=…`);
   * a run of at least 40 base64url characters with both upper and lower
     case letters, such as a key that lost its `k=`.
 
   Unless the fragment is exactly the form above, with no key attempt in
-  its rest, the link is damaged. The viewer says so, takes the fragment off
+  its rest and no 12 characters of its key in a row in the rest (in either
+  case, however split: a second, damaged copy of the link), the link is
+  damaged. The viewer says so, takes the fragment off
   the address bar, frames nothing (even with a key stored from an earlier
   visit), and passes no part of the fragment on. The cost: an artifact's
   own fragment or page path of either shape (an anchor `#k=2`, a page
@@ -782,6 +806,11 @@ any URL the visitor opened; the viewer can't remove that.
   (`internal/e2e`) applies the same rule to links it is given, so a
   damaged key there is an error, not a link without a key;
   `internal/e2e/testdata/fragments.json` holds the cases both sides test.
+  Residual: a link damaged twice over, its `k=` lost entirely (or
+  `xk=`, `key=`) and its key split by a separator or case-folded, passes
+  as the artifact's own fragment, key characters included. Catching that
+  would also refuse ordinary mixed-case page paths. A case-folded key
+  would still need about 2^35 tries against the public key check.
 * **Where the key goes in the browser.** The artifact runs on the
   viewer's origin (see "Viewer frame"), so the viewer keeps nothing a
   script there could read the key from (review 33 B-2). When it finds a
@@ -817,11 +846,15 @@ any URL the visitor opened; the viewer can't remove that.
   the viewer's document with `document.open()`, which moves the address
   without a navigation. So the viewer doesn't rely on its address:
   * Before any frame exists, it registers this window's first `navigate`
-    listener and captures every function and getter that listener and the
-    viewer's own address updates use (`Reflect.apply`,
-    `Event.prototype.preventDefault`, `NavigateEvent.prototype.destination`,
-    `History.prototype.replaceState` and the rest). The artifact can later
-    replace them on the window, not the captured ones.
+    listener, a capturing one (third re-check M5). At the target, the DOM
+    standard runs capturing listeners before the others, so an artifact's
+    capturing listener added later still runs after it, in any engine
+    (Chromium runs them in the order added). It captures every function
+    and getter that listener and the viewer's own address updates use
+    (`Reflect.apply`, `Event.prototype.preventDefault`,
+    `NavigateEvent.prototype.destination`, `History.prototype.replaceState`,
+    `URL` and the rest). The artifact can later replace them on the
+    window, not the captured ones.
   * Once the frame exists, every same-document navigation of the page that
     the viewer didn't start is cancelled (`preventDefault`, so the URL
     never changes), hidden from later listeners
@@ -838,9 +871,17 @@ any URL the visitor opened; the viewer can't remove that.
     but code the artifact left outside them (a frame inside a shadow root
     of the viewer's page, a popup holding a reference, a timer it set on
     the viewer's window) could see the new URL. Firefox and Safari were
-    not tested.
-  * The viewer's own address updates go through the guard, flagged as its
-    own. They never hold a key.
+    not tested. (A popup holding the tab also gets the key through a
+    cross-document load in Chromium, where cancelling works: see "Open: a
+    window holding the tab".)
+  * The viewer's own address updates go through the guard, which knows
+    each by the exact URL it goes to, not by a flag, and hides it from
+    later listeners too. So a write the artifact makes while one is
+    running, from a listener or any other event, is refused like any other
+    (third re-check m-6). They never hold a key.
+  * An artifact can still make the visitor's reopen do nothing, for
+    example by calling `parent.stop()` in a loop: a denial of service
+    only; the key doesn't arrive.
   * A browser without the Navigation API gets no guard, so the viewer
     opens nothing there and says why (fail closed).
 
@@ -850,15 +891,20 @@ any URL the visitor opened; the viewer can't remove that.
   opening the full link in its tab loads a new page and shows it, instead
   of the guard's message. That is a convenience; the guard is the
   defence.
-* **A link whose `#` became `%23`** (`https://<slug>…/%23k=…`, review 33
-  second re-check M3) sends its key to the server in the request path,
-  which no browser can avoid. On an end-to-end host, a top-level load of a
-  path that holds a `#` after decoding gets a fixed "This link is damaged"
-  page (400, `Cache-Control: no-store`) before any gate: no viewer, frame
-  address or gate form is built from the path, and no view counts. Redrop
+* **A link whose `#` became `%23` or `?`** (`https://<slug>…/%23k=…` or
+  `…/?k=…`, review 33 re-checks M3 and B-2b″) sends its key to the server
+  in the request path or query, which no browser can avoid. The frame must
+  not get it as well: its address would carry the path and query. On an
+  end-to-end host, a top-level load gets a fixed "This link is damaged"
+  page (400, `Cache-Control: no-store`) before any gate when its path
+  holds a `#` after decoding, or when its query, without redrop's own
+  parameters, is a key attempt (as above). No viewer, frame address or
+  gate form is built from the request, and no view counts. A plaintext
+  artifact's query strings are untouched. An encrypted artifact's page
+  whose own query matches (a `?k=1`) can't be linked to directly. Redrop
   logs no content-host paths. A reverse proxy in front of it may: operators
-  should not log content-domain request paths, or should strip them. The
-  viewer refuses such a path too. An encrypted bundle's file whose name
+  should not log content-domain request paths and queries, or should strip
+  them. The viewer refuses such a path or query too. An encrypted bundle's file whose name
   holds a `#` can't be opened by a top-level link to its path; links
   inside the frame still reach it.
 * **Gates keep the fragment.** The password and Open pages carry one
