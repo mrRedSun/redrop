@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/config"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -20,6 +21,7 @@ import (
 var templateFS embed.FS
 
 type pages struct {
+	cfg  *config.Config
 	tmpl *template.Template
 	css  template.CSS
 	csp  string
@@ -64,6 +66,7 @@ func newPages(cfg *config.Config) *pages {
 	}).ParseFS(templateFS, "templates/*.html"))
 	directives := []string{"img-src 'self'", "media-src 'self'", "frame-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'self' " + cfg.PublicOrigin()}
 	return &pages{
+		cfg:            cfg,
 		tmpl:           t,
 		css:            template.CSS(css),
 		csp:            pagePolicy("", "'unsafe-inline'", directives...),
@@ -120,7 +123,20 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
 		"Action": "/" + api.ReservedPrefix + "/open",
+		"Report": p.reportLink(strings.TrimSuffix(p.cfg.ArtifactURL(a.Slug), "/") + selfRef(next)),
 	})
+}
+
+// reportLink is the app origin's report form for page, a URL on an
+// artifact host (DESIGN.md "Abuse handling"). The page travels in the
+// fragment, which the browser never sends to a server; "" links the form
+// without a page.
+func (p *pages) reportLink(page string) string {
+	link := p.cfg.PublicOrigin() + dashpaths.Report
+	if page != "" {
+		link += "#url=" + url.QueryEscape(page)
+	}
+	return link
 }
 
 type fileData struct {
@@ -138,7 +154,7 @@ type fileData struct {
 // panel rendered natively when info is set. base is where the shown
 // version's files are served ("" for the current version); self is this
 // origin, for the policy that allows the viewer's script and stylesheet.
-func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo, feedback bool) {
+func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.File, self, base string, info *sharing.ViewerInfo, feedback bool, report string) {
 	ct := f.ContentType
 	raw := selfRef(base + "/" + url.PathEscape(f.Path))
 	d := fileData{Name: f.Path, Type: strings.Split(ct, ";")[0], Raw: raw, Download: raw + "?download", Size: f.Size, Latest: "/"}
@@ -161,6 +177,7 @@ func (p *pages) fileViewer(w http.ResponseWriter, sh *sharing.Service, f *store.
 		// The file page lives at "/" only; its version links point there.
 		panel := panelFor(*info, &url.URL{Path: "/"})
 		panel.Feedback = feedback
+		panel.Report = report
 		d.Info = &panel
 		if info.Version != info.Current {
 			d.OldVersion = info.Version
@@ -195,7 +212,7 @@ func (p *pages) listing(w http.ResponseWriter, dir string, entries []sharing.Dir
 
 // Apex renders the content-domain landing page.
 func (p *pages) apex(w http.ResponseWriter) {
-	p.render(w, http.StatusOK, "apex.html", "redrop", "/", nil)
+	p.render(w, http.StatusOK, "apex.html", "redrop", "/", map[string]string{"Report": p.reportLink("")})
 }
 
 func humanBytes(n int64) string {

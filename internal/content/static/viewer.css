@@ -55,6 +55,7 @@ body.rd-viewer{margin:0;height:100vh;height:100dvh;display:flex;flex-direction:c
 @media (pointer:coarse){.rd-fb button{min-height:40px}}
 .rd-foot{display:flex;align-items:center;gap:6px;margin-top:10px;padding-top:8px;border-top:1px solid var(--rd-bd);color:var(--rd-mut);font-size:12px}
 .rd-foot img{width:16px;height:16px}
+.rd-report{margin-left:auto;color:inherit}
 @media (prefers-reduced-motion:no-preference){.rd-panel:popover-open{animation:rd-in .12s ease-out}}
 @keyframes rd-in{from{opacity:0;transform:translateY(4px)}}
 

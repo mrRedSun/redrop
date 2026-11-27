@@ -84,6 +84,7 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	// lease is held never opens the stream.
 	data.Info.Live = data.OldVersion == 0 && h.sharing.Live(a)
 	self := h.selfOrigin(a)
+	data.Info.Report = h.pages.reportLink(self + selfRef(r.URL.RequestURI()))
 	// frame-src also governs where the frame may navigate, so it allows the
 	// web at large; the viewer itself loads nothing but its own two files.
 	navigable := "https:"
@@ -118,8 +119,9 @@ type viewerData struct {
 type panelData struct {
 	sharing.ViewerInfo
 	Revisions []revisionRow
-	Feedback  bool // the panel holds the feedback form
-	Live      bool // the viewer page opens the live reload stream
+	Feedback  bool   // the panel holds the feedback form
+	Report    string // the report form for this page, on the app origin
+	Live      bool   // the viewer page opens the live reload stream
 }
 
 // feedbackConnect lets a page with the feedback form post to the

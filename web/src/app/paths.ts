@@ -15,6 +15,9 @@ export const paths = {
   adminUsers: '/admin/users',
   adminInvites: '/admin/invites',
   adminArtifacts: '/admin/artifacts',
+  adminReports: '/admin/reports',
+  /** Public abuse report form; links from the content domain add `#url=<page>`. */
+  report: '/report',
   // One-time link prefixes (the secret token follows).
   setupPrefix: '/setup/',
   invitePrefix: '/invite/',

@@ -384,6 +384,57 @@ type AdminArtifactUpdate struct {
 	Revoked bool `json:"revoked" description:"Set or clear the administrator's revocation; the owner's own revocation is unaffected"`
 }
 
+// --- abuse reports (DESIGN.md "Abuse handling") ---
+
+// ReportRequest is a visitor's abuse report. No account is needed.
+type ReportRequest struct {
+	URL      string `json:"url" description:"Address of the shared page, on this server's content domain"`
+	Category string `json:"category" description:"phishing, malware, illegal, spam, or other"`
+	Details  string `json:"details,omitempty" description:"What is wrong, up to 2000 characters"`
+	Contact  string `json:"contact,omitempty" description:"How to reach the reporter, optional, up to 200 characters"`
+}
+
+// Report is one entry of the admin abuse queue. Details, Contact and the
+// finding text are untrusted; render them as text only.
+type Report struct {
+	ID             string         `json:"id"`
+	Source         string         `json:"source" description:"visitor (the report form) or system (an upload check)"`
+	Category       string         `json:"category"`
+	Details        string         `json:"details" description:"Untrusted: the reporter's text, or the upload check's finding"`
+	Contact        string         `json:"contact" description:"Untrusted and unverified"`
+	ReportedURL    string         `json:"reported_url" description:"Visitor reports: the link as submitted (opening it counts a view); empty for system reports"`
+	Version        int            `json:"version" description:"System reports: the flagged version; 0 otherwise"`
+	Status         string         `json:"status" description:"open, resolved, or dismissed"`
+	CreatedAt      time.Time      `json:"created_at"`
+	ClosedAt       *time.Time     `json:"closed_at"`
+	ClosedBy       string         `json:"closed_by"`
+	ArtifactID     string         `json:"artifact_id"`
+	Artifact       *Artifact      `json:"artifact" description:"Metadata only, without a link; null once deleted"`
+	OwnerUsername  string         `json:"owner_username"`
+	OwnerSuspended bool           `json:"owner_suspended" description:"The owner's account is disabled"`
+	History        []ReportAction `json:"history" description:"Audit log of the actions on this report, oldest first"`
+}
+
+// ReportAction is one audited action on a report.
+type ReportAction struct {
+	At     time.Time `json:"at"`
+	Actor  string    `json:"actor"`
+	Action string    `json:"action" description:"report.resolved, report.dismissed, report.open, artifact.revoke, or user.suspend"`
+	Detail string    `json:"detail"`
+}
+
+type ReportList struct {
+	Items    []Report `json:"items"`
+	Total    int      `json:"total" description:"Reports matching the status and source filter, across all pages"`
+	Page     int      `json:"page" description:"1-based page number"`
+	PageSize int      `json:"page_size" description:"Reports per page"`
+}
+
+// ReportStatusUpdate resolves, dismisses or reopens a report.
+type ReportStatusUpdate struct {
+	Status string `json:"status" description:"open, resolved, or dismissed"`
+}
+
 // LiveLease is a watch session's hold on live reload (DESIGN.md "Live
 // reload"): while one is unexpired, viewers of the current version reload
 // when a new version becomes current.

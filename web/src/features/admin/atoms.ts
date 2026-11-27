@@ -1,11 +1,11 @@
 import { Atom } from 'effect/reactivity'
 import { mutation, query } from '@/runtime/runtime'
 import * as endpoints from './endpoints'
-import { toCreateInviteRequest, toUpdateUserRequest, type AdminArtifact, type CreateInviteValues, type EditUserValues, type ResetLinkValues } from './schemas'
+import { toCreateInviteRequest, toUpdateUserRequest, type AdminArtifact, type CreateInviteValues, type EditUserValues, type ReportFilter, type ReportStatus, type ResetLinkValues } from './schemas'
 
 declare module 'effect/reactivity/Reactivity' {
   interface Keys {
-    /** Every admin read (stats, users, invites, all-artifact metadata). */
+    /** Every admin read (stats, users, invites, all-artifact metadata, reports). */
     readonly admin: never
   }
 }
@@ -57,4 +57,25 @@ export const deleteArtifact = Atom.family((id: string) =>
 
 export const endTunnel = Atom.family((id: string) =>
   mutation((_: void) => endpoints.endTunnel(id), { invalidates: ['admin', 'artifacts'], success: 'Tunnel ended; revoke it to keep it off' }),
+)
+
+/** Key: `${status}|${source}|${page}`. Only scalar keys enter the atom family. */
+export const reports = Atom.family((key: string) => {
+  const [status, source, page] = key.split('|')
+  return query(['admin'], endpoints.reports(status as ReportFilter['status'], source as ReportFilter['source'], Number(page)))
+})
+export const reportsKey = (filter: ReportFilter) => `${filter.status}|${filter.source}|${filter.page}`
+
+const reportDone: Record<ReportStatus, string> = { open: 'Report reopened', resolved: 'Report resolved', dismissed: 'Report dismissed' }
+
+export const setReportStatus = Atom.family((id: string) =>
+  mutation((status: ReportStatus) => endpoints.setReportStatus(id, { status }), { invalidates: ['admin'], success: (_, status) => reportDone[status] }),
+)
+
+export const revokeReported = Atom.family((id: string) =>
+  mutation((_: void) => endpoints.revokeReported(id), { invalidates: ['admin', 'artifacts'], success: 'Artifact revoked' }),
+)
+
+export const suspendReportedOwner = Atom.family((id: string) =>
+  mutation((_: void) => endpoints.suspendReportedOwner(id), { invalidates: ['admin', 'artifacts'], success: 'Owner suspended' }),
 )

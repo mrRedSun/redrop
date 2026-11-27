@@ -438,6 +438,52 @@ func TestTunnelModeration(t *testing.T) {
 	}
 }
 
+// TestReportQueueActionsEndTunnels: the moderation queue's revoke and
+// suspend act straight in the store, so they must still end the owner's
+// connected tunnels (the accounts path does it for the Users page).
+func TestReportQueueActionsEndTunnels(t *testing.T) {
+	f := newTunnelFixture(t, nil)
+	userToken := f.h.secondUser("dev")
+	user := client.New(f.h.srv.URL, userToken)
+	a, err := user.CreateTunnel(context.Background(), &api.CreateTunnelRequest{Title: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := f.connect(user, a)
+	expectStatus(t, f.h.report("192.0.2.9", phishing(a.URL)), 202, "report the tunnel")
+	rep := f.h.reports("")[0]
+
+	// Revoke from the queue ends the connection like the artifact page does.
+	r := f.h.do("POST", "/api/v1/admin/reports/"+rep.ID+"/revoke", nil, true)
+	expectStatus(t, r, 200, "revoke from the queue")
+	var ended *client.TunnelEndedError
+	if err := run.ended(t); !errors.As(err, &ended) || ended.Reason != "an administrator revoked the link" {
+		t.Fatalf("RunTunnel after the queue's revoke: %v", err)
+	}
+	if err := user.RunTunnel(context.Background(), client.TunnelOptions{ID: a.ID, Target: f.target()}); client.StatusOf(err) != http.StatusGone {
+		t.Fatalf("reconnecting after the queue's revoke: %v", err)
+	}
+
+	// Suspend from the queue ends the owner's next tunnel too, for good.
+	a2, err := user.CreateTunnel(context.Background(), &api.CreateTunnelRequest{Title: "demo 2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The owner's account is disabled by the first suspension below, so the
+	// second report is filed while the tunnel is still connectable.
+	expectStatus(t, f.h.report("192.0.2.10", phishing(a2.URL)), 202, "report the second tunnel")
+	run = f.connect(user, a2)
+	rep2 := f.h.reports("")[0]
+	r = f.h.do("POST", "/api/v1/admin/reports/"+rep2.ID+"/suspend", nil, true)
+	expectStatus(t, r, 200, "suspend from the queue")
+	if err := run.ended(t); !errors.As(err, &ended) || ended.Reason != "the account was disabled" {
+		t.Fatalf("RunTunnel after the queue's suspend: %v", err)
+	}
+	if err := user.RunTunnel(context.Background(), client.TunnelOptions{ID: a2.ID, Target: f.target()}); client.StatusOf(err) != http.StatusUnauthorized {
+		t.Fatalf("a suspended owner's token connecting: %v", err)
+	}
+}
+
 func TestTunnelEndsWhenItsTokenIsDeleted(t *testing.T) {
 	f := newTunnelFixture(t, nil)
 	r := f.h.do("POST", "/api/v1/tokens", api.CreateTokenRequest{Name: "tunnel-token"}, true)

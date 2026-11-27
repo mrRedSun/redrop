@@ -236,8 +236,10 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 		}
 		n := now()
 		if err := s.withNewSlug(func(slug string) error {
-			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, feedback, last_version)
-			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,1)`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions, na.Feedback)
+			// An owner suspended while this publication ran gets an artifact
+			// revoked from the start (DESIGN.md "Abuse handling").
+			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, feedback, last_version, admin_revoked)
+			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,1,(SELECT disabled FROM users WHERE id = ?))`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions, na.Feedback, na.UserID)
 			return err
 		}); err != nil {
 			return err

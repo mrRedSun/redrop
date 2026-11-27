@@ -10,6 +10,11 @@ import {
   CreateInviteRequest,
   CreatedInvite,
   InviteList,
+  Report,
+  ReportList,
+  ReportStatusUpdate,
+  type ReportStatusFilter,
+  type ReportSourceFilter,
   ResetLink,
   Stats,
   User,
@@ -51,3 +56,18 @@ export const tunnels = RedropApi.use((api) => api.call({ method: 'GET', path: ['
 
 /** Ends a tunnel's connection; the owner may start it again (revoke keeps it off). */
 export const endTunnel = (id: string) => RedropApi.use((api) => api.call({ method: 'DELETE', path: ['admin', 'tunnels', id] }))
+
+export const reports = (status: ReportStatusFilter, source: ReportSourceFilter = 'all', page = 1) =>
+  RedropApi.use((api) => api.call({ method: 'GET', path: ['admin', 'reports'], query: { status, source, page: String(page) }, response: ReportList })).pipe(
+    Effect.map((result) => ({ ...result, items: items(result) })),
+  )
+
+export const setReportStatus = (id: string, req: typeof ReportStatusUpdate.Type) =>
+  RedropApi.use((api) => api.call({ method: 'PATCH', path: ['admin', 'reports', id], body: json(ReportStatusUpdate, req), response: Report }))
+
+/** The administrator's revocation of the reported artifact; resolves its open reports. */
+export const revokeReported = (id: string) => RedropApi.use((api) => api.call({ method: 'POST', path: ['admin', 'reports', id, 'revoke'], response: Report }))
+
+/** Disables the owner's account and revokes all of its artifacts; resolves their open reports. */
+export const suspendReportedOwner = (id: string) =>
+  RedropApi.use((api) => api.call({ method: 'POST', path: ['admin', 'reports', id, 'suspend'], response: Report }))

@@ -487,7 +487,7 @@ func (h *Handler) serveContent(w http.ResponseWriter, r *http.Request, a *store.
 			v := h.sharing.ViewerInfo(r.Context(), a, snap)
 			info = &v
 		}
-		h.pages.fileViewer(w, h.sharing, t.File, h.selfOrigin(a), base, info, info != nil && h.sharing.FeedbackOpen(a))
+		h.pages.fileViewer(w, h.sharing, t.File, h.selfOrigin(a), base, info, info != nil && h.sharing.FeedbackOpen(a), h.pages.reportLink(h.selfOrigin(a)+selfRef(r.URL.RequestURI())))
 	case sharing.TargetListing:
 		h.pages.listing(w, t.Dir, h.sharing.ListDir(r.Context(), snap, t.Dir))
 	case sharing.TargetRedirect:
@@ -645,13 +645,16 @@ func safeNext(p string) string {
 	return p
 }
 
-// serveApex answers the bare content domain: landing page, robots, installers.
+// serveApex answers the bare content domain: landing page, robots,
+// security.txt, installers.
 func (h *Handler) serveApex(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/":
 		h.pages.apex(w)
 	case "/robots.txt":
 		RobotsTxt(w, r)
+	case SecurityTxtPath:
+		SecurityTxt(h.cfg, strings.TrimSuffix(h.cfg.ContentURL.String(), "/"))(w, r)
 	default:
 		h.install.ServeHTTP(w, r)
 	}

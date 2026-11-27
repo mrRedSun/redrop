@@ -62,7 +62,41 @@ CREATE TABLE feedback (
 );
 CREATE INDEX feedback_artifact ON feedback(artifact_id, created_at);`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7}
+// schemaV8 adds abuse reports and the moderation audit log (DESIGN.md
+// "Abuse handling"). A report names its artifact without a foreign key, so
+// it and its history outlive the artifact.
+const schemaV8 = `CREATE TABLE reports (
+    id          TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    version     INTEGER NOT NULL DEFAULT 0,
+    kind        TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    category    TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT '',
+    contact     TEXT NOT NULL DEFAULT '',
+    network     TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  INTEGER NOT NULL,
+    closed_at   INTEGER,
+    closed_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX reports_status ON reports(status, created_at);
+CREATE INDEX reports_artifact ON reports(artifact_id, status);
+CREATE TABLE audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          INTEGER NOT NULL,
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    report_id   TEXT NOT NULL DEFAULT '',
+    artifact_id TEXT NOT NULL DEFAULT '',
+    user_id     TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX audit_report ON audit(report_id);`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8}
 
 var ErrNotFound = errors.New("not found")
 

@@ -27,6 +27,8 @@ export const router = createBrowserRouter([
           { path: `${paths.setupPrefix}:token`, loader: () => (prefetch(auth.config), null), lazy: () => import('@/features/onboarding/pages/setup-page') },
           { path: `${paths.invitePrefix}:token`, lazy: () => import('@/features/onboarding/pages/invite-page') },
           { path: `${paths.resetPrefix}:token`, lazy: () => import('@/features/onboarding/pages/reset-page') },
+          // Public, signed in or not: visitors of shared links report abuse here.
+          { path: paths.report, lazy: () => import('@/features/reports/pages/report-page') },
         ],
       },
       {
@@ -63,6 +65,7 @@ export const router = createBrowserRouter([
               { path: paths.adminUsers, lazy: () => import('@/features/admin/pages/users-page') },
               { path: paths.adminInvites, lazy: () => import('@/features/admin/pages/invites-page') },
               { path: paths.adminArtifacts, lazy: () => import('@/features/admin/pages/artifacts-page') },
+              { path: paths.adminReports, lazy: () => import('@/features/admin/pages/reports-page') },
             ],
           },
           { path: '*', Component: NotFoundPage },
