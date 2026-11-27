@@ -1332,6 +1332,14 @@ keeps the connection. The answer may take 30 seconds (yamux's default is
 many streams sending must not look like a dead peer. A dead peer is noticed
 within about a minute.
 
+**Frames from the CLI.** The server reads the header of every frame the
+CLI sends before yamux does (`internal/tunnel/frames.go`). yamux v0.1.2,
+the latest release, answers each ping in a goroutine of its own that may
+wait 30 seconds to send, so a ping flood is a goroutine flood: 400,000
+pings, under 5 MB, took a 768 MB server down in under a second. A CLI may
+send 10 pings at once and one a second after that, far more than its
+keepalive; past that its connection ends (`1008`).
+
 **Cancellation and stream ends.** The server never half-closes a stream
 it still uses, so its end of a stream means the request is over: the
 visitor left, the visitor stopped reading (below), or access changed.
@@ -1342,9 +1350,20 @@ visitor left, the visitor stopped reading (below), or access changed.
   still sends until the CLI's end arrives. Only then is the stream gone,
   and only then are its slots released (see "Limits"), so up to a
   window of unread data per stream is always counted by a slot.
-* A CLI that keeps such a stream open for 10 seconds is broken or
-  hostile; its connection ends (`1008`), which frees all its streams.
-  yamux's own close timer is off: it marks a timed-out stream closed
+* The CLI sees the server's end only when something reads the stream.
+  While it is still writing a request body to an app that hasn't read it
+  (an upload handler that authenticates or queues first), nothing does.
+  So a stream the CLI hasn't closed 10 seconds after the server's end is
+  reset, alone: the session drops it, with anything it buffered, and the
+  CLI is told to reset it too. Its slots go then; the connection and its
+  other streams go on. yamux v0.1.2 has no reset of its own, so the
+  server hands its session a reset frame between two of the CLI's frames,
+  as if the CLI had sent it, and sends one to the CLI between two of its
+  own; a ping makes the CLI send a frame soon.
+* After a reset the CLI may still deliver what it had in flight, at most
+  the stream's window (256 KiB). A CLI that sends more on a reset stream
+  ignored the reset: its connection ends (`1008`).
+* yamux's own close timer is off: it marks a timed-out stream closed
   before dropping it, and a FIN from the CLI in between tears the whole
   session down.
 * yamux v0.1.2 deadlocks when two goroutines read one stream at once, so
@@ -1358,7 +1377,7 @@ understands (`pkg/api`):
 | `1001` going away | server shutdown | reconnects |
 | `4001` | ended: revoked, deleted, expired, owner disabled, token deleted, or ended by an administrator | prints the reason and exits 7 |
 | `4002` | replaced by a newer connection of the same process | reconnects |
-| `1008` | protocol violation: the CLI opened a stream, or kept a closed one open | reconnects (an honest CLI never gets it) |
+| `1008` | protocol violation: the CLI opened a stream, pinged too often, or ignored a stream reset | reconnects (an honest CLI never gets it) |
 
 **Reconnects.** The CLI reconnects after any other failure with jittered
 exponential backoff from 1 to 30 seconds, reset after a connection that
@@ -1408,10 +1427,15 @@ The server prepares each request before it enters the tunnel:
   `Forwarded` and every `X-Forwarded-*` header (the visitor's, and
   Traefik's own such as `X-Forwarded-Server` and `-Port`); `X-Real-Ip`,
   `True-Client-Ip`, `Client-Ip`, `X-Client-Ip`, `X-Cluster-Client-Ip`,
-  `CDN-Loop`, every `CF-*` header, the configured client-IP and country
-  headers; every header whose name has an underscore, which CGI-style app
-  servers read as the dashed name (`X_Forwarded_For` would replace
-  `X-Forwarded-For`); and `Expect`.
+  `X-Forwarded` (no suffix), `Proxy-Client-Ip`, `WL-Proxy-Client-Ip`,
+  `Fastly-Client-Ip`, `X-Original-Forwarded-For`, `X-ProxyUser-Ip`, `Via`
+  (client addresses under the names proxies and app servers read),
+  `X-Original-Url`, `X-Rewrite-Url`, `X-Original-Host`, `X-Host` (URL and
+  host overrides some frameworks honour), `CDN-Loop`, every `CF-*`
+  header, the configured client-IP and country headers; every header
+  whose name has an underscore, which CGI-style app servers read as the
+  dashed name (`X_Forwarded_For` would replace `X-Forwarded-For`); and
+  `Expect`.
 * **Set:** `X-Forwarded-For` to the client address the server resolved for
   its rate limits (`REDROP_TRUSTED_PROXIES`, `REDROP_TRUSTED_HOPS`), never
   the visitor's own list; `X-Forwarded-Host` to the tunnel's host;
@@ -1441,6 +1465,8 @@ informational responses:
   `ReverseProxy` clears the header map after each 1xx it forwards, which
   would otherwise take `Cache-Control: private` and the rest off the
   final response.
+* **Trailers:** dropped. They would skip the rules below (a trailer
+  `Set-Cookie` with a `Domain`), and browsers make no use of them.
 
 * **`Set-Cookie`:** the `Domain` attribute is removed, so every cookie is
   host-only on the tunnel's own origin and can't reach other artifacts. A
@@ -1527,7 +1553,11 @@ count.
   768 MB. The admin view's `streams` are the slots in use.
 * **Visitors who stop reading.** Every write to the visitor, a hijacked
   WebSocket's included, must finish within the idle timeout, or the
-  request ends and its slots go.
+  request ends and its slots go. A visitor who reads very slowly is not
+  cut: a 32 KiB write within the idle timeout (about 330 bytes a second
+  at 100 s) keeps the request going, and so does an upload trickled in a
+  byte per idle period. Such a visitor holds that tunnel's slots, never
+  more than its 32, and the waiting bound keeps the queue short.
 * **Sizes.** A declared body over the limit gets `413` (request) or `502`
   (response) before anything is sent. A chunked body that grows past it
   is cut off there.
@@ -1625,8 +1655,9 @@ status (not a `103`) and duration.
   above. A hostile CLI can waste its own tunnel's slots (and with them
   some of the server-wide ones) and its owner's bandwidth. What it can
   make the server buffer is bounded by the slots, since every stream holds
-  one until it is gone; a stream it opens itself, or a closed one it
-  keeps open, ends its connection.
+  one until it is gone. A stream it opens itself, a ping flood, or data
+  on a stream it was told to reset ends its connection; a closed stream
+  it keeps open is reset after 10 seconds.
 * **Other artifacts on the content domain** are same-site. A tunnel can't
   set cookies for them (`Domain` removed). Their same-site requests to a
   tunnel are refused except navigations. They can still set
@@ -1652,11 +1683,15 @@ the multiplexer, reconnects and backoff, visitor cancellation, every
 limit, a WebSocket upgrade end to end, password, expiry and revoke parity
 with HTML artifacts, the offline page after the access check, header
 hygiene, and 300 MB each way through the tunnel with the heap staying
-bounded. They also cover a CLI that opens streams, 1xx responses and
-`Expect`, visitors who stop reading (responses and WebSockets) or leave
-with a full window, the shared response budget, an access change before
-the headers, the checks after registering, and the per-user budget. The e2e script tunnels a small HTTP and WebSocket server with a
-password set.
+bounded. They also cover a CLI that opens streams, floods pings (reading
+the answers or not) or ignores a stream reset, 1xx responses and
+`Expect`, response trailers, visitors who stop reading (responses and
+WebSockets) or leave with a full window, a stream stuck behind an app that
+doesn't read its upload (reset alone, the connection stays), a CLI that
+keeps writing after the server's end, the shared response budget, an
+access change before the headers, the checks after registering, and the
+per-user budget. The e2e script tunnels a small HTTP and WebSocket server
+with a password set.
 
 Rolling back the binary leaves tunnel artifacts in the database. An older
 server reads their kind as an unknown one and shows an empty file listing

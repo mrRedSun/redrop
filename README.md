@@ -221,15 +221,18 @@ so dev-server hot reload does. Nothing is added to the app's pages.
   Vite's host check passes); `X-Forwarded-Host` is the link's host,
   `X-Forwarded-For` the visitor's full address as the server resolved it,
   and `X-Forwarded-Proto` the link's scheme. Other forwarding and client-IP
-  headers, and header names with an underscore, are removed. redrop's own
-  cookies are never sent to the app, and a `Domain` on the app's cookies is
-  removed, as is a `Clear-Site-Data` from the app. `1xx` responses from the
-  app (such as `103 Early Hints`) are not passed on.
+  headers (`Forwarded`, `Via`, `X-Real-Ip`, `Proxy-Client-Ip` and the like),
+  URL and host overrides (`X-Original-Url`, `X-Host`, ...), and header names
+  with an underscore, are removed. redrop's own cookies are never sent to the
+  app, and a `Domain` on the app's cookies is removed, as is a
+  `Clear-Site-Data` from the app. `1xx` responses from the app (such as
+  `103 Early Hints`) and response trailers are not passed on.
 - **Limits** (server settings, below): 3 connected and 20 kept tunnels per
   user, 32 open requests per tunnel, 100 MB requests, 1 GB responses, 2 GB per
   user per hour over all their tunnels, and about 90 seconds for the app to
   start answering. A visitor who stops reading is cut after the idle
-  timeout.
+  timeout. A request stuck behind an app that hasn't read its upload is
+  reset on its own after the idle timeout; the tunnel stays connected.
 
 The server keeps connected tunnels in memory: run one redrop process. See
 [`docs/DESIGN.md`](docs/DESIGN.md#tunnels) for the protocol and threat model.
