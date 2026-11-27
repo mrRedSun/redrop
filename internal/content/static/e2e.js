@@ -60,14 +60,18 @@
   // rest. A fragment without a key is all rest. Any fragment that could
   // hold a key, whole or damaged (keyAttempt), is a key attempt: unless it
   // is exactly that form it gives {damaged: true} and no rest, so no part of
-  // it can reach the frame (review 33 re-check B-2b'). internal/e2e's
-  // SplitFragment follows the same rule; internal/e2e/testdata/fragments.json
-  // holds the cases both are tested against.
+  // it can reach the frame (review 33 re-check B-2b'). A rest that holds
+  // any 12 characters of the key in a row, in either case and however split
+  // from the rest, is damaged too (a second, damaged copy of the link).
+  // internal/e2e's SplitFragment follows the same rule;
+  // internal/e2e/testdata/fragments.json holds the cases both are tested
+  // against.
   function splitFragment(fragment) {
     var key = fragment.slice(2, 2 + KEY_TEXT), rest = fragment.slice(2 + KEY_TEXT)
     if (fragment.slice(0, 2) === 'k=' && key.length === KEY_TEXT && KEY_CHARS.test(key)) {
       if (rest === '') return { key: key, rest: '', damaged: false }
-      if (rest.charAt(0) === '&' && !keyAttempt(rest.slice(1))) return { key: key, rest: rest.slice(1), damaged: false }
+      var own = rest.slice(1)
+      if (rest.charAt(0) === '&' && !keyAttempt(own) && !holdsKeyText(own, key)) return { key: key, rest: own, damaged: false }
       return { key: null, rest: '', damaged: true }
     }
     if (keyAttempt(fragment)) return { key: null, rest: '', damaged: true }
@@ -87,22 +91,41 @@
     }
     return s
   }
-  // keyAttempt reports whether s could hold a key, whole or damaged: after
-  // decodeLenient, "k=" in any case at the start or after a character that
-  // is not a letter or digit, or a run of at least MIN_KEY_RUN key
-  // characters with both upper and lower case letters (a key that lost its
-  // "k="; lower-case anchors and file names don't match).
+  // keyText is s as keyAttempt reads it: decoded, with every non-ASCII
+  // character and every escape left (of a non-ASCII byte) as a space.
+  var NON_ASCII = /%[89A-Fa-f][0-9A-Fa-f]|[^\x00-\x7F]/gu
+  function keyText(s) { return decodeLenient(s).replace(NON_ASCII, ' ') }
+  // keyAttempt reports whether s could hold a key, whole or damaged: in
+  // keyText, "k" in any case at the start or after a character that is not
+  // a letter or digit, then up to 3 characters that are neither, then "="
+  // or ":", or a run of at least MIN_KEY_RUN key characters with both upper
+  // and lower case letters (a key that lost its "k="; lower-case anchors and
+  // file names don't match).
   var MIN_KEY_RUN = 40
-  var K_PARAM = /(^|[^A-Za-z0-9])[kK]=/
+  var K_PARAM = /(^|[^A-Za-z0-9])[kK][^A-Za-z0-9=:]{0,3}[=:]/
   var KEY_RUN = /[A-Za-z0-9_-]{40,}/g
   function keyAttempt(s) {
-    var d = decodeLenient(s)
+    var d = keyText(s)
     if (K_PARAM.test(d)) return true
     var runs = d.match(KEY_RUN) || []
     for (var i = 0; i < runs.length; i++) {
       if (runs[i].length >= MIN_KEY_RUN && /[A-Z]/.test(runs[i]) && /[a-z]/.test(runs[i])) return true
     }
     return false
+  }
+  // holdsKeyText reports whether s, read as keyAttempt reads it, holds any
+  // 12 characters of key in a row, in either case.
+  function holdsKeyText(s, key) {
+    var d = keyText(s).toLowerCase(), k = key.toLowerCase()
+    for (var i = 0; i + 12 <= k.length; i++) if (d.indexOf(k.slice(i, i + 12)) >= 0) return true
+    return false
+  }
+  // queryKeyAttempt reports whether a raw query (without "?") could hold a
+  // key, by keyAttempt, once redrop's own parameters are taken out: a link
+  // whose "#" became "?" (review 33 re-check B-2b″).
+  var OWN_PARAMS = { 'redrop-e2e': true, 'redrop-version': true, 'redrop-info': true }
+  function queryKeyAttempt(raw) {
+    return keyAttempt(raw.split('&').filter(function (p) { return !OWN_PARAMS[p.split('=')[0]] }).join('&'))
   }
   // hasEncodedFragment reports a path that holds a "#", encoded once or
   // more: a link whose fragment, key included, went into the path (review
@@ -395,6 +418,7 @@
     keys: keys,
     splitFragment: splitFragment,
     keyAttempt: keyAttempt,
+    queryKeyAttempt: queryKeyAttempt,
     hasEncodedFragment: hasEncodedFragment,
     decodeLenient: decodeLenient,
     importKey: importKey,

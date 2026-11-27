@@ -1,5 +1,5 @@
 {
-  "comment": "Link fragments and paths for the key-attempt rule (DESIGN.md \"Keys and links\"). internal/e2e (SplitFragment, KeyAttempt, HasEncodedFragment) and the viewer's e2e.js (splitFragment, keyAttempt, hasEncodedFragment) are both tested against every case. Edit by hand.",
+  "comment": "Link fragments and paths for the key-attempt rule (DESIGN.md \"Keys and links\"). internal/e2e (SplitFragment, KeyAttempt, HasEncodedFragment) and the viewer's e2e.js (splitFragment, keyAttempt, hasEncodedFragment), and QueryKeyAttempt / queryKeyAttempt for the queries, are both tested against every case. Edit by hand.",
   "key": "GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
   "fragments": [
     {
@@ -308,6 +308,114 @@
       "rest": "",
       "damaged": true,
       "why": "a long mixed-case run (the accepted cost)"
+    },
+    {
+      "fragment": "k%20=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "an encoded space before ="
+    },
+    {
+      "fragment": "k =GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a space before ="
+    },
+    {
+      "fragment": "k:GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": ": for ="
+    },
+    {
+      "fragment": "k%3AGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "encoded : for ="
+    },
+    {
+      "fragment": "k\u200b=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a zero-width space before ="
+    },
+    {
+      "fragment": "k%E2%80%8B=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "an encoded zero-width space before ="
+    },
+    {
+      "fragment": "%E2%80%8Bk=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "an encoded zero-width space before k"
+    },
+    {
+      "fragment": "k%C2%A0=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "an encoded no-break space before ="
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&GdqNb0gHozULQzBY7iF_/9EnR7Vc_WlGkh087DmLiW2I",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a second copy of the key, split, in the rest"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&/a.html#gdqnb0ghozulqzby7if_9enr7vc_wlgkh087dmliw2i",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "a second copy of the key, lower-cased, in the rest's fragment"
+    },
+    {
+      "fragment": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I&/docs/ULQzBY7iF_9EnR.html",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "12 or more of the key's characters in the rest"
+    },
+    {
+      "fragment": "k:1",
+      "key": null,
+      "rest": "",
+      "damaged": true,
+      "why": "k: in an anchor (the accepted cost)"
+    },
+    {
+      "fragment": "k-1",
+      "key": null,
+      "rest": "k-1",
+      "damaged": false
+    },
+    {
+      "fragment": "kb=1",
+      "key": null,
+      "rest": "kb=1",
+      "damaged": false
+    },
+    {
+      "fragment": "/docs/kb:1",
+      "key": null,
+      "rest": "/docs/kb:1",
+      "damaged": false
+    },
+    {
+      "fragment": "kind=report",
+      "key": null,
+      "rest": "kind=report",
+      "damaged": false
     }
   ],
   "paths": [
@@ -346,6 +454,68 @@
     {
       "path": "/%25%32%33k=x",
       "encoded_fragment": true
+    }
+  ],
+  "queries": [
+    {
+      "query": "k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "x=1&k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "K=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "k%3DGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "k%253DGdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "redrop-e2e=1&k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "&k=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "q=GdqNb0gHozULQzBY7iF_9EnR7Vc_WlGkh087DmLiW2I",
+      "key_attempt": true
+    },
+    {
+      "query": "",
+      "key_attempt": false
+    },
+    {
+      "query": "redrop-e2e=1",
+      "key_attempt": false
+    },
+    {
+      "query": "redrop-e2e=1&redrop-version=2",
+      "key_attempt": false
+    },
+    {
+      "query": "redrop-info=0",
+      "key_attempt": false
+    },
+    {
+      "query": "q=search&page=2",
+      "key_attempt": false
+    },
+    {
+      "query": "kind=report&sort=desc",
+      "key_attempt": false
+    },
+    {
+      "query": "x=1",
+      "key_attempt": false
     }
   ]
 }

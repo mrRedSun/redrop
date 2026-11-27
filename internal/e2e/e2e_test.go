@@ -226,6 +226,10 @@ type fragmentCases struct {
 		Path            string
 		EncodedFragment bool `json:"encoded_fragment"`
 	}
+	Queries []struct {
+		Query      string
+		KeyAttempt bool `json:"key_attempt"`
+	}
 }
 
 func TestFragments(t *testing.T) {
@@ -260,6 +264,14 @@ func TestFragments(t *testing.T) {
 	for _, c := range cases.Paths {
 		if got := HasEncodedFragment(c.Path); got != c.EncodedFragment {
 			t.Errorf("HasEncodedFragment(%q) = %v", c.Path, got)
+		}
+	}
+	if len(cases.Queries) < 10 {
+		t.Fatalf("fragments.json has %d queries", len(cases.Queries))
+	}
+	for _, c := range cases.Queries {
+		if got := QueryKeyAttempt(c.Query); got != c.KeyAttempt {
+			t.Errorf("QueryKeyAttempt(%q) = %v", c.Query, got)
 		}
 	}
 	if DecodeLenient("%E0%A4%A%25%32%33%") != "%E0%A4%A#%" {

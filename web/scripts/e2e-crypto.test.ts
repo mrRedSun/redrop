@@ -21,6 +21,7 @@ export type RedropE2E = {
   }
   splitFragment(f: string): { key: string | null; rest: string; damaged: boolean }
   keyAttempt(s: string): boolean
+  queryKeyAttempt(raw: string): boolean
   hasEncodedFragment(path: string): boolean
   decodeLenient(s: string): string
   importKey(text: string): Promise<CryptoKey>
@@ -192,6 +193,7 @@ await test('keys: only 43 canonical base64url characters', async () => {
 const fragmentCases = JSON.parse(readFileSync(new URL('../../internal/e2e/testdata/fragments.json', import.meta.url), 'utf8')) as {
   fragments: Array<{ fragment: string; key: string | null; rest: string; damaged: boolean; why?: string }>
   paths: Array<{ path: string; encoded_fragment: boolean }>
+  queries: Array<{ query: string; key_attempt: boolean }>
 }
 
 await test('fragments: the key, then & and the page or the artifact\'s own fragment; anything that could hold a key is damaged', () => {
@@ -201,6 +203,8 @@ await test('fragments: the key, then & and the page or the artifact\'s own fragm
     assert.equal(c.key === null && E.keyAttempt(c.fragment), c.damaged, c.fragment)
   }
   for (const c of fragmentCases.paths) assert.equal(E.hasEncodedFragment(c.path), c.encoded_fragment, c.path)
+  assert.ok(fragmentCases.queries.length >= 10)
+  for (const c of fragmentCases.queries) assert.equal(E.queryKeyAttempt(c.query), c.key_attempt, c.query)
   assert.equal(E.decodeLenient('%E0%A4%A%25%32%33%'), '%E0%A4%A#%')
 })
 

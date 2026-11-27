@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -317,16 +318,18 @@ func Link(artifactURL string, k Key) string {
 // followed by "&" and the rest. A fragment without a key is all rest. Any
 // fragment that could hold a key, whole or damaged, is a key attempt
 // (KeyAttempt): unless it is exactly that form, ok is false and rest is
-// empty, so no part of it is passed on as the artifact's own fragment. The
-// viewer's splitFragment (internal/content/static/e2e.js) follows the same
-// rule; testdata/fragments.json holds the cases both test.
+// empty, so no part of it is passed on as the artifact's own fragment. A
+// rest that holds any 12 characters of the key in a row, in either case
+// and however split from the rest, is damaged too (a second, damaged copy
+// of the link). The viewer's splitFragment (internal/content/static/e2e.js)
+// follows the same rule; testdata/fragments.json holds the cases both test.
 func SplitFragment(fragment string) (key, rest string, ok bool) {
 	if len(fragment) >= 2+KeyTextLen && strings.HasPrefix(fragment, "k=") && isKeyText(fragment[2:2+KeyTextLen]) {
 		key, rest = fragment[2:2+KeyTextLen], fragment[2+KeyTextLen:]
 		switch {
 		case rest == "":
 			return key, "", true
-		case rest[0] == '&' && !KeyAttempt(rest[1:]):
+		case rest[0] == '&' && !KeyAttempt(rest[1:]) && !holdsKeyText(rest[1:], key):
 			return key, rest[1:], true
 		}
 		return "", "", false
@@ -354,20 +357,31 @@ func isKeyChar(c byte) bool {
 // case, that KeyAttempt takes for a key without its "k=".
 const minKeyRun = 40
 
-// KeyAttempt reports whether s, a fragment or another part of a link, could
-// hold a key, whole or damaged (review 33 re-check B-2b'). It looks at s
-// percent-decoded as often as it decodes (DecodeLenient) and matches:
-//   - "k=" in any case, at the start or after a character that is not a
-//     letter or digit ("K=", "&k=", " k=", "x&k=", "/docs?k=", and the
-//     encoded forms "k%3D", "%6B=", "k%253D");
+// KeyAttempt reports whether s, a fragment, a query or another part of a
+// link, could hold a key, whole or damaged (review 33 re-checks B-2b' and
+// B-2b″). It looks at s percent-decoded as often as it decodes
+// (DecodeLenient), with every non-ASCII character and every escape left
+// (of a non-ASCII byte) read as a space, and matches:
+//   - "k" in any case, at the start or after a character that is not a
+//     letter or digit, then up to 3 characters that are neither, then "="
+//     or ":" ("K=", "&k=", " k=", "x&k=", "/docs?k=", "k =", "k:", and
+//     the encoded forms "k%3D", "%6B=", "k%253D", "k%E2%80%8B=");
 //   - a run of at least 40 key characters with both upper and lower case
 //     letters, such as a key that lost its "k=". Random keys have both;
 //     lower-case heading anchors and file names don't.
 func KeyAttempt(s string) bool {
-	d := DecodeLenient(s)
-	for i := 0; i+1 < len(d); i++ {
-		if (d[i] == 'k' || d[i] == 'K') && d[i+1] == '=' && (i == 0 || !isAlnum(d[i-1])) {
-			return true
+	d := keyText(s)
+	for i := 0; i < len(d); i++ {
+		if (d[i] != 'k' && d[i] != 'K') || (i > 0 && isAlnum(d[i-1])) {
+			continue
+		}
+		for j := i + 1; j < len(d) && j <= i+4; j++ {
+			if d[j] == '=' || d[j] == ':' {
+				return true
+			}
+			if isAlnum(d[j]) {
+				break
+			}
 		}
 	}
 	run, upper, lower := 0, false, false
@@ -384,6 +398,56 @@ func KeyAttempt(s string) bool {
 		run, upper, lower = 0, false, false
 	}
 	return false
+}
+
+// keyText is s as KeyAttempt reads it: decoded, with non-ASCII characters
+// and the escapes of non-ASCII bytes as spaces (one per character or
+// escape), so they separate like any other punctuation.
+func keyText(s string) string {
+	d := DecodeLenient(s)
+	var b strings.Builder
+	for i := 0; i < len(d); {
+		switch {
+		case d[i] == '%' && i+2 < len(d) && isHex(d[i+1]) && isHex(d[i+2]) && d[i+1] >= '8':
+			b.WriteByte(' ')
+			i += 3
+		case d[i] >= utf8.RuneSelf:
+			_, n := utf8.DecodeRuneInString(d[i:])
+			b.WriteByte(' ')
+			i += n
+		default:
+			b.WriteByte(d[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+// holdsKeyText reports whether s, read as KeyAttempt reads it, holds any 12
+// characters of key in a row, in either case.
+func holdsKeyText(s, key string) bool {
+	d := strings.ToLower(keyText(s))
+	k := strings.ToLower(key)
+	for i := 0; i+12 <= len(k); i++ {
+		if strings.Contains(d, k[i:i+12]) {
+			return true
+		}
+	}
+	return false
+}
+
+// QueryKeyAttempt reports whether a raw query (without "?") could hold a
+// key, by KeyAttempt, once redrop's own parameters are taken out: a link
+// whose "#" became "?" (review 33 re-check B-2b″).
+func QueryKeyAttempt(rawQuery string) bool {
+	var rest []string
+	for _, p := range strings.Split(rawQuery, "&") {
+		name, _, _ := strings.Cut(p, "=")
+		if name != "redrop-e2e" && name != "redrop-version" && name != "redrop-info" {
+			rest = append(rest, p)
+		}
+	}
+	return KeyAttempt(strings.Join(rest, "&"))
 }
 
 func isAlnum(c byte) bool {
