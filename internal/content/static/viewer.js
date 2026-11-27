@@ -282,20 +282,18 @@
   else if (location.hash) frame.src = frame.getAttribute('src') + location.hash
 
   // ---- end-to-end encrypted links ----
-  // The key comes from the link's fragment (#k=<key>, optionally followed
-  // by & and the page or the artifact's own fragment). The artifact runs
-  // on this origin and could read anything this page keeps, so the key's
-  // text is never kept: it is imported as a non-extractable CryptoKey,
-  // checked, and stored as that in IndexedDB; the fragment leaves the
-  // address bar; and the page reloads, so its navigation records (the
-  // Performance and Navigation APIs) never held the key either. Only that
-  // reloaded page, which reads the CryptoKey back, creates the frame.
+  // The key never reaches this origin as text. The link points at the app
+  // origin's intake page (https://<app>/e/<slug>#k=<key>), which imports it
+  // as a non-extractable CryptoKey and hands that, through a helper window
+  // on this origin, to this origin's IndexedDB as the intake key (see
+  // e2e-intake.js and e2e-helper.js). The viewer adopts it for the artifact
+  // once it matches the key check, and from then on reads it from there.
+  // Anything key-like in this page's own address is a damaged link.
   //
-  // Once the frame exists, the artifact's scripts share this window and
-  // could see any URL it gets, so the key must never arrive in it: the
+  // Once the frame exists, the artifact's scripts share this window: the
   // navigation guard (guardNavigation) stops every change of this page's
-  // address that the viewer didn't make. Opening the full link in this tab
-  // is then refused, and the visitor is asked to open it in a new tab.
+  // address that the viewer didn't make, so no URL ever reaches it by a
+  // fragment change.
   function bootE2E() {
     var E = window.RedropE2E
     var note = doc.getElementById('rd-e2e-msg')
@@ -377,20 +375,11 @@
       return
     }
     if (parts.key) {
-      // The link's key: off the address bar at once, then kept as a
-      // CryptoKey, then a reload without it.
-      var text = parts.key
+      // Key text on this origin: not a link redrop gives out (they point at
+      // the app origin's intake page). It goes nowhere, not even into the
+      // key store.
       replaceAddress(clean)
-      if (!secure) {
-        show('This page is end-to-end encrypted. Browsers decrypt only on secure (HTTPS) pages that may use service workers, so it can\'t be opened here.')
-        return
-      }
-      E.importKey(text).then(function (k) {
-        return E.keyCheck(k, e2e.artifact).then(function (check) {
-          if (check !== e2e.check) throw coded('wrongkey')
-          return E.keys.put(e2e.artifact, k, Date.now())
-        })
-      }).then(function () { location.reload() }, failed)
+      failed(coded('key'))
       return
     }
     // The live viewer: always at its marked address before a frame exists.
@@ -463,7 +452,23 @@
       })
       button.hidden = false
     }
-    E.keys.get(e2e.artifact, Date.now()).then(function (k) {
+    // adopt takes the intake key the helper stored, if any, for this
+    // artifact once it passes the key check; it is never kept otherwise. A
+    // fresh hand-off comes first, before a key stored on an earlier visit.
+    function adopt() {
+      return E.keys.get(E.INTAKE_KEY, Date.now()).then(function (k) {
+        if (!k) return null
+        return E.keys.remove(E.INTAKE_KEY).then(function () {
+          return E.keyCheck(k, e2e.artifact)
+        }).then(function (check) {
+          if (check !== e2e.check) throw coded('wrongkey')
+          return E.keys.put(e2e.artifact, k, Date.now()).then(function () { return k })
+        })
+      })
+    }
+    adopt().then(function (k) {
+      return k || E.keys.get(e2e.artifact, Date.now())
+    }).then(function (k) {
       if (!k) throw coded('missing')
       key = k
       return E.keyCheck(k, e2e.artifact)

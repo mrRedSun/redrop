@@ -823,3 +823,87 @@ func TestGateScriptIsPinned(t *testing.T) {
 		t.Fatalf("the miss page allows scripts: %q", csp)
 	}
 }
+
+// Key intake on the app origin (B-2a″ of the third re-check): the link is
+// the app's /e/<slug> page, which holds no artifact data, looks nothing
+// up, counts no view and opens no gate. Its policy allows only its own
+// script and pinned style, and it is never cached, framed or referred. The
+// helper on the artifact's origin takes the key only from the app origin.
+func TestE2EIntakeOnTheAppOrigin(t *testing.T) {
+	h := newHarness(t)
+	c := client.New(h.srv.URL, h.setupAdmin())
+	ctx := context.Background()
+	page := writeFile(t, t.TempDir(), "page.html", "<title>Secret plans</title><p>"+e2eSecret+"</p>")
+	a, _, err := c.ShareE2E(ctx, &client.Source{Path: page}, client.PublishOptions{Password: "hunter22", Title: "Plans title"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := strings.TrimSuffix(strings.TrimPrefix(a.URL, "http://"), ".content.test/")
+	if a.E2ELink != "http://app.test/e/"+slug {
+		t.Fatalf("e2e_link %q for %s", a.E2ELink, a.URL)
+	}
+	plainFile := writeFile(t, t.TempDir(), "plain.html", "<p>plain</p>")
+	plain, err := c.Share(ctx, &client.Source{Path: plainFile}, client.PublishOptions{}, nil)
+	if err != nil || plain.E2ELink != "" {
+		t.Fatalf("a plaintext artifact has an e2e link: %+v %v", plain, err)
+	}
+
+	for _, s := range []string{slug, "amber-otter-quilt-river"} { // a real slug and one nobody has
+		r := h.raw("GET", "/e/"+s, "", nil)
+		b := body(r)
+		expectStatus(t, r, 200, "intake "+s)
+		hd := r.Header
+		if hd.Get("Cache-Control") != "no-store" || hd.Get("Referrer-Policy") != "no-referrer" || hd.Get("Cross-Origin-Opener-Policy") != "same-origin-allow-popups" {
+			t.Fatalf("intake headers: %v", hd)
+		}
+		csp := hd.Get("Content-Security-Policy")
+		style := b[strings.Index(b, "<style>")+len("<style>") : strings.Index(b, "</style>")]
+		sum := sha256.Sum256([]byte(style))
+		want := "default-src 'none'; script-src http://app.test/e2e/intake.js; style-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		if csp != want {
+			t.Fatalf("intake CSP\n%s\nwant\n%s", csp, want)
+		}
+		if !strings.Contains(b, `data-content="http://`+s+`.content.test/"`) || !strings.Contains(b, `<script src="/e2e/intake.js"></script>`) {
+			t.Fatalf("intake page: %s", b)
+		}
+		for _, leak := range []string{a.ID, "Plans title", "Secret plans", a.E2EKeyCheck, "password"} {
+			if strings.Contains(b, leak) {
+				t.Fatalf("the intake page holds %q", leak)
+			}
+		}
+	}
+	expectStatus(t, h.raw("GET", "/e/not_a_slug", "", nil), 404, "intake for a malformed slug")
+	r := h.raw("GET", "/e2e/intake.js", "", nil)
+	if js := body(r); r.StatusCode != 200 || !strings.Contains(js, "RedropE2E") || !strings.Contains(js, "rd-intake") || !strings.HasPrefix(r.Header.Get("Content-Type"), "text/javascript") {
+		t.Fatalf("intake script: %d %s", r.StatusCode, r.Header.Get("Content-Type"))
+	}
+
+	// The helper, on the artifact's host: no gate, no view, nothing of the
+	// artifact; it takes keys from the app origin only.
+	r = h.fetchContent(a.URL, "/__redrop/e2e-intake", nil, docHeaders...)
+	b := body(r)
+	expectStatus(t, r, 200, "helper")
+	if r.Header.Get("Cache-Control") != "no-store" || !strings.Contains(b, `data-app="http://app.test"`) || !strings.Contains(b, `<script src="/__redrop/e2e-intake.js"></script>`) {
+		t.Fatalf("helper: %v %s", r.Header, b)
+	}
+	if csp := r.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src http://"+slug+".content.test/__redrop/e2e-intake.js;") || !strings.Contains(csp, "frame-ancestors 'none'") || strings.Contains(csp, "unsafe") {
+		t.Fatalf("helper CSP %q", csp)
+	}
+	for _, leak := range []string{a.ID, "Plans title", a.E2EKeyCheck, "password"} {
+		if strings.Contains(b, leak) {
+			t.Fatalf("the helper holds %q", leak)
+		}
+	}
+	r = h.fetchContent(a.URL, "/__redrop/e2e-intake.js", nil, fetchHeaders...)
+	if js := body(r); r.StatusCode != 200 || !strings.Contains(js, "RedropE2E") || !strings.Contains(js, "redrop-e2e-key") {
+		t.Fatalf("helper script: %d", r.StatusCode)
+	}
+	expectStatus(t, h.fetchContent("http://content.test/", "/__redrop/e2e-intake", nil, docHeaders...), 404, "helper on the apex")
+	// The gate still stands in front of the artifact, and nothing counted a view.
+	if b := body(h.fetchContent(a.URL, "/", nil, docHeaders...)); !strings.Contains(b, "password") {
+		t.Fatal("the gate is gone")
+	}
+	if got, err := c.GetArtifact(ctx, a.ID); err != nil || got.Views != 0 {
+		t.Fatalf("views after intake and helper: %v %v", got, err)
+	}
+}

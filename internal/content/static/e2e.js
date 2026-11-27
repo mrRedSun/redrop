@@ -414,6 +414,10 @@
 
   var api = {
     BUFFER_LIMIT: BUFFER_LIMIT,
+    // INTAKE_KEY names the key the intake helper (e2e-helper.js) stores on
+    // an artifact's origin, until the viewer adopts it for the artifact.
+    // Artifact IDs are 16 base32 characters, so it never collides.
+    INTAKE_KEY: 'intake',
     KEY_TTL_MS: KEY_TTL_MS,
     keys: keys,
     splitFragment: splitFragment,

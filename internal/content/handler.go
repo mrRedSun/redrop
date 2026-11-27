@@ -152,6 +152,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.tooManyMisses(w)
 		return
 	}
+	if r.URL.Path == helperPath && slug != "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		h.e2eIntakeHelper(w, r, slug)
+		return
+	}
 	if r.Method == http.MethodPost && r.URL.Path == feedbackPath {
 		h.feedback(w, r, slug)
 		return

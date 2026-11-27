@@ -230,69 +230,91 @@ function page(browser: Browser, opts: { start: string; secure?: boolean; noNavig
 
 const anyKey = (s: string) => s.includes(vectors.key) || s.includes('#k=')
 
-// open follows a link the way a visitor's browser does: the first load
-// keeps the key and reloads; the reloaded page frames the artifact.
-async function open(browser: Browser, link: string) {
-  const first = page(browser, { start: link })
-  await first.settled()
-  assert.equal(first.reloads.length, 1, first.note.textContent)
-  const second = page(browser, { start: first.href })
-  await second.settled()
-  return { first, second }
+// intakeKey is the CryptoKey the app origin's intake hands over for text.
+const intakeKey = (text: string) => {
+  const b64 = text.replace(/-/g, '+').replace(/_/g, '/') + '='
+  return crypto.subtle.importKey('raw', Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)), 'HKDF', false, ['deriveBits', 'deriveKey'])
 }
 
-await test('the key becomes a non-extractable CryptoKey and leaves the address bar before anything is framed', async () => {
+// open follows a link the way a visitor's browser does now: the app
+// origin's intake page takes the key from https://<app>/e/<slug>#k=<key>
+// [&rest], its helper on this origin stores the CryptoKey as the intake key
+// (e2e-helper.js, tested in e2e-intake.test.ts), and the tab goes to this
+// origin's "/" with the rest. The viewer never sees the key's text.
+async function open(browser: Browser, link: string) {
+  const frag = new URL(link, ORIGIN).hash.slice(1)
+  const [k, ...rest] = frag.replace(/^k=/, '').split('&')
+  browser.keys.set('intake', await intakeKey(k))
+  const second = page(browser, { start: '/' + (rest.length ? '#' + rest.join('&') : '') })
+  await second.settled()
+  return { second }
+}
+
+await test('the viewer adopts the intake key for the artifact; its text never reaches this origin', async () => {
   const browser = newBrowser()
-  const { first, second } = await open(browser, `/#k=${vectors.key}`)
-  // First load: nothing framed, nothing registered, nothing fetched.
-  assert.deepEqual(first.replaced, ['/?redrop-e2e=1'])
-  assert.deepEqual(first.frame.srcs, [])
-  assert.deepEqual(first.registered, [])
-  assert.deepEqual(first.fetched, [])
+  const { second } = await open(browser, `/#k=${vectors.key}`)
   const stored = browser.keys.get(vectors.artifact)
   assert.ok(stored instanceof CryptoKey && !stored.extractable, 'kept as a non-extractable CryptoKey')
+  assert.equal(browser.keys.has('intake'), false, 'the intake key is adopted, not left')
   assert.equal(browser.session.size, 0, 'the key text is never kept')
-  // The reloaded page: the frame, the worker and the key, never its text.
   assert.equal(second.note.hidden, true, second.note.textContent)
-  assert.deepEqual(second.replaced, [])
+  assert.deepEqual(second.reloads, [], 'no reload: the address never held a key')
+  assert.deepEqual(second.replaced, ['/?redrop-e2e=1'])
   assert.deepEqual(second.frame.srcs, ['/__redrop/v/3/'])
   assert.equal(second.posted.length, 1)
   assert.equal(second.posted[0].key, stored)
   assert.equal(second.posted[0].artifact, vectors.artifact)
   assert.deepEqual(JSON.parse(JSON.stringify(second.registered)), [['/__redrop/e2e-sw.js', { scope: '/__redrop/v/', updateViaCache: 'none' }]])
   assert.equal(second.doc.title, 'Vector', 'the tab shows the decrypted title')
-  for (const p of [first, second]) {
-    assert.ok(!p.frame.srcs.some(anyKey) && !anyKey(p.href), 'the frame and the address bar never hold the key')
-  }
+  assert.ok(!second.frame.srcs.some(anyKey) && !anyKey(second.href), 'the frame and the address bar never hold the key')
   // A worker that was stopped asks again and gets the CryptoKey.
   const answered = second.workerAsks() as Array<{ type: string; key: unknown }>
   assert.equal(answered.length, 1)
   assert.equal(answered[0].key, stored)
+  // Later visits find the adopted key.
+  const later = page(browser, { start: '/' })
+  await later.settled()
+  assert.deepEqual(later.frame.srcs, ['/__redrop/v/3/'])
+})
+
+await test('a fresh intake key comes before an older stored one, and a wrong one is dropped', async () => {
+  const browser = newBrowser()
+  browser.keys.set(vectors.artifact, await intakeKey(OTHER_KEY))
+  const { second } = await open(browser, `/#k=${vectors.key}`)
+  assert.deepEqual(second.frame.srcs, ['/__redrop/v/3/'], second.note.textContent)
+  const wrong = newBrowser()
+  wrong.keys.set('intake', await intakeKey(OTHER_KEY))
+  const p = page(wrong, { start: '/' })
+  await p.settled()
+  assert.match(p.note.textContent, /key doesn't open this page/)
+  assert.equal(wrong.keys.size, 0, 'a wrong intake key is never kept')
+  assert.deepEqual(p.frame.srcs, [])
 })
 
 await test('a page in the fragment opens in the frame; the artifact\'s own fragment is handed on', async () => {
   const deep = await open(newBrowser(), `/#k=${vectors.key}&/docs/a.html?x=1#part`)
-  assert.deepEqual(deep.first.replaced, ['/?redrop-e2e=1#/docs/a.html?x=1#part'])
+  assert.deepEqual(deep.second.replaced, ['/?redrop-e2e=1#/docs/a.html?x=1#part'])
   assert.deepEqual(deep.second.frame.srcs, ['/__redrop/v/3/docs/a.html?x=1#part'])
-  const own = await open(newBrowser(), `/report.html#k=${vectors.key}&totals`)
-  assert.deepEqual(own.first.replaced, ['/report.html?redrop-e2e=1#totals'])
-  assert.deepEqual(own.second.frame.srcs, ['/__redrop/v/3/report.html#totals'])
-  const query = await open(newBrowser(), `/report.html?q=1#k=${vectors.key}`)
-  assert.deepEqual(query.first.replaced, ['/report.html?q=1&redrop-e2e=1'])
-  assert.deepEqual(query.second.frame.srcs, ['/__redrop/v/3/report.html?q=1'])
+  const own = await open(newBrowser(), `/#k=${vectors.key}&totals`)
+  assert.deepEqual(own.second.frame.srcs, ['/__redrop/v/3/#totals'])
+  const browser = newBrowser()
+  await open(browser, `/#k=${vectors.key}`)
+  const query = page(browser, { start: '/report.html?q=1' })
+  await query.settled()
+  assert.deepEqual(query.replaced, ['/report.html?q=1&redrop-e2e=1'])
+  assert.deepEqual(query.frame.srcs, ['/__redrop/v/3/report.html?q=1'])
 })
 
 await test('the address bar keeps the frame\'s page in the fragment, so the server sees only "/"', async () => {
   const { second } = await open(newBrowser(), `/#k=${vectors.key}`)
   second.load('/__redrop/v/3/docs/a.html?x=1#part')
   second.load('/__redrop/v/2/old.html')
-  assert.deepEqual(second.replaced, ['/?redrop-e2e=1#/docs/a.html?x=1#part', '/?redrop-e2e=1&redrop-version=2#/old.html'])
+  assert.deepEqual(second.replaced, ['/?redrop-e2e=1', '/?redrop-e2e=1#/docs/a.html?x=1#part', '/?redrop-e2e=1&redrop-version=2#/old.html'])
 })
 
 // The re-check of review 33, B-2a: the live viewer's address always has the
-// marker a full link never has, so opening the full link in the same tab is
-// a new document, never a fragment change the open artifact could watch.
-await test('the live viewer is always at an address a full link reaches only by loading a new page', async () => {
+// marker, a convenience on top of the navigation guard.
+await test('the live viewer is always at its marked address', async () => {
   const browser = newBrowser()
   const { second } = await open(browser, `/#k=${vectors.key}`)
   assert.equal(second.href, '/?redrop-e2e=1')
@@ -312,32 +334,34 @@ await test('without a key, with another key, damaged content or no storage, noth
   const missing = page(newBrowser(), { start: '/' })
   await missing.settled()
   assert.match(missing.note.textContent, /key is missing/)
-  const wrong = page(newBrowser(), { start: `/#k=${OTHER_KEY}` })
-  await wrong.settled()
-  assert.match(wrong.note.textContent, /key doesn't open this page/)
-  const malformed = page(newBrowser(), { start: `/#k=${vectors.key.slice(0, 42)}B` })
-  await malformed.settled()
-  assert.match(malformed.note.textContent, /damaged/)
-  const insecure = page(newBrowser(), { start: `/#k=${vectors.key}`, secure: false })
+  const textBrowser = newBrowser()
+  const text = page(textBrowser, { start: `/#k=${vectors.key}` })
+  await text.settled()
+  assert.match(text.note.textContent, /damaged/, 'key text on this origin is never a link redrop gives out')
+  assert.equal(textBrowser.keys.size, 0, 'and it is never stored')
+  const insecureBrowser = newBrowser()
+  insecureBrowser.keys.set('intake', await intakeKey(vectors.key))
+  const insecure = page(insecureBrowser, { start: '/', secure: false })
   await insecure.settled()
   assert.match(insecure.note.textContent, /HTTPS/)
   const blocked = { ...newBrowser(), storageFails: true }
-  const noStorage = page(blocked, { start: `/#k=${vectors.key}` })
+  blocked.keys.set('intake', await intakeKey(vectors.key))
+  const noStorage = page(blocked, { start: '/' })
   await noStorage.settled()
   assert.match(noStorage.note.textContent, /keep the key/)
   const damagedBrowser = newBrowser()
-  await page(damagedBrowser, { start: `/#k=${vectors.key}` }).settled()
+  await open(damagedBrowser, `/#k=${vectors.key}`)
   const damaged = page(damagedBrowser, { start: '/', manifest: (b) => { const o = b.slice(); o[o.length - 1] ^= 1; return o } })
   await damaged.settled()
   assert.match(damaged.note.textContent, /integrity check/)
-  for (const p of [missing, wrong, malformed, insecure, noStorage, damaged]) {
+  for (const p of [missing, text, insecure, noStorage, damaged]) {
     assert.equal(p.note.hidden, false)
     assert.deepEqual(p.frame.srcs, [])
     assert.deepEqual(p.registered, [], 'no worker without a working key')
     assert.deepEqual(p.reloads, [])
     assert.ok(!anyKey(p.href), 'the key left the address bar anyway')
   }
-  for (const p of [wrong, malformed, insecure, noStorage]) assert.deepEqual(p.fetched, [], 'caught before any fetch')
+  for (const p of [text, insecure, noStorage]) assert.deepEqual(p.fetched, [], 'caught before any fetch')
 })
 
 // The re-check of review 33, B-2b: a fragment that starts with k= is a key
@@ -488,12 +512,14 @@ await test('an artifact that replaces the functions the guard uses doesn\'t disa
   assert.equal(second.frame.removed, true)
 })
 
-await test('without the Navigation API nothing is opened, and the key leaves the address bar', async () => {
-  const first = page(newBrowser(), { start: `/#k=${vectors.key}`, noNavigation: true })
+await test('without the Navigation API nothing is opened, and the intake key isn\'t adopted', async () => {
+  const fresh = newBrowser()
+  fresh.keys.set('intake', await intakeKey(vectors.key))
+  const first = page(fresh, { start: '/', noNavigation: true })
   await first.settled()
   assert.match(first.note.textContent, /Navigation API/)
-  assert.deepEqual(first.reloads, [])
-  assert.ok(!anyKey(first.href))
+  assert.deepEqual(first.frame.srcs, [])
+  assert.equal(fresh.keys.has(vectors.artifact), false)
   const browser = newBrowser()
   await open(browser, `/#k=${vectors.key}`)
   const later = page(browser, { start: '/?redrop-e2e=1', noNavigation: true })
@@ -512,7 +538,7 @@ await test('a stored key that no longer matches is forgotten', async () => {
   assert.equal(browser.keys.size, 0)
 })
 
-await test('a full link pasted into an open viewer starts over with its key', async () => {
+await test('a fragment the visitor changes before anything is framed reloads the viewer', async () => {
   const p = page(newBrowser(), { start: '/' })
   await p.settled()
   assert.match(p.note.textContent, /key is missing/)

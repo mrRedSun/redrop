@@ -28,6 +28,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/internal/web"
+	apitypes "github.com/mrRedSun/redrop/pkg/api"
 )
 
 // Options are runtime inputs that do not come from REDROP_* configuration.
@@ -80,6 +81,9 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	api.Mount("/install.ps1", installers.ServeHTTP)
 	api.Mount("/download/{file}", installers.ServeHTTP)
 	api.Mount("/robots.txt", content.RobotsTxt)
+	intake := content.NewIntake(cfg)
+	api.Mount(apitypes.E2EIntakePrefix+"{slug}", intake.Page)
+	api.Mount("/e2e/intake.js", intake.Script)
 	for _, p := range brand.Paths {
 		api.Mount(p, brand.Handler)
 	}

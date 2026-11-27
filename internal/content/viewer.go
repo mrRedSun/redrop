@@ -42,6 +42,8 @@ var viewerAssets = func() map[string]viewerAsset {
 		}
 		out[reservedPrefix+name] = newViewerAsset(b, ct)
 	}
+	// The intake helper's script (intake.go), served like these.
+	out[helperScriptPath] = helperScript
 	return out
 }()
 
