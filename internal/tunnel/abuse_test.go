@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -417,4 +419,138 @@ func TestEndingALinkReleasesItsSlots(t *testing.T) {
 	}
 	f.reg.End("t1", WhyAdmin)
 	waitFor(t, "the slots to be released", func() bool { return len(f.reg.slots) == 0 })
+}
+
+// TestStuckStreamIsResetNotTheConnection: while the CLI is still writing a
+// request body to an app that hasn't read it, nothing on the CLI reads the
+// stream, so it doesn't see the server close it. After the linger time the
+// server resets that stream alone: its slot comes back, and the connection
+// and another visitor's download go on.
+func TestStuckStreamIsResetNotTheConnection(t *testing.T) {
+	lim := testLimits()
+	lim.MaxRequestBytes, lim.MaxResponseBytes, lim.IdleTimeout = 1<<30, 1<<40, 500*time.Millisecond
+	release := make(chan struct{})
+	appRead := make(chan error, 1)
+	f := newFixture(t, lim, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/upload": // slow work (authentication, a queue) before reading the body
+			<-release
+			_, err := io.Copy(io.Discard, r.Body)
+			appRead <- err
+		case "/download":
+			for {
+				if _, err := w.Write(make([]byte, 1<<10)); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}))
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) }) // before the app's server closes
+	f.reg.linger = 300 * time.Millisecond
+	p := f.connectWS(owner("t1", "u1"))
+	sess := f.reg.connected("t1").session()
+
+	dl, err := f.request(context.Background(), "GET", "t1", "/download", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dl.Body.Close()
+	dlDone := make(chan error, 1)
+	go func() { _, err := io.Copy(io.Discard, dl.Body); dlDone <- err }()
+
+	c, err := net.Dial("tcp", f.front.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "POST /upload HTTP/1.1\r\nHost: x\r\nX-Test-Tunnel: t1\r\nContent-Length: %d\r\n\r\n", 64<<20)
+	go func() {
+		buf := make([]byte, 64<<10)
+		for {
+			if _, err := c.Write(buf); err != nil {
+				return
+			}
+		}
+	}()
+	waitFor(t, "the upload's stream", func() bool { return sess.NumStreams() == 2 })
+	// It moves nothing once every buffer is full: the idle timeout closes
+	// it, and the linger time later it is reset.
+	waitFor(t, "the upload's slot to come back", func() bool { return len(f.reg.slots) == 1 })
+	waitFor(t, "the upload's stream to be gone", func() bool { return sess.NumStreams() == 1 })
+	select {
+	case cl := <-p.closed:
+		t.Fatalf("an honest CLI's connection was ended: %v", cl)
+	case err := <-dlDone:
+		t.Fatalf("the other visitor's download ended: %v", err)
+	default:
+	}
+	if !f.reg.Online("t1") {
+		t.Fatal("the tunnel went offline")
+	}
+	// The CLI was told: once the app reads, the rest of the body isn't there.
+	once.Do(func() { close(release) })
+	if err := within(t, "the app's read", appRead); err == nil {
+		t.Fatal("the app got the whole body of a reset stream")
+	}
+}
+
+// TestCLIThatKeepsWritingGetsTheStreamReset: a CLI that ignores the
+// server's end and keeps writing has that stream reset after the linger
+// time. yamux stops it there, so the connection stays.
+func TestCLIThatKeepsWritingGetsTheStreamReset(t *testing.T) {
+	lim := testLimits()
+	lim.MaxResponseBytes = 1 << 40
+	f := newFixture(t, lim, nil)
+	f.reg.linger = 300 * time.Millisecond
+	cli, closed := rawConnect(t, f, owner("t1", "u1"))
+	cfg := yamux.DefaultConfig()
+	cfg.LogOutput = io.Discard
+	hs, err := yamux.Server(cli, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hs.Close()
+	go func() {
+		for {
+			st, err := hs.AcceptStream()
+			if err != nil {
+				return
+			}
+			go func() { // answers, and never stops writing
+				io.WriteString(st, "HTTP/1.1 200 OK\r\nContent-Length: 1000000000000\r\n\r\n")
+				buf := make([]byte, 32<<10)
+				for {
+					if _, err := st.Write(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	r, err := f.request(ctx, "GET", "t1", "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Read(make([]byte, 100))
+	cancel() // the visitor leaves
+	r.Body.Close()
+	waitFor(t, "the slots to come back", func() bool { return len(f.reg.slots) == 0 })
+	// The connection carries the next request.
+	r, err = f.request(context.Background(), "GET", "t1", "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	if _, err := io.ReadFull(r.Body, make([]byte, 64<<10)); err != nil {
+		t.Fatalf("after the reset: %v", err)
+	}
+	select {
+	case c := <-closed:
+		t.Fatalf("the connection was ended: %v", c)
+	default:
+	}
 }

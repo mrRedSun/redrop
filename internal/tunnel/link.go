@@ -21,9 +21,11 @@ var (
 )
 
 // lingerTimeout is how long the CLI has to close a stream the server
-// closed (see stream.linger). The CLI closes its end as soon as the server
-// gives a request up, normally within a round trip; one that doesn't is
-// broken or hostile, and its connection is ended.
+// closed (see stream.linger) before the server resets it. The CLI closes
+// its end once it reads the server's end, normally within a round trip.
+// It can take longer without the CLI being at fault: while the CLI is
+// still writing a request body to an app that doesn't read it, nothing on
+// the CLI reads the stream.
 const lingerTimeout = 10 * time.Second
 
 // maxResponseHeaderBytes bounds the response header block an app may send.
@@ -43,6 +45,7 @@ type link struct {
 	expires   *time.Time // the artifact's expiry; changes with Update
 	gen       int        // current access generation
 	sess      *yamux.Session
+	guard     *frameGuard // the connection as the session sees it
 	connected time.Time
 	streams   map[*stream]struct{} // open streams, for access changes
 	waiting   int                  // requests waiting for a slot
@@ -93,11 +96,16 @@ func (l *link) state() (connected time.Time, streams int, ok bool) {
 func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 	// yamux closes conn when the session ends; closing sends the WebSocket
 	// close frame with the link's reason, so the CLI knows whether to retry.
-	wc := &closingConn{Conn: conn, closeWith: func() { closeWith(l.closeReason()) }}
 	cfg := yamuxConfig(l.reg.log)
-	// stream.linger, not yamux's timer, bounds a half-closed stream. yamux
-	// marks a timed-out stream closed before it drops it, and a FIN from
-	// the CLI that arrives in between tears the whole session down.
+	guard := newFrameGuard(conn, cfg.MaxStreamWindowSize, time.Now, func(reason string) {
+		l.reg.log.Warn("tunnel CLI broke the protocol; ending the connection", "id", l.owner.ArtifactID, "user", l.owner.Username, "reason", reason)
+		l.reg.end(l, websocketPolicy, "protocol violation: "+reason)
+	})
+	wc := &closingConn{Conn: guard, closeWith: func() { closeWith(l.closeReason()) }}
+	// stream.linger and the guard's reset, not yamux's timer, bound a
+	// half-closed stream. yamux marks a timed-out stream closed before it
+	// drops it, and a FIN from the CLI that arrives in between tears the
+	// whole session down.
 	cfg.StreamCloseTimeout = 0
 	sess, err := yamux.Client(wc, cfg)
 	if err != nil {
@@ -111,7 +119,7 @@ func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 		sess.Close()
 		return
 	}
-	l.sess, l.connected = sess, time.Now()
+	l.sess, l.guard, l.connected = sess, guard, time.Now()
 	l.armExpiryLocked()
 	l.mu.Unlock()
 	go l.refuseStreams(sess)
@@ -123,6 +131,7 @@ func (l *link) serve(conn net.Conn, closeWith func(code int, reason string)) {
 		l.reg.end(l, websocketNormal, "")
 	}
 	sess.Close()
+	guard.stop()
 	l.transport.CloseIdleConnections()
 	// Their reads have ended with the session; close what is left, so every
 	// slot goes with the connection.
@@ -311,7 +320,7 @@ func (l *link) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err != nil {
 		return nil, errOffline
 	}
-	s := newStream(l, st, sl)
+	s := newStream(l, st, st.StreamID(), sl)
 	l.mu.Lock()
 	if l.ended || sl.gen < l.gen {
 		l.mu.Unlock()
@@ -322,6 +331,20 @@ func (l *link) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	l.streams[s] = struct{}{}
 	l.mu.Unlock()
 	return s, nil
+}
+
+// resetStream resets one stream the CLI hasn't closed: the session drops
+// it and the CLI is told to. The guard applies the reset between two of the
+// CLI's frames, so a ping makes sure one comes.
+func (l *link) resetStream(id uint32) {
+	l.mu.Lock()
+	sess, guard := l.sess, l.guard
+	l.mu.Unlock()
+	if guard == nil {
+		return
+	}
+	guard.resetStream(id)
+	go sess.Ping()
 }
 
 func (l *link) forget(s *stream) {

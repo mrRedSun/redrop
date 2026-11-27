@@ -22,6 +22,7 @@ type stream struct {
 	net.Conn
 	l     *link
 	slot  *slot
+	id    uint32 // the yamux stream ID
 	start time.Time
 	last  atomic.Int64 // time.Since(start) at the last byte, in nanoseconds
 
@@ -38,9 +39,9 @@ type stream struct {
 	closed bool
 }
 
-func newStream(l *link, c net.Conn, sl *slot) *stream {
+func newStream(l *link, c net.Conn, id uint32, sl *slot) *stream {
 	sl.hold()
-	s := &stream{Conn: c, l: l, slot: sl, start: time.Now()}
+	s := &stream{Conn: c, l: l, slot: sl, id: id, start: time.Now()}
 	s.mu.Lock()
 	s.idle = time.AfterFunc(l.reg.lim.IdleTimeout, s.checkIdle)
 	s.mu.Unlock()
@@ -117,17 +118,21 @@ func (s *stream) Close() error {
 	return err
 }
 
-// linger holds the request's slot until the CLI has closed its end of a
-// stream the server closed, reading and discarding what the CLI sent
-// meanwhile. The stream, and up to a window of unread data, live until
-// then, so the slot is what bounds them. A CLI that keeps the stream open
-// past lingerTimeout is broken or hostile: its connection is ended, which
-// frees every stream it holds.
+// linger holds the request's slot until the stream is gone from the
+// session, reading and discarding what the CLI sent meanwhile. The stream,
+// and up to a window of unread data, live until then, so the slot is what
+// bounds them.
+//
+// Normally the CLI closes its end within a round trip. If it hasn't after
+// the linger time, the stream alone is reset (link.resetStream): the
+// connection and its other streams go on. A CLI that goes on sending on a
+// reset stream is ended by the guard.
 func (s *stream) linger() {
 	defer s.slot.done()
-	deadline := time.Now().Add(lingerTimeout)
+	deadline := time.Now().Add(s.l.reg.linger)
 	s.Conn.SetReadDeadline(deadline) // also ends a Read the transport is still in
 	buf := make([]byte, 4<<10)
+	reset := false
 	for {
 		s.readMu.Lock()
 		n, err := s.Conn.Read(buf)
@@ -136,12 +141,13 @@ func (s *stream) linger() {
 			s.l.reg.budget.AllowN(s.l.owner.UserID, n)
 		}
 		switch {
-		case errors.Is(err, yamux.ErrTimeout) || (err == nil && time.Now().After(deadline)):
-			s.l.reg.log.Warn("tunnel CLI did not close a stream; ending the connection", "id", s.l.owner.ArtifactID, "user", s.l.owner.Username)
-			s.l.reg.end(s.l, websocketPolicy, "protocol violation: the CLI kept a closed stream open")
-			return
+		case !reset && (errors.Is(err, yamux.ErrTimeout) || (err == nil && time.Now().After(deadline))):
+			reset = true
+			s.l.reg.log.Debug("tunnel stream reset: the CLI did not close it", "id", s.l.owner.ArtifactID)
+			s.Conn.SetReadDeadline(time.Time{})
+			s.l.resetStream(s.id)
 		case err != nil:
-			return // the CLI closed or reset it, or the session ended
+			return // the CLI closed it, the reset arrived, or the session ended
 		}
 	}
 }

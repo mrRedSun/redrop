@@ -61,6 +61,7 @@ type Registry struct {
 	log    *slog.Logger
 	budget *security.Limiter // bytes per user per hour, over all their tunnels
 	slots  chan struct{}     // server-wide stream slots
+	linger time.Duration     // lingerTimeout; shorter in tests
 
 	mu      sync.Mutex
 	links   map[string]*link // reserved or connected
@@ -75,6 +76,7 @@ func New(lim config.Tunnels, logger *slog.Logger) *Registry {
 		lim: lim, log: logger,
 		budget: security.NewLimiter(int(lim.BytesPerHour), time.Hour, maxBudgetKeys, security.RefuseNew, time.Now),
 		slots:  make(chan struct{}, lim.StreamsTotal),
+		linger: lingerTimeout,
 		links:  map[string]*link{},
 	}
 }

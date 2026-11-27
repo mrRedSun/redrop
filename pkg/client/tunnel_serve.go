@@ -181,7 +181,8 @@ func (t *TunnelTarget) relativeLocation(resp *http.Response) error {
 // once the server has given the request up (the visitor left): a write
 // blocked on a full stream window would otherwise hold the request, its
 // goroutine and its connection to the app. The server closes its end and
-// drains such streams; this is the CLI's own guard.
+// drains such streams, and resets one this side hasn't closed 10 seconds
+// later; this is the CLI's own guard.
 func unblockWhenCancelled(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		stop := context.AfterFunc(r.Context(), func() { http.NewResponseController(w).SetWriteDeadline(time.Now()) })
