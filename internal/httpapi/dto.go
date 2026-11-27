@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"time"
+
 	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -140,4 +142,8 @@ func reportDTO(r sharing.AdminReport) api.Report {
 
 func reportFromRequest(r api.ReportRequest) sharing.ReportInput {
 	return sharing.ReportInput{URL: r.URL, Category: r.Category, Details: r.Details, Contact: r.Contact}
+}
+
+func liveLeaseDTO(l sharing.LiveLease) api.LiveLease {
+	return api.LiveLease{ExpiresAt: l.ExpiresAt, RenewAfterSeconds: int(l.RenewAfter / time.Second)}
 }

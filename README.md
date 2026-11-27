@@ -187,6 +187,19 @@ typed notice events. Ctrl-C stops it. It takes `update`'s content options
 re-rendered on every change and `--render none` keeps it raw. Folders follow
 the [folder rules](#folder-uploads).
 
+**Live reload** is on while `watch` runs (`--no-live` turns it off). People
+who have the link open in redrop's viewer page see each new version without
+reloading: the viewer page reloads its frame, keeping the page and scroll
+position, and the info panel shows a "Live" row. Nothing is added to the
+artifact. It needs the info button and an HTML page or folder: `--no-info`
+links, direct views (`?redrop-info=0`) and file artifacts are not reloaded.
+Reloads never use a view, so view-limited and `--once` links work too. Live
+mode ends within a minute after `watch` stops or dies; while it is off,
+viewer pages make no extra requests. A temporary refusal (the info button
+off, or all sessions in use) is retried at the renewal interval, so fixing
+the cause restores live reload without restarting `watch`. See
+[`docs/DESIGN.md`](docs/DESIGN.md#live-reload).
+
 ## Develop
 
 Requires Go 1.26 and Node 24.
@@ -224,6 +237,9 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_REPORTS_PER_HOUR` | `5`: abuse reports one client network may file per hour |
 | `REDROP_REPORTS_MAX_OPEN`, `REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT` | `1000`, `20`: open visitor reports in all, and on one artifact; past them reports are refused or dropped |
 | `REDROP_NOTIFY_URL`, `REDROP_NOTIFY_TOKEN_FILE` | unset (default): no notifications. A webhook that gets a JSON POST for every new report and upload flag, with the file's token as `Authorization: Bearer` |
+| `REDROP_LIVE_LEASE` | `60s` (15s to 10m): how long a `redrop watch` session's live reload lease lasts; the CLI renews it every third of that |
+| `REDROP_LIVE_KEEPALIVE` | `20s` (1s to 29s): keep-alive interval of live reload streams; keep it under your proxies' idle timeout (Cloudflare: about 100 s) |
+| `REDROP_LIVE_MAX_STREAMS`, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` | `1000`, `100`: open live reload streams on the server and per artifact (plus one quarter of the server cap per artifact owner, 32 watch leases per owner, and 16 per client network); beyond them viewers get no live reload |
 
 ## Abuse handling
 
@@ -274,6 +290,11 @@ traefik.http.routers.redrop-content.rule: >-
 Update this rule **before** deploying a version that mints word links; a rule
 that only matches the 26-character format sends new links nowhere. The content
 domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
+
+Live reload streams (`/__redrop/live`, `text/event-stream`) stay open while
+`redrop watch` runs. Proxies must pass them unbuffered (Traefik and Cloudflare
+do; redrop also sends `X-Accel-Buffering: no`) and must not close a
+connection that is idle for less than `REDROP_LIVE_KEEPALIVE`.
 ### Client addresses
 
 Sign-in, link lookups, artifact passwords and link misses are limited per

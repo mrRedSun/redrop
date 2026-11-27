@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenUploadLimit(t *testing.T) {
@@ -76,6 +77,43 @@ func TestFeedbackLimits(t *testing.T) {
 	for _, key := range []string{"REDROP_FEEDBACK_BURST", "REDROP_FEEDBACK_PER_MINUTE", "REDROP_FEEDBACK_MAX_PER_ARTIFACT"} {
 		t.Run(key, func(t *testing.T) {
 			for _, v := range []string{"0", "-1", "lots"} {
+				t.Setenv(key, v)
+				if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("%s=%q: err %v, want an error naming the variable", key, v, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLiveLimits(t *testing.T) {
+	t.Setenv("REDROP_PUBLIC_URL", "https://redrop.example.com")
+	t.Setenv("REDROP_CONTENT_URL", "https://usercontent.example")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LiveLease != time.Minute || c.LiveKeepAlive != 20*time.Second || c.LiveMaxStreams != 1000 || c.LiveMaxStreamsPerArtifact != 100 {
+		t.Fatalf("defaults: lease=%s keepalive=%s max=%d per artifact=%d", c.LiveLease, c.LiveKeepAlive, c.LiveMaxStreams, c.LiveMaxStreamsPerArtifact)
+	}
+	t.Setenv("REDROP_LIVE_LEASE", "2m")
+	t.Setenv("REDROP_LIVE_KEEPALIVE", "15s")
+	t.Setenv("REDROP_LIVE_MAX_STREAMS", "10")
+	t.Setenv("REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT", "3")
+	if c, err = Load(); err != nil || c.LiveLease != 2*time.Minute || c.LiveKeepAlive != 15*time.Second || c.LiveMaxStreams != 10 || c.LiveMaxStreamsPerArtifact != 3 {
+		t.Fatalf("overrides: %+v %v", c, err)
+	}
+	bad := map[string][]string{
+		// Cloudflare cuts idle connections at about 100 s; keep-alives
+		// must come in under 30 s.
+		"REDROP_LIVE_KEEPALIVE":                {"30s", "0s", "500ms", "20"},
+		"REDROP_LIVE_LEASE":                    {"10s", "11m", "soon"},
+		"REDROP_LIVE_MAX_STREAMS":              {"0", "-1", "lots"},
+		"REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT": {"0", "x"},
+	}
+	for key, values := range bad {
+		t.Run(key, func(t *testing.T) {
+			for _, v := range values {
 				t.Setenv(key, v)
 				if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
 					t.Fatalf("%s=%q: err %v, want an error naming the variable", key, v, err)

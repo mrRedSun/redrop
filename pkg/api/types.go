@@ -432,3 +432,11 @@ type ReportList struct {
 type ReportStatusUpdate struct {
 	Status string `json:"status" description:"open, resolved, or dismissed"`
 }
+
+// LiveLease is a watch session's hold on live reload (DESIGN.md "Live
+// reload"): while one is unexpired, viewers of the current version reload
+// when a new version becomes current.
+type LiveLease struct {
+	ExpiresAt         time.Time `json:"expires_at" description:"When the lease lapses unless renewed"`
+	RenewAfterSeconds int       `json:"renew_after_seconds" description:"Renew this often (a third of the lease)"`
+}

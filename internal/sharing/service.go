@@ -63,6 +63,8 @@ type Service struct {
 	scanDone      chan struct{}
 	scanOnce      sync.Once
 	checkPassword func(hash, password string) bool // security.CheckPassword; tests replace it
+
+	live *liveHub // live reload leases and open streams (live.go)
 }
 
 // scanJob is one committed publication waiting for its upload checks. The
@@ -102,6 +104,7 @@ func New(db *store.Store, blobs *blob.Store, cfg *config.Config, secret []byte, 
 		scanQueue:       make(chan scanJob, scanQueueSize),
 		notifier:        notify.Discard{},
 		checkPassword:   security.CheckPassword,
+		live:            newLiveHub(cfg.LiveMaxStreams, cfg.LiveMaxStreamsPerArtifact, time.Now),
 	}
 	if err := os.MkdirAll(s.uploadDir, 0o700); err != nil {
 		s.Close()
@@ -151,6 +154,7 @@ func (s *Service) Close() {
 			<-s.scanDone
 		}
 	})
+	s.EndLiveStreams()
 	s.unlockLimiter.Close()
 	s.unlockIPLimiter.Close()
 	s.unlockBudget.Close()

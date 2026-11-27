@@ -152,6 +152,9 @@ func (a *App) Run(ctx context.Context) error {
 		MaxHeaderBytes:    64 << 10,
 		// No read/write timeouts: uploads and downloads can be large and slow.
 	}
+	// Live reload streams never end on their own: end them when shutdown
+	// starts, or Shutdown would wait for them until its timeout.
+	srv.RegisterOnShutdown(a.Sharing.EndLiveStreams)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	a.log.Info("redrop listening", "addr", a.cfg.Listen, "public_url", a.cfg.PublicOrigin(), "content_url", a.cfg.ContentURL.String(), "version", httpapi.Version)
