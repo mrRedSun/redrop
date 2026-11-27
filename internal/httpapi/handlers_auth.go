@@ -36,6 +36,7 @@ func (a *API) getAuthConfig(c fuego.ContextNoBody) (api.AuthConfig, error) {
 		AdminRequiresSSO: a.cfg.AdminRequiresSSO,
 		PublicURL:        a.cfg.PublicOrigin(),
 		ContentURL:       a.cfg.ContentURL.String(),
+		Mail:             a.cfg.MailEnabled(),
 	}, nil
 }
 

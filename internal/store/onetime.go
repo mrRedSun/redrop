@@ -24,6 +24,7 @@ type OneTime struct {
 	QuotaBytes int64
 	ClearTOTP  bool
 	Note       string
+	Email      string // invite mail: where the link is sent ("" = nowhere)
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	UsedAt     *time.Time
@@ -45,18 +46,18 @@ func (s *Store) CreateOneTime(ctx context.Context, o *OneTime, hash string) erro
 	if o.CreatedBy != "" {
 		by = sql.NullString{String: o.CreatedBy, Valid: true}
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO onetime (id, hash, purpose, user_id, created_by, role, quota_bytes, clear_totp, note, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		o.ID, hash, o.Purpose, uid, by, o.Role, o.QuotaBytes, o.ClearTOTP, o.Note, o.CreatedAt.Unix(), o.ExpiresAt.Unix())
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO onetime (id, hash, purpose, user_id, created_by, role, quota_bytes, clear_totp, note, email, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		o.ID, hash, o.Purpose, uid, by, o.Role, o.QuotaBytes, o.ClearTOTP, o.Note, o.Email, o.CreatedAt.Unix(), o.ExpiresAt.Unix())
 	return err
 }
 
-const oneTimeCols = `o.id, o.purpose, coalesce(o.user_id,''), coalesce(o.created_by,''), o.role, o.quota_bytes, o.clear_totp, o.note, o.created_at, o.expires_at, o.used_at, coalesce(o.used_by,''), coalesce(u.username,'')`
+const oneTimeCols = `o.id, o.purpose, coalesce(o.user_id,''), coalesce(o.created_by,''), o.role, o.quota_bytes, o.clear_totp, o.note, coalesce(o.email,''), o.created_at, o.expires_at, o.used_at, coalesce(o.used_by,''), coalesce(u.username,'')`
 
 func scanOneTime(r scanner) (*OneTime, error) {
 	var o OneTime
 	var created, exp int64
 	var used sql.NullInt64
-	if err := r.Scan(&o.ID, &o.Purpose, &o.UserID, &o.CreatedBy, &o.Role, &o.QuotaBytes, &o.ClearTOTP, &o.Note, &created, &exp, &used, &o.UsedBy, &o.UsedByName); err != nil {
+	if err := r.Scan(&o.ID, &o.Purpose, &o.UserID, &o.CreatedBy, &o.Role, &o.QuotaBytes, &o.ClearTOTP, &o.Note, &o.Email, &created, &exp, &used, &o.UsedBy, &o.UsedByName); err != nil {
 		return nil, notFound(err)
 	}
 	o.CreatedAt, o.ExpiresAt, o.UsedAt = ts(created), ts(exp), tsp(used)
@@ -67,6 +68,10 @@ func scanOneTime(r scanner) (*OneTime, error) {
 func (s *Store) OneTimeByHash(ctx context.Context, purpose, hash string) (*OneTime, error) {
 	return scanOneTime(s.DB.QueryRowContext(ctx, `SELECT `+oneTimeCols+` FROM onetime o LEFT JOIN users u ON u.id = o.used_by
 		WHERE o.hash = ? AND o.purpose = ? AND o.used_at IS NULL AND o.expires_at > ?`, hash, purpose, now()))
+}
+
+func (s *Store) OneTimeByID(ctx context.Context, purpose, id string) (*OneTime, error) {
+	return scanOneTime(s.DB.QueryRowContext(ctx, `SELECT `+oneTimeCols+` FROM onetime o LEFT JOIN users u ON u.id=o.used_by WHERE o.purpose=? AND o.id=?`, purpose, id))
 }
 
 func (s *Store) ListOneTime(ctx context.Context, purpose string) ([]*OneTime, error) {

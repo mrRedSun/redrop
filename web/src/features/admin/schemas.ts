@@ -159,6 +159,14 @@ export const Invite = Schema.Struct({
   expires_at: Timestamp,
   used_at: Schema.NullOr(Timestamp),
   used_by: Schema.optionalKey(Schema.String),
+  /** Where the invite link is emailed; empty when the invite has none. */
+  email: Schema.optionalKey(Schema.String),
+  /** Latest send state of the invite email: queued, sending, sent, failed. */
+  email_status: Schema.optionalKey(Schema.Literals(['queued', 'sending', 'sent', 'failed'])),
+  /** Why the invite email failed, when it did. */
+  email_error: Schema.optionalKey(Schema.String),
+  /** When the invite email's send state last changed. */
+  email_at: Schema.optionalKey(Schema.NullOr(Timestamp)),
 })
 export type Invite = typeof Invite.Type
 export const InviteList = ListOf(Invite)
@@ -182,6 +190,8 @@ export const CreateInviteRequest = Schema.Struct({
   role: Schema.optionalKey(Schema.Literals(['admin', 'user'])),
   quota_bytes: Schema.optionalKey(Schema.Number),
   ttl: Schema.optionalKey(Schema.String),
+  /** Sends the invite link to this address; shown only when mail is configured. */
+  email: Schema.optionalKey(Schema.String),
 })
 /** Sets or clears the administrator's revocation; the owner's own revocation is unaffected. */
 export const AdminArtifactUpdate = Schema.Struct({ revoked: Schema.Boolean })
@@ -213,23 +223,31 @@ export const toUpdateUserRequest = (v: EditUserValues): typeof AdminUpdateUserRe
 })
 
 export const InviteTtl = Schema.Literals(['1d', '7d', '30d'])
+// One bare address, or empty for a link-only invite. The server validates it again.
+const Email = Schema.Trim.check(
+  Schema.isMaxLength(254, { message: 'At most 254 characters' }),
+  Schema.isPattern(/^(?:[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*)?$/, { message: 'Enter a valid email address' }),
+)
 export const CreateInviteForm = Schema.Struct({
   note: Schema.Trim.check(Schema.isMaxLength(200, { message: 'At most 200 characters' })),
   role: Role,
   /** Empty = the server's default quota. */
   quotaGB: Schema.Trim,
   ttl: InviteTtl,
+  /** Empty = no email; shown only when the server has mail configured. */
+  email: Email,
 }).check(
   Schema.makeFilter((v) =>
     v.quotaGB === '' || Option.isSome(Schema.decodeUnknownOption(QuotaGB)(v.quotaGB)) ? undefined : { path: ['quotaGB'], issue: 'A number of GB, or empty for the default' },
   ),
 )
 export type CreateInviteValues = typeof CreateInviteForm.Type
-export const createInviteDefaults: typeof CreateInviteForm.Encoded = { note: '', role: 'user', quotaGB: '', ttl: '7d' }
+export const createInviteDefaults: typeof CreateInviteForm.Encoded = { note: '', role: 'user', quotaGB: '', ttl: '7d', email: '' }
 export const toCreateInviteRequest = (v: CreateInviteValues): typeof CreateInviteRequest.Type => ({
   note: v.note,
   role: v.role,
   ttl: v.ttl,
+  ...(v.email !== '' && { email: v.email }),
   ...(v.quotaGB !== '' && { quota_bytes: Math.round(Number(v.quotaGB) * GB) }),
 })
 

@@ -83,6 +83,15 @@ func (h adminAPI) deleteInvite(c fuego.ContextNoBody) (api.OK, error) {
 	return api.OK{OK: err == nil}, err
 }
 
+// resendInvite queues the invite's email again (DESIGN.md "Email").
+func (h adminAPI) resendInvite(c fuego.ContextNoBody) (api.Invite, error) {
+	inv, err := h.users.ResendInvite(c.Context(), principalFrom(c.Context()), c.PathParam("id"))
+	if err != nil {
+		return api.Invite{}, err
+	}
+	return inviteDTO(inv), nil
+}
+
 func (h adminAPI) listArtifacts(c fuego.ContextNoBody) (api.ArtifactList, error) {
 	list, err := h.moderation.List(c.Context(), c.QueryParam("q"), c.QueryParam("status"))
 	if err != nil {

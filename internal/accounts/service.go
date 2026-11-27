@@ -17,6 +17,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/ids"
+	"github.com/mrRedSun/redrop/internal/mail"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -102,6 +103,10 @@ type Service struct {
 	providers map[string]*provider
 
 	revocations Revocations // told about disabled users and deleted tokens; may be nil
+
+	// mail sends invite emails (SetMailer); nil = mail is off and invite
+	// emails are refused up front.
+	mail *mail.Queue
 }
 
 // maxLimiterKeys bounds each rate limiter's table. A key costs at most about
@@ -145,6 +150,9 @@ func newService(db *store.Store, cfg *config.Config, secret []byte, log *slog.Lo
 	s.initProviders()
 	return s
 }
+
+// SetMailer wires the mail queue. Call it before serving.
+func (s *Service) SetMailer(q *mail.Queue) { s.mail = q }
 
 // Close stops the rate limiters' background sweepers. The service stays
 // usable; call it once requests have drained, at shutdown.

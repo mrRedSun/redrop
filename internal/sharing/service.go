@@ -63,6 +63,7 @@ type Service struct {
 
 	reportKey []byte          // keys the hash of a reporter's network
 	notifier  notify.Notifier // announces new reports (SetNotifier)
+	alerts    ReportAnnouncer // batched report-alert emails (SetAlertNotifier); nil = none
 
 	scanQueue     chan scanJob // upload checks run off the publish request path
 	scanCancel    context.CancelFunc

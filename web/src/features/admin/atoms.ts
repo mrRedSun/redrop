@@ -44,6 +44,11 @@ export const deleteInvite = Atom.family((id: string) =>
   mutation((_: void) => endpoints.deleteInvite(id), { invalidates: ['admin'], success: 'Invite revoked' }),
 )
 
+/** Queues the invite's email again (shown only when the server has mail). */
+export const resendInvite = Atom.family((id: string) =>
+  mutation((_: void) => endpoints.resendInvite(id), { invalidates: ['admin'], success: 'Invite email queued' }),
+)
+
 export const setArtifactRevoked = Atom.family((id: string) =>
   mutation((revoked: boolean) => endpoints.setArtifactRevoked(id, revoked), {
     invalidates: ['admin', 'artifacts'],

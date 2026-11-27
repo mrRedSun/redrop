@@ -109,6 +109,23 @@ type Config struct {
 	// Tunnels are the limits of `redrop tunnel` (tunnel.go).
 	Tunnels Tunnels
 
+	// Mail (DESIGN.md "Email"). SMTP is nil-equivalent when SMTPAddr is
+	// empty: mail is off and every mail feature degrades to today's
+	// behavior.
+	SMTPAddr     string
+	SMTPTLS      string // starttls | implicit | plain
+	SMTPUsername string
+	SMTPPassword string // from REDROP_SMTP_PASSWORD_FILE; never logged
+	SMTPCAFile   string
+	MailFrom     string // address, optionally with a display name
+	// NotifyEmail is the comma-separated list of report-alert recipients.
+	NotifyEmail []string
+	// AlertInterval is the minimum gap between two report-alert emails to
+	// the same address.
+	AlertInterval time.Duration
+	// MailInsecurePlain allows REDROP_SMTP_TLS=plain. Tests only.
+	MailInsecurePlain bool
+
 	SecretFile string
 }
 
@@ -392,6 +409,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.Tunnels, err = loadTunnels(); err != nil {
+		return nil, err
+	}
+	if err := c.loadMail(); err != nil {
 		return nil, err
 	}
 	return c, nil

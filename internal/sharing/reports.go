@@ -57,6 +57,15 @@ type ReportInput struct {
 // without it, nothing is sent.
 func (s *Service) SetNotifier(n notify.Notifier) { s.notifier = n }
 
+// ReportAnnouncer is the mail side of new-report announcements: the
+// batched report alerts (DESIGN.md "Email"). It gets the report ID only.
+type ReportAnnouncer interface {
+	Notify(reportID string)
+}
+
+// SetAlertNotifier wires the batched report alerts. Call it before serving.
+func (s *Service) SetAlertNotifier(a ReportAnnouncer) { s.alerts = a }
+
 // SubmitReport files a visitor's report from the client network. Rate
 // limits, validation and the global cap answer the same whatever the URL
 // names; past them the answer is always success, whether the report was
@@ -177,6 +186,9 @@ func (s *Service) announce(r *store.Report, owner string) {
 		Message: fmt.Sprintf("Category %s, artifact %s, owner %s.", r.Category, r.ArtifactID, owner),
 		Key:     "redrop-report-" + r.ID,
 	})
+	if s.alerts != nil {
+		s.alerts.Notify(r.ID)
+	}
 }
 
 // --- the admin queue ---

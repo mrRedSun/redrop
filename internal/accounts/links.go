@@ -2,10 +2,10 @@ package accounts
 
 import (
 	"context"
-	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
@@ -24,10 +24,15 @@ func (s *Service) createLink(ctx context.Context, o *store.OneTime) (string, err
 	if err := s.db.CreateOneTime(ctx, o, ids.Hash(secret)); err != nil {
 		return "", apperr.Internal(err)
 	}
-	return s.cfg.PublicOrigin() + linkPaths[o.Purpose] + secret, nil
+	return s.inviteURLFrom(o, secret), nil
 }
 
-// lookupLink finds an unused, unexpired one-time link (rate limited per IP).
+// inviteURLFrom returns the absolute URL for a link with its secret.
+func (s *Service) inviteURLFrom(o *store.OneTime, secret string) string {
+	return s.cfg.PublicOrigin() + linkPaths[o.Purpose] + secret
+}
+
+// lookupLink finds an unused, unexpired one-time link, rate limited per IP.
 func (s *Service) lookupLink(ctx context.Context, network, purpose, token string) (*store.OneTime, error) {
 	if !s.linkLimiter.Allow(network) {
 		return nil, apperr.RateLimited("too many requests").WithRetryAfter(s.linkLimiter.Wait(network))

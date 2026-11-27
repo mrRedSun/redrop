@@ -12,7 +12,8 @@ const (
 	// Report is the public abuse report form. Links from the content
 	// domain add the page as "#url=<page>"; a fragment never reaches a
 	// server or a proxy log.
-	Report = "/report"
+	Report       = "/report"
+	AdminReports = "/admin/reports"
 
 	// One-time link prefixes; the secret token follows the slash.
 	Setup  = "/setup/"

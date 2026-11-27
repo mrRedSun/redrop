@@ -50,13 +50,16 @@ type AuthProvider struct {
 }
 
 type AuthConfig struct {
-	Version          string         `json:"version"`
-	SetupRequired    bool           `json:"setup_required"`
-	PasswordLogin    bool           `json:"password_login"`
-	Providers        []AuthProvider `json:"providers"`
-	AdminRequiresSSO bool           `json:"admin_requires_sso"`
-	PublicURL        string         `json:"public_url"`
-	ContentURL       string         `json:"content_url"`
+	Version       string         `json:"version"`
+	SetupRequired bool           `json:"setup_required"`
+	PasswordLogin bool           `json:"password_login"`
+	Providers     []AuthProvider `json:"providers"`
+	// Mail reports whether outbound mail is configured: invite emails and
+	// report alerts are enabled only when it is true.
+	Mail             bool   `json:"mail" description:"Outbound mail is configured (invite emails, report alerts)"`
+	AdminRequiresSSO bool   `json:"admin_requires_sso"`
+	PublicURL        string `json:"public_url"`
+	ContentURL       string `json:"content_url"`
 }
 
 // ServerVersion is the build report served by GET /api/v1/version.
@@ -363,7 +366,15 @@ type Invite struct {
 	ExpiresAt  time.Time  `json:"expires_at"`
 	UsedAt     *time.Time `json:"used_at"`
 	UsedBy     string     `json:"used_by,omitempty"`
-	URL        string     `json:"url,omitempty" description:"Only returned when created"`
+	// Email is the address this invite's link is sent to ("" = none).
+	Email string `json:"email,omitempty" description:"Where the invite link is emailed (when mail is configured)"`
+	// EmailStatus is the latest send state: queued, sending, sent, failed.
+	EmailStatus string `json:"email_status,omitempty" description:"Send state of the invite email"`
+	// EmailError is the failure reason when EmailStatus is failed.
+	EmailError string `json:"email_error,omitempty" description:"Why the invite email failed, when it did"`
+	// EmailAt is when the send state last changed.
+	EmailAt *time.Time `json:"email_at,omitempty" description:"When the invite email's send state last changed"`
+	URL     string     `json:"url,omitempty" description:"Only returned when created"`
 }
 
 type InviteList struct {
@@ -375,6 +386,7 @@ type CreateInviteRequest struct {
 	Role       string `json:"role,omitempty" validate:"omitempty,oneof=admin user"`
 	QuotaBytes int64  `json:"quota_bytes,omitempty"`
 	TTL        string `json:"ttl,omitempty" description:"Invite validity, default 7d"`
+	Email      string `json:"email,omitempty" description:"Send the invite link to this address (needs mail configured)"`
 }
 
 type InviteInfo struct {

@@ -2353,6 +2353,104 @@ Rolling back the binary leaves tunnel artifacts in the database. An older
 server reads their kind as an unknown one and shows an empty file listing
 on the link; an older dashboard fails to decode them. Delete tunnels, or
 revoke them, before rolling back.
+## Email
+
+Issue #40 adds provider-neutral outbound mail for invite links and batched
+operator alerts. Mail is off when `REDROP_SMTP_ADDR` is unset. Invite links
+still work by copying them, and the existing report webhook is independent.
+There are no password-reset emails or email verification in this feature.
+
+### Transport and configuration
+
+`internal/mail.Mailer` accepts a message and a context. `SMTP` implements it
+using `net/smtp`; `Discard` does nothing. SMTP supports mandatory STARTTLS,
+implicit TLS, optional AUTH, and a private CA file extending system trust.
+Certificate and hostname checks never turn off. Plain SMTP requires the explicit
+`REDROP_SMTP_INSECURE_ALLOW_PLAIN=true` test setting. Credentials come from a
+password file. The [README](../README.md#email) lists all settings and the
+Docker Compose mounts and test command.
+
+Messages have plain-text and escaped HTML alternatives, base64 transfer
+encoding, a random Message-ID, Date, and `Auto-Submitted: auto-generated`.
+Templates contain no tracking. An SMTP error retains only its protocol stage
+and numeric status. Remote text can echo a one-time link or credentials, so
+it is never retained or logged. Recipient addresses are absent from delivery
+logs too. `redrop-server mail-test --to ADDR` sends one test message without
+opening the application database and reports SMTP acceptance or stage/status.
+
+### Invites and durable delivery
+
+Administrators can add an optional email address to a new invite. The field
+appears only when `/auth/config` reports `mail: true`. The recipient sees the
+note, inviter, and expiry, with the same one-time link returned at creation.
+The invite list shows recipient, queued/sending/sent/failed status, time, and
+safe failure reason. Send again is available only for unused, unexpired emailed
+invites. It reuses the stored message and does not rotate the link. Already
+queued or sending invites refuse duplicate resend requests.
+
+Creating an emailed invite atomically stores the link's hash, encrypted message,
+and throttle charge. Rejection leaves no invite behind. Sends and manual
+resends share persistent limits of 10 per administrator per hour and 60 globally.
+The offline CLI uses the same rules with one shared offline-administrator
+budget. `redrop-server invite --email ADDR` queues without starting a worker;
+the serving process discovers its rows within a minute.
+
+One background worker handles a maximum backlog of 128 messages. HTTP requests
+only commit queue state and wake that worker. Attempts have a 30-second timeout;
+transient failures schedule at most three retries, after 1, 4, and 16 seconds,
+without holding up other messages. Permanent SMTP errors stop retries. Only a
+permanent recipient refusal suppresses that address, not an authentication,
+sender, or policy refusal. Later asynchronous bounce messages are not processed.
+
+Attempt counts, deadlines, and outcomes survive restart. Shutdown cancels an
+in-flight attempt and returns its row to queued. A failed outcome write retries
+the database commit without repeating SMTP. After an unclean exit, interrupted
+rows are recovered. A crash between SMTP acceptance and the commit can deliver
+a duplicate; there is no exactly-once guarantee. Duplicate messages contain the
+same link and cannot redeem it twice.
+
+### Report digests
+
+The existing report announcement hook wakes the email worker in addition to
+notifying the webhook. It does no SMTP or database work on the request path.
+`REDROP_NOTIFY_EMAIL` accepts up to 16 deduplicated addresses. Each receives at
+most one SMTP attempt per `REDROP_NOTIFY_EMAIL_INTERVAL`, including retries.
+The default is ten minutes. The first digest waits one interval, while the
+webhook remains immediate.
+
+Digests contain report IDs, category, source, time, and the moderation-queue
+link. They exclude artifact content and links, reporter text and contacts,
+owner names, and file names. A persistent report insertion cursor advances in
+the same transaction as enqueue. Reports sharing a timestamp cannot be lost.
+Up to 200 reports fit in a digest; any remainder enters later digests. Existing
+historical reports are skipped when an address is first enabled. Removing an
+address cancels its pending digests on the next server start. Queued or retrying
+digests cannot multiply during a report flood.
+
+### Storage and rollback
+
+Migration 10 follows encryption migration 9. It adds `onetime.email`, the
+`mail_out` queue with a unique cascading invite reference, `mail_sends` for
+hourly throttle charges, `mail_bounced`, and `mail_alerts` for digest cursors and
+deadlines. Status reads do not read encrypted message bodies.
+
+Bodies are AES-256-GCM encrypted under a purpose-derived key from the server
+signing secret. Authentication binds the body to its row ID, recipient, and
+kind. A database snapshot alone does not reveal emailed one-time secrets; the
+running server and anyone with both the database and signing secret can read
+them. Keep the signing secret with backups. Body encryption does not hide
+recipient metadata. Invite bodies remain for resend until used, expired, or
+revoked. Used/expired bodies are cleared by hourly cleanup, revoked bodies
+cascade-delete, and finished alert bodies are cleared immediately. Alert send
+metadata is retained for seven days.
+
+An older server ignores the mail tables and new invite column. Rolling back
+the image stops email delivery but keeps manual links working. Preserve the
+whole data directory and signing secret. This feature's tests cover the fake
+relay, queue failure/restart paths, HTTP boundary, and dashboard schemas and
+rendering. Real relay delivery, sender-domain authentication, certificate
+renewal, and production deployment remain operator responsibilities.
+
 ## Abuse handling
 
 The content domain serves arbitrary HTML from invited users. One phishing
