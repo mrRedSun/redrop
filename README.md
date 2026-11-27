@@ -184,7 +184,7 @@ them. Per-client rate limits and a per-artifact cap (500) bound spam; see
 ### End-to-end encryption
 
 ```sh
-redrop share report.pdf --e2e      # url: https://amber-otter-quilt-river.usercontent.example/#k=…
+redrop share report.pdf --e2e      # url: https://redrop.example.com/e/amber-otter-quilt-river#k=…
 redrop update ID report.pdf        # same link, encrypted with the key saved on this machine
 redrop watch ID ./site
 redrop update - report.pdf < link.txt   # elsewhere: the full link on stdin, not in argv
@@ -209,25 +209,29 @@ backup learns sizes, file counts and timing, never content, names or titles.
   for an encrypted artifact before any byte of it arrives. Upgrade the CLI
   on every machine you publish from: an older CLI's `update` still
   uploads the plaintext before the server refuses the version.
-- **Still works:** passwords, expiry, view limits and `--once` (the gate
-  keeps the key), revoke, rotate, versions, the info panel, and feedback.
+- **Still works:** passwords, expiry, view limits and `--once` (the key is
+  kept before the gate), revoke, rotate, versions, the info panel, and
+  feedback.
   Feedback is **not** encrypted: comments, quotes and page paths reach the
   server in plaintext.
 - **Stops working:** `--spa`, file listings, the dashboard preview and file
   names, the server reading `<title>` (pass `--title` to name it in the
   dashboard; titles and notes are plaintext), the artifact's own favicon,
   and seeking in videos over 64 MiB.
-- **Viewing** needs HTTPS. redrop's viewer turns the link's key into a
-  non-extractable `CryptoKey`, removes it from the address bar, reloads,
-  and decrypts in the browser through redrop's own service worker; the
-  page still runs on its own origin. Scripts in the page can't read the
-  key, but can use it while the page is open. The browser keeps the key
+- **Viewing** needs HTTPS, and the server's own address must be reachable
+  by everyone the link is for: the link opens a small page there first.
+  That page takes the key off the address bar, turns it into a
+  non-extractable `CryptoKey` and, when the visitor presses **Open**, hands
+  only that to the artifact's page through a small window that closes by
+  itself. The key's text never reaches the artifact's origin, so scripts
+  in the page, or windows they open, can't read it; they can use the
+  `CryptoKey` while the page is open. redrop's viewer then decrypts in the
+  browser through redrop's own service worker. The browser keeps the key
   for 12 hours, so reloads work; its history keeps the full link. A link
   whose key is damaged, encoded or cased differently, or whose `#` became
-  `%23` or `?`, opens nothing, even where the key is kept. Opening the link again
-  in a tab where its page is open closes the page instead, so open it in a
-  new tab. Viewing also needs a browser with the Navigation API (current
-  Chrome, Edge, Firefox and Safari).
+  `%23` or `?`, opens nothing. Viewing also needs a browser with the
+  Navigation API (current Chrome, Edge, Firefox and Safari) and pop-ups
+  allowed for the click.
 - **Limit:** this protects stored data, not visits through a compromised
   live server, which could serve a viewer that leaks the key. Design and
   format: [`docs/DESIGN.md`](docs/DESIGN.md#end-to-end-encrypted-links).

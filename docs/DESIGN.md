@@ -651,8 +651,9 @@ client) also counts these POSTs.
 `redrop share --e2e` encrypts an artifact in the CLI before upload, and
 `update` and `watch` encrypt every later version with the same key. The
 server stores and serves only ciphertext. The key travels in the link's
-fragment, which browsers never send to a server:
-`https://<slug>.usercontent.example/#k=<key>`. It answers issue #7. It is
+fragment, which browsers never send to a server, and the link is a page of
+redrop's app origin, where no artifact runs:
+`https://redrop.example.com/e/<slug>#k=<key>`. It answers issue #7. It is
 opt-in per artifact and permanent: an artifact is either end-to-end
 encrypted (every version) or not (no version).
 
@@ -699,37 +700,28 @@ viewer show bytes the owner did not encrypt: every object is authenticated
 (see "Format").
 
 **Scripts inside the artifact** (its own code, an analytics tag, a CDN
-library, an XSS in a generated report) run on the viewer's origin, as for
-plain artifacts. They share the viewer's window, so they can read
-anything it holds and rewrite its address, and can replace any function
-or getter on it. They can't obtain the key by any route but the two
-open ones below:
-* the viewer never keeps its text, and the frame never loads a page whose
-  navigation records held it (see "Where the key goes in the browser");
-* no fragment or query that could hold a key, whole, damaged, encoded or
-  in another case, reaches the frame (see "Key attempts" and "A link
-  whose `#` became `%23` or `?`");
-* once the frame exists, no URL reaches the viewer's window by a
-  same-document navigation: its navigation guard cancels every change of
-  the page's address that the viewer didn't make, before the URL changes,
-  and ends the page (see "The navigation guard"). A full link opened in
-  the tab of an open page when that is a fragment change, a fragment typed
-  after its address, and the artifact rewriting the address so that a
-  later full link would be a fragment change, all end there.
-
-**Open: a window holding the tab** (review 33 third re-check, B-2a″,
-pending the owner's decision). A script in the artifact that opened a
-window (a popup, or a new tab with `target=_blank`; it needs one click in
-the artifact) keeps a handle on the visitor's tab. When the visitor later
-opens the full link in that tab, the new viewer document is a different
-document, so the guard never sees it. The URL, key included, is in that
-document's `location`, `navigation.currentEntry` and navigation timing
-entry from the moment it commits, before any viewer script runs, and
-the window reads it there. No same-origin measure closes this: the
-server never sees the fragment, and `Cross-Origin-Opener-Policy` doesn't
-cut a same-origin handle (`same-origin` and `noopener-allow-popups` were
-tried). It is the same cause as the residual below. The options are key
-intake on another origin or a written waiver.
+library, an XSS in a generated report) run on the artifact's origin, as for
+plain artifacts. They share the viewer's window, so they can read anything
+it holds and rewrite its address, and can replace any function or getter on
+it; they can open windows and keep handles on them, and on the visitor's
+tab. They still can't obtain the key, because its text never reaches their
+origin (review 33 third re-check B-2a″, closed by the owner's choice of key
+intake on another origin):
+* the link is the **app origin's intake page**,
+  `https://<app>/e/<slug>#k=<key>` (see "Where the key goes in the
+  browser"). No artifact runs on the app origin, and a window on the
+  artifact's origin can't read the address of a page on another origin,
+  so the key arrives where none of their code, and no window they hold
+  (a popup, a tab they opened, the visitor's own tab), can read it;
+* only a non-extractable `CryptoKey` crosses to the artifact's origin, by
+  `postMessage` between two of redrop's own pages;
+* a key-like fragment or query on the artifact's origin is a damaged link,
+  never framed (see "Key attempts" and "A link whose `#` became `%23` or
+  `?`");
+* once the frame exists, the navigation guard refuses every same-document
+  change of the viewer's address that the viewer didn't make (see "The
+  navigation guard"), so the artifact can't make the visitor's later edits
+  of the address reach it either.
 
 They can *use* the non-extractable `CryptoKey` the viewer stores, while a
 page of the link is open in that browser: decrypt what they can fetch (the
@@ -737,22 +729,12 @@ current version, and older ones only when the owner lets viewers open
 them), and send out what they decrypted. They can't copy the key out to
 use later or elsewhere. A browser test (`scripts/e2e-browser.mjs`) checks
 every place such a script could look, with a probe artifact that watches
-and one that acts: it rewrites the address, replaces the functions the
-viewer could use, or replaces the viewer's document, before the full link
-is opened in its tab.
-
-**Residual: a window the artifact opened.** A script in the artifact that
-opened a window (`window.open`) and kept the reference can read the
-address of any page of its origin that loads there. If the visitor then
-opens the full link in that window, the script can read the key while the
-viewer's first page loads. `history.replaceState`, which the viewer calls
-first, before anything asynchronous, takes it out of `location`, but the
-page's navigation timing entry keeps the URL as loaded until the viewer's
-reload. Any same-origin window holding a reference can read a URL that
-arrives on the artifact's origin. Closing it would take moving key intake
-to another origin. The same holds for a script that calls
-`location.assign` with a full link in a window it can reach: it would need
-the key to begin with.
+and one that acts: it rewrites the address (also from inside a capturing
+listener or the viewer's own update), replaces the functions the viewer
+could use, replaces the viewer's document, opens a popup that holds the tab,
+or opens a window the visitor then opens the link in, before the full link
+is opened. Run against the build before intake moved, the popup and window
+cases read the key; now none does.
 
 **The key is permanent.** It is the same for every version, and `rotate`
 keeps it (only the slug changes). There is no way to change an artifact's
@@ -771,15 +753,21 @@ any URL the visitor opened; the viewer can't remove that.
 * **Key:** 32 random bytes per artifact (`crypto/rand`), kept for every
   version, so `update` and `watch` never change the link. In links it is
   unpadded base64url, 43 characters.
-* **Link:** `https://<slug>.usercontent.example/#k=<key>`. The CLI prints
-  it (and `--json` returns it as `url`). The server's own `url` field never
-  has the fragment: the server never had the key.
+* **Link:** `https://redrop.example.com/e/<slug>#k=<key>`: the key
+  intake page on the app origin (`REDROP_PUBLIC_URL`), named by the
+  artifact's slug. The API returns it, without the key, as `e2e_link` in
+  the owner's views; the CLI prints it with the key (and `--json` returns
+  that as `url`); the dashboard shows it. The artifact's own address
+  (`url`, `https://<slug>.usercontent.example/`) opens nothing by itself.
+  The server never had the key. The app origin must be reachable by
+  everyone the link is for: a dashboard behind a private network can't
+  serve end-to-end encrypted links.
 * **Fragment grammar.** `#k=<43 characters>`, optionally followed by `&`
   and the rest. A rest that starts with `/` is a page inside the artifact
   with its own query and fragment (`#k=…&/docs/a.html?x=1#part`); any other
-  rest is the artifact's own fragment for the page in the path
-  (`/a.html#k=…&part` opens `/a.html#part`). A fragment without a key is
-  all rest.
+  rest is the artifact's own fragment for its start page (`#k=…&part`).
+  After the intake, the viewer gets the rest as its own fragment. A
+  fragment without a key is all rest.
 * **Key attempts.** Any fragment that could hold a key is a key attempt
   (review 33 re-checks, B-2b, B-2b' and m-7). The fragment is
   percent-decoded as often as that changes it (up to 8 times; only escapes
@@ -811,40 +799,67 @@ any URL the visitor opened; the viewer can't remove that.
   as the artifact's own fragment, key characters included. Catching that
   would also refuse ordinary mixed-case page paths. A case-folded key
   would still need about 2^35 tries against the public key check.
-* **Where the key goes in the browser.** The artifact runs on the
-  viewer's origin (see "Viewer frame"), so the viewer keeps nothing a
-  script there could read the key from (review 33 B-2). When it finds a
-  key in the fragment, before any frame exists, it:
-  * replaces the address bar without the key (`history.replaceState`),
-    first, before anything asynchronous;
-  * imports it as a non-extractable `CryptoKey` and checks it against the
-    key check, and never keeps the text (no `sessionStorage`, no
-    variable that outlives the page);
-  * stores only that `CryptoKey`, in the origin's IndexedDB (database
-    `redrop-e2e`), with the time;
-  * reloads itself. The reloaded page has no key in its URL, and so none
-    in its navigation records either: the Performance API's navigation
-    entry and the Navigation API's activation entry name the URL as it was
-    loaded, which before the reload still held the key.
-  The reloaded page reads the `CryptoKey` back, gives it to the service
-  worker (`postMessage`), and only then creates the frame. The stored key
-  lets reloads, the viewer's own links and the artifact's `target=_top`
-  links keep working for 12 hours after the full link was last opened in
-  that browser; after that, or after the site's data is cleared, the full
-  link is needed again. A wrong key is never stored. If the browser
-  refuses IndexedDB (some private windows), the viewer refuses to open
-  the page rather than keep the key any other way. A copied address bar
-  has no key, so forward the original link instead.
-* **The navigation guard** (review 33 re-checks, B-2a and B-2a'). A full
-  link opened in a tab where the page is open differs from the page's
-  address only in its fragment when the address is the link without its
-  fragment. That is a same-document navigation: the URL changes in the
-  window the artifact shares, which sees it in `navigate`, `hashchange`,
-  `popstate` and `location`. A script in the artifact can make the
-  address that, with one `history.replaceState` (also through a fresh
-  realm's `History.prototype`), with the Navigation API, or by replacing
-  the viewer's document with `document.open()`, which moves the address
-  without a navigation. So the viewer doesn't rely on its address:
+* **Where the key goes in the browser.** The artifact runs on its own
+  origin, which the viewer shares (see "Viewer frame"), so the key's text
+  never goes there (review 33 B-2 and its re-checks):
+  1. The visitor opens the link: the intake page on the app origin. It
+     holds no artifact data and looks nothing up, so it says nothing about
+     the slug, counts no view and opens no gate. It is never cached
+     (`no-store`), framed (`frame-ancestors 'none'`) or referred
+     (`no-referrer`); its policy allows only its own script
+     (`/e2e/intake.js`, the decryptor and the intake) and its pinned style.
+     It has `Cross-Origin-Opener-Policy: same-origin-allow-popups`, which
+     cuts any window that opened it and keeps only the popup it opens
+     itself. Logs redact the slug in `/e/` paths like a token.
+  2. Its script takes the fragment off the address bar first
+     (`history.replaceState`, before anything asynchronous), applies the
+     key-attempt rule, and imports the key as a non-extractable HKDF
+     `CryptoKey`. The text lives only in that page's memory.
+  3. The visitor presses **Open**. That click lets the page open a small
+     window on the artifact's origin, `/__redrop/e2e-intake`: redrop's
+     helper page, served for any slug of the right form without a lookup,
+     with a policy that allows only its own script and no framing.
+  4. The helper says it is ready to its opener, on the app origin only.
+     The intake page sends it the `CryptoKey` by `postMessage`, to the
+     artifact's origin only, and only to that popup. The helper takes it
+     only from its opener on the app origin, and only a non-extractable
+     HKDF `CryptoKey`. It stores it in the origin's IndexedDB (database
+     `redrop-e2e`) as the intake key, answers, and closes.
+  5. The intake tab goes to the artifact's address with the rest. The
+     viewer adopts the intake key for the artifact once it matches the key
+     check (a wrong one is dropped), gives it to the service worker
+     (`postMessage`), and only then creates the frame. A key stored on an
+     earlier visit is used when no fresh one is waiting.
+
+  Why a click and a window, not a hidden frame: the app origin and the
+  content domain are different sites by design (see "Origins"), and
+  browsers partition a cross-site frame's storage by the top-level site. A
+  key stored from a frame inside the intake page would never be found by
+  the viewer, which is top-level on the artifact's origin; a window opened
+  by the intake page is top-level, so it stores where the viewer reads.
+  Browsers open windows only on a click. A prototype in Chromium confirmed
+  both: the hidden frame's key wasn't found, the window's was.
+
+  The stored key lets reloads, the viewer's own links and the artifact's
+  `target=_top` links keep working for 12 hours after the full link was
+  last opened in that browser; after that, or after the site's data is
+  cleared, the full link is needed again. If the browser refuses
+  IndexedDB (some private windows), the page isn't opened rather than
+  keeping the key any other way. A copied address bar has no key, so
+  forward the original link instead. Key text in the viewer's own
+  address (`https://<slug>…/#k=…`) is never a link redrop gives out: the
+  viewer treats it as a damaged link and stores nothing.
+* **The navigation guard** (review 33 re-checks, B-2a and B-2a'). Since
+  the intake moved, a full link is always a page on the app origin, so
+  opening it in a tab where the artifact runs is never a fragment change
+  of the artifact's window. The guard covers what is left of that route:
+  any same-document change of the viewer's address, such as a fragment the
+  visitor types after it, and the artifact rewriting the address. A script
+  in the artifact can do that with one `history.replaceState` (also
+  through a fresh realm's `History.prototype`), with the Navigation API, or
+  by replacing the viewer's document with `document.open()`, which moves
+  the address without a navigation. So the viewer doesn't rely on its
+  address:
   * Before any frame exists, it registers this window's first `navigate`
     listener, a capturing one (third re-check M5). At the target, the DOM
     standard runs capturing listeners before the others, so an artifact's
@@ -870,10 +885,9 @@ any URL the visitor opened; the viewer can't remove that.
     browser that didn't, the frames would still go before the URL changed,
     but code the artifact left outside them (a frame inside a shadow root
     of the viewer's page, a popup holding a reference, a timer it set on
-    the viewer's window) could see the new URL. Firefox and Safari were
-    not tested. (A popup holding the tab also gets the key through a
-    cross-document load in Chromium, where cancelling works: see "Open: a
-    window holding the tab".)
+    the viewer's window) could see the new URL, which since the intake
+    moved can hold the key only if the visitor typed it there. Firefox
+    and Safari were not tested.
   * The viewer's own address updates go through the guard, which knows
     each by the exact URL it goes to, not by a flag, and hides it from
     later listeners too. So a write the artifact makes while one is
@@ -886,11 +900,10 @@ any URL the visitor opened; the viewer can't remove that.
     opens nothing there and says why (fail closed).
 
   The viewer's address also keeps the query `redrop-e2e=1`, which the
-  server drops before it builds the frame's address or a redirect. A full
-  link has no such query, so while the artifact leaves the address alone,
-  opening the full link in its tab loads a new page and shows it, instead
-  of the guard's message. That is a convenience; the guard is the
-  defence.
+  server drops before it builds the frame's address or a redirect. It
+  predates the intake on the app origin and stays as defence in depth: an
+  address the artifact leaves alone is never the content address a
+  damaged link would reach by a fragment change.
 * **A link whose `#` became `%23` or `?`** (`https://<slug>…/%23k=…` or
   `…/?k=…`, review 33 re-checks M3 and B-2b″) sends its key to the server
   in the request path or query, which no browser can avoid. The frame must
@@ -904,16 +917,19 @@ any URL the visitor opened; the viewer can't remove that.
   whose own query matches (a `?k=1`) can't be linked to directly. Redrop
   logs no content-host paths. A reverse proxy in front of it may: operators
   should not log content-domain request paths and queries, or should strip
-  them. The viewer refuses such a path or query too. An encrypted bundle's file whose name
-  holds a `#` can't be opened by a top-level link to its path; links
+  them. The viewer refuses such a path or query too. An encrypted bundle's
+  file whose name holds a `#` can't be opened by a top-level link to its
+  path; links
   inside the frame still reach it.
-* **Gates keep the fragment.** The password and Open pages carry one
-  small script, pinned in their policy by its hash, that adds the page's
-  fragment to the form's action. The redirect after Open keeps the
-  action's fragment, so a password-protected or one-time end-to-end link
-  arrives at the viewer with its key. A plain link keeps its own `#part`
-  through the gate the same way. Without scripts the fragment is lost; the
-  visitor then opens the full link again within the visit window.
+* **Gates stay where they were.** The intake page and its helper run no
+  gate and count no view: the key is stored before the visitor reaches the
+  artifact, whose gate then works as for any link and counts the view
+  once, on the viewer page. The password and Open pages carry one small
+  script, pinned in their policy by its hash, that adds the page's
+  fragment to the form's action, so the link's rest (a page, or the
+  artifact's own fragment) and a plain link's own `#part` survive the gate.
+  Without scripts that fragment is lost, but not the key, which is already
+  stored.
 * **The key never reaches the server.** It is not in any query string,
   path, header, cookie, API call or log. Fragments are never sent in
   requests or in `Referer`. The CLI sends only the key check below. Of an
@@ -924,7 +940,9 @@ any URL the visitor opened; the viewer can't remove that.
   doesn't repeat it: `ID%23k=…`, a key whose `#` was percent-encoded,
   never reaches an API path. The server's log cuts every path at a `#`
   and at an encoded one (`%23` or `%2523` in the decoded path, and so
-  on), for the clients that send one anyway. Tests record every request the CLI sends and every server
+  on), for the clients that send one anyway. The intake page makes no
+  request with the key, and its `/e/<slug>` path is redacted in the log
+  like a token. Tests record every request the CLI sends and every server
   log line during end-to-end shares, updates and views, and check the key
   appears nowhere.
 * **Key check.** `HKDF-SHA256(key, salt = "", info = "redrop-e2e/1
@@ -1192,9 +1210,9 @@ counting. It differs from the plain viewer:
   revoke and restore, rotate, delete, rollback and older versions. They
   are all enforced by the server on the viewer page and on every
   ciphertext and worker request, exactly as for plain artifacts, and the
-  gate pages keep the key (see "Gates keep the fragment"). Views count
-  once per visit, on the viewer page; the viewer's own reload doesn't
-  count again.
+  intake runs before them (see "Gates stay where they were"). Views count
+  once per visit, on the viewer page; the intake page and its helper count
+  none.
 * **Rotate** gives a new slug; the key stays. The CLI prints the new link
   with the key when the key store has it.
 * **Feedback**, with a caveat the viewer can't see: comments are

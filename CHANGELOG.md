@@ -56,8 +56,10 @@ pull requests.
   `redrop feedback`; nothing is injected into artifacts. (#24)
 - End-to-end encrypted links (`--e2e`): the CLI encrypts before upload, the
   key travels in the link's `#k=` fragment, and the server stores and serves
-  only ciphertext; redrop's viewer decrypts in the browser and keeps the key
-  from the page's own scripts. (#33)
+  only ciphertext. The link (`https://<server>/e/<slug>#k=…`) opens a key
+  intake page on the server's own origin, which hands the artifact's origin
+  only a non-extractable key; redrop's viewer decrypts in the browser, and
+  the key's text never reaches the page's own scripts. (#33)
 - `docs`: artifacts never contain anything redrop-specific. (#19)
 
 ### Fixed
