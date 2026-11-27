@@ -73,6 +73,9 @@ func TestSecretPathsAreNeverLogged(t *testing.T) {
 		for _, pre := range []string{dashpaths.Invite, dashpaths.Reset, dashpaths.Setup} {
 			expectStatus(t, h.raw("GET", pre+tok, "", nil), 200, "dashboard "+pre)
 		}
+		// An end-to-end encrypted link's intake page names a slug, the
+		// link's secret; one that isn't a slug is a 404, which is logged.
+		h.raw("GET", "/e/"+tok, "", nil)
 		// API paths: reads, then the writes that redeem them.
 		h.raw("GET", "/api/v1/invites/"+tok, "", nil)
 		h.raw("GET", "/api/v1/reset/"+tok, "", nil)

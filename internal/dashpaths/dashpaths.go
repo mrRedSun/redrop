@@ -17,5 +17,6 @@ const (
 )
 
 // SecretPrefixes are path prefixes (dashboard and API) whose next segment is a
-// one-time secret that must never be logged.
-var SecretPrefixes = []string{"/api/v1/invites/", "/api/v1/reset/", Invite, Reset, Setup}
+// secret that must never be logged: one-time tokens, and the slug in an
+// end-to-end encrypted link's intake page (api.E2EIntakePrefix).
+var SecretPrefixes = []string{"/api/v1/invites/", "/api/v1/reset/", Invite, Reset, Setup, "/e/"}

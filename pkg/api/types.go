@@ -7,6 +7,11 @@ import "time"
 // ReservedPrefix is the server-owned URL path segment that uploads cannot use.
 const ReservedPrefix = "__redrop"
 
+// E2EIntakePrefix is the app-origin path of an end-to-end encrypted link's
+// key intake page; the artifact's slug follows it, and the key goes in the
+// fragment: https://<app>/e/<slug>#k=<key>.
+const E2EIntakePrefix = "/e/"
+
 // Artifact kinds.
 const (
 	KindHTML   = "html"
@@ -258,6 +263,8 @@ type Artifact struct {
 	E2E            bool `json:"e2e" description:"End-to-end encrypted: the server stores only ciphertext and the link's key is not in url"`
 	// E2EKeyCheck and NextVersion are in owner views only.
 	E2EKeyCheck string `json:"e2e_key_check,omitempty" description:"Owner only: the end-to-end key's check value"`
+	// E2ELink is in owner views of end-to-end encrypted artifacts only.
+	E2ELink     string `json:"e2e_link,omitempty" description:"End-to-end encrypted only: the link to give out, on the app origin, without its #k= key"`
 	NextVersion int    `json:"next_version,omitempty" description:"Owner only: the number the next published version gets"`
 }
 

@@ -24,7 +24,7 @@ func artifactMetaDTO(m sharing.ArtifactMeta) api.Artifact {
 func artifactDTO(a sharing.Artifact) api.Artifact {
 	out := artifactMetaDTO(a.ArtifactMeta)
 	out.E2EKeyCheck, out.NextVersion = a.E2EKeyCheck, a.NextVersion
-	out.URL = a.URL
+	out.URL, out.E2ELink = a.URL, a.E2ELink
 	return out
 }
 

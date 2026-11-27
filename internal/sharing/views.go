@@ -47,6 +47,9 @@ type ArtifactMeta struct {
 type Artifact struct {
 	ArtifactMeta
 	URL string
+	// E2ELink is an end-to-end encrypted artifact's link to give out,
+	// without its key: the intake page on the app origin. Empty otherwise.
+	E2ELink string
 	// E2EKeyCheck identifies the end-to-end key ("" for plaintext); the
 	// owner's client checks its key against it.
 	E2EKeyCheck string
@@ -200,7 +203,11 @@ func (s *Service) ViewerInfo(ctx context.Context, a *store.Artifact, shown Snaps
 }
 
 func (s *Service) ownerView(a *store.Artifact) Artifact {
-	return Artifact{ArtifactMeta: s.meta(a, time.Now()), URL: s.cfg.ArtifactURL(a.Slug), E2EKeyCheck: a.E2EKeyCheck, NextVersion: a.LastVersion + 1}
+	out := Artifact{ArtifactMeta: s.meta(a, time.Now()), URL: s.cfg.ArtifactURL(a.Slug), E2EKeyCheck: a.E2EKeyCheck, NextVersion: a.LastVersion + 1}
+	if a.E2E {
+		out.E2ELink = s.cfg.E2ELink(a.Slug)
+	}
+	return out
 }
 
 func (s *Service) adminView(a *store.Artifact) AdminArtifact {
