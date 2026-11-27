@@ -39,8 +39,8 @@ type stream struct {
 	closed bool
 }
 
+// newStream takes over a claim on sl that the caller holds.
 func newStream(l *link, c net.Conn, id uint32, sl *slot) *stream {
-	sl.hold()
 	s := &stream{Conn: c, l: l, slot: sl, id: id, start: time.Now()}
 	s.mu.Lock()
 	s.idle = time.AfterFunc(l.reg.lim.IdleTimeout, s.checkIdle)

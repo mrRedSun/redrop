@@ -554,3 +554,35 @@ func TestCLIThatKeepsWritingGetsTheStreamReset(t *testing.T) {
 	default:
 	}
 }
+
+// TestLateDialDoesNotReleaseTheSlotTwice: http.Transport lets a dial
+// outlive its request, with the request's slot still in the dial's
+// context. Once the slot is released, such a dial opens no stream and
+// releases nothing, so the slots keep counting what exists.
+func TestLateDialDoesNotReleaseTheSlotTwice(t *testing.T) {
+	f := newFixture(t, testLimits(), http.NotFoundHandler())
+	f.connect(owner("t1", "u1"))
+	l := f.reg.connected("t1")
+	sl, err := l.acquire(context.Background(), time.Second, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl.done() // the request ended before its dial finished
+	if len(f.reg.slots) != 0 || len(l.slots) != 0 {
+		t.Fatalf("slots after the request: server %d, tunnel %d", len(f.reg.slots), len(l.slots))
+	}
+	if c, err := l.dial(withSlot(context.Background(), sl), "tcp", "x"); !errors.Is(err, errRequestGone) {
+		t.Fatalf("a dial for an ended request: %v %v", c, err)
+	}
+	if n := l.session().NumStreams(); n != 0 {
+		t.Fatalf("a dial for an ended request opened %d streams", n)
+	}
+	// Every slot is still there to take.
+	for range cap(l.slots) {
+		s, err := l.acquire(context.Background(), time.Second, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.done()
+	}
+}

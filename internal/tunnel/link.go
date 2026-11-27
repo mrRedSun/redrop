@@ -243,7 +243,25 @@ type slot struct {
 	changed atomic.Bool  // its stream was closed by an access change
 }
 
-func (s *slot) hold() { s.refs.Add(1) }
+// errRequestGone is a dial for a request that has ended: http.Transport
+// lets a dial outlive the request that started it, and the dial's context
+// still carries the request's slot.
+var errRequestGone = errors.New("tunnel: the request already ended")
+
+// hold adds a stream's claim on the slot. It refuses once the slot has
+// been released: a late dial would otherwise release it a second time,
+// and slots would no longer count the streams that exist.
+func (s *slot) hold() bool {
+	for {
+		n := s.refs.Load()
+		if n <= 0 {
+			return false
+		}
+		if s.refs.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
 
 func (s *slot) done() {
 	if s.refs.Add(-1) == 0 {
@@ -316,8 +334,12 @@ func (l *link) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	if sess == nil {
 		return nil, errOffline
 	}
+	if !sl.hold() {
+		return nil, errRequestGone
+	}
 	st, err := sess.OpenStream()
 	if err != nil {
+		sl.done()
 		return nil, errOffline
 	}
 	s := newStream(l, st, st.StreamID(), sl)

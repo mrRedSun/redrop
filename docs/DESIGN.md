@@ -1366,6 +1366,10 @@ visitor left, the visitor stopped reading (below), or access changed.
 * yamux's own close timer is off: it marks a timed-out stream closed
   before dropping it, and a FIN from the CLI in between tears the whole
   session down.
+* Go's `http.Transport` lets a dial outlive the request that started it.
+  Such a dial opens no stream once the request's slot is released;
+  otherwise its stream would release the slot a second time, and the
+  slots would stop counting the streams that exist.
 * yamux v0.1.2 deadlocks when two goroutines read one stream at once, so
   reads of a stream are made one at a time.
 
