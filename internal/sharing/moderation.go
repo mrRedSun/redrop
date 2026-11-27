@@ -38,6 +38,7 @@ func (m *Moderation) SetRevoked(ctx context.Context, admin, id string, revoked b
 	if err := m.s.db.UpdateArtifact(ctx, id, store.ArtifactUpdate{AdminRevoked: &revoked}); err != nil {
 		return AdminArtifact{}, mapStore(err)
 	}
+	m.s.changed(id)
 	a, err := m.s.db.ArtifactByID(ctx, id)
 	if err != nil {
 		return AdminArtifact{}, mapStore(err)
@@ -52,6 +53,7 @@ func (m *Moderation) Delete(ctx context.Context, admin, id string) error {
 		return mapStore(err)
 	}
 	m.s.log.Info("admin deleted artifact", "admin", admin, "id", id)
+	m.s.changed(id)
 	return nil
 }
 

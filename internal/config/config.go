@@ -65,6 +65,15 @@ type Config struct {
 	FeedbackPerMinute      int
 	FeedbackMaxPerArtifact int
 
+	// Live reload (DESIGN.md "Live reload"): how long a watch session's
+	// lease lasts, how often an open stream sends a keep-alive (under
+	// Cloudflare's idle cut), and how many streams may be open on the
+	// server and per artifact.
+	LiveLease                 time.Duration
+	LiveKeepAlive             time.Duration
+	LiveMaxStreams            int
+	LiveMaxStreamsPerArtifact int
+
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
 	// TrustedHops (REDROP_TRUSTED_HOPS) is how many proxies append to
@@ -152,6 +161,15 @@ func envDuration(key, def string) (time.Duration, bool, error) {
 		return 0, false, fmt.Errorf("%s: %w", key, err)
 	}
 	return d, never, nil
+}
+
+// envDurationIn parses a Go duration (such as 20s) between lo and hi.
+func envDurationIn(key, def string, lo, hi time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(env(key, def))
+	if err != nil || d < lo || d > hi {
+		return 0, fmt.Errorf("%s must be a duration from %s to %s (got %q)", key, lo, hi, env(key, def))
+	}
+	return d, nil
 }
 
 func readSecret(direct, file string) (string, error) {
@@ -256,6 +274,18 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.FeedbackMaxPerArtifact, err = envPositiveInt("REDROP_FEEDBACK_MAX_PER_ARTIFACT", "500"); err != nil {
+		return nil, err
+	}
+	if c.LiveLease, err = envDurationIn("REDROP_LIVE_LEASE", "60s", 15*time.Second, 10*time.Minute); err != nil {
+		return nil, err
+	}
+	if c.LiveKeepAlive, err = envDurationIn("REDROP_LIVE_KEEPALIVE", "20s", time.Second, 29*time.Second); err != nil {
+		return nil, err
+	}
+	if c.LiveMaxStreams, err = envPositiveInt("REDROP_LIVE_MAX_STREAMS", "1000"); err != nil {
+		return nil, err
+	}
+	if c.LiveMaxStreamsPerArtifact, err = envPositiveInt("REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT", "100"); err != nil {
 		return nil, err
 	}
 
