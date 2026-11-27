@@ -56,13 +56,16 @@ function navigationAPI() {
     preventDefault() { super.preventDefault() }
   }
   class NavigationDestination {
-    constructor(private readonly u: string, private readonly same: boolean) {}
-    get url() { return this.u }
-    get sameDocument() { return this.same }
+    readonly #url: string
+    readonly #same: boolean
+    constructor(url: string, same: boolean) { this.#url = url; this.#same = same }
+    get url() { return this.#url }
+    get sameDocument() { return this.#same }
   }
   class NavigateEvent extends PageEvent {
-    constructor(private readonly dest: NavigationDestination, cancelable: boolean) { super('navigate', { cancelable }) }
-    get destination() { return this.dest }
+    readonly #dest: NavigationDestination
+    constructor(dest: NavigationDestination, cancelable: boolean) { super('navigate', { cancelable }); this.#dest = dest }
+    get destination() { return this.#dest }
   }
   return { PageEvent, NavigationDestination, NavigateEvent, navigation: new EventTarget() }
 }
