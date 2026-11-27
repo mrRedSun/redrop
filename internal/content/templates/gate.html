@@ -16,5 +16,6 @@ document.querySelectorAll('form').forEach(function (f) {
   f.addEventListener('submit', function () { if (location.hash) f.action = f.getAttribute('action') + location.hash })
 })
 </script>
+<p class="meta report"><a href="{{.Report}}" target="_blank" rel="noopener noreferrer">Report abuse</a></p>
 {{end}}
 {{template "foot" .}}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"strconv"
@@ -64,6 +65,28 @@ type Config struct {
 	FeedbackBurst          int
 	FeedbackPerMinute      int
 	FeedbackMaxPerArtifact int
+
+	// Abuse handling (DESIGN.md "Abuse handling"). AbuseContact is the
+	// security.txt contact as a URI (mailto: or https:), "" when unset.
+	AbuseContact string
+	// ReportsPerHour is how many reports a client network may file;
+	// ReportsMaxOpen and ReportsMaxOpenPerArtifact cap open visitor reports.
+	ReportsPerHour            int
+	ReportsMaxOpen            int
+	ReportsMaxOpenPerArtifact int
+	// NotifyURL receives a JSON POST for every new report ("" = off), with
+	// NotifyToken as a bearer token when set. Neither is ever logged.
+	NotifyURL   string
+	NotifyToken string
+
+	// Live reload (DESIGN.md "Live reload"): how long a watch session's
+	// lease lasts, how often an open stream sends a keep-alive (under
+	// Cloudflare's idle cut), and how many streams may be open on the
+	// server and per artifact.
+	LiveLease                 time.Duration
+	LiveKeepAlive             time.Duration
+	LiveMaxStreams            int
+	LiveMaxStreamsPerArtifact int
 
 	TrustedProxies []*net.IPNet
 	ClientIPHeader string // honoured only from trusted proxies
@@ -152,6 +175,15 @@ func envDuration(key, def string) (time.Duration, bool, error) {
 		return 0, false, fmt.Errorf("%s: %w", key, err)
 	}
 	return d, never, nil
+}
+
+// envDurationIn parses a Go duration (such as 20s) between lo and hi.
+func envDurationIn(key, def string, lo, hi time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(env(key, def))
+	if err != nil || d < lo || d > hi {
+		return 0, fmt.Errorf("%s must be a duration from %s to %s (got %q)", key, lo, hi, env(key, def))
+	}
+	return d, nil
 }
 
 func readSecret(direct, file string) (string, error) {
@@ -258,6 +290,45 @@ func Load() (*Config, error) {
 	if c.FeedbackMaxPerArtifact, err = envPositiveInt("REDROP_FEEDBACK_MAX_PER_ARTIFACT", "500"); err != nil {
 		return nil, err
 	}
+	if c.LiveLease, err = envDurationIn("REDROP_LIVE_LEASE", "60s", 15*time.Second, 10*time.Minute); err != nil {
+		return nil, err
+	}
+	if c.LiveKeepAlive, err = envDurationIn("REDROP_LIVE_KEEPALIVE", "20s", time.Second, 29*time.Second); err != nil {
+		return nil, err
+	}
+	if c.LiveMaxStreams, err = envPositiveInt("REDROP_LIVE_MAX_STREAMS", "1000"); err != nil {
+		return nil, err
+	}
+	if c.LiveMaxStreamsPerArtifact, err = envPositiveInt("REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT", "100"); err != nil {
+		return nil, err
+	}
+
+	if c.AbuseContact, err = parseAbuseContact(env("REDROP_ABUSE_CONTACT", "")); err != nil {
+		return nil, err
+	}
+	if c.ReportsPerHour, err = envPositiveInt("REDROP_REPORTS_PER_HOUR", "5"); err != nil {
+		return nil, err
+	}
+	if c.ReportsMaxOpen, err = envPositiveInt("REDROP_REPORTS_MAX_OPEN", "1000"); err != nil {
+		return nil, err
+	}
+	if c.ReportsMaxOpenPerArtifact, err = envPositiveInt("REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT", "20"); err != nil {
+		return nil, err
+	}
+	if c.NotifyURL, err = parseNotifyURL(env("REDROP_NOTIFY_URL", "")); err != nil {
+		return nil, err
+	}
+	if f := env("REDROP_NOTIFY_TOKEN_FILE", ""); f != "" {
+		if c.NotifyURL == "" {
+			return nil, fmt.Errorf("REDROP_NOTIFY_TOKEN_FILE needs REDROP_NOTIFY_URL")
+		}
+		if c.NotifyToken, err = readSecret("", "REDROP_NOTIFY_TOKEN_FILE"); err != nil {
+			return nil, err
+		}
+		if c.NotifyToken == "" || strings.ContainsAny(c.NotifyToken, "\r\n") {
+			return nil, fmt.Errorf("REDROP_NOTIFY_TOKEN_FILE must hold one non-empty line")
+		}
+	}
 
 	for _, cidr := range strings.FieldsFunc(env("REDROP_TRUSTED_PROXIES", "127.0.0.1/32,::1/128"), func(r rune) bool { return r == ',' || r == ' ' }) {
 		if !strings.Contains(cidr, "/") {
@@ -320,6 +391,49 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+// parseAbuseContact turns REDROP_ABUSE_CONTACT into a security.txt
+// Contact URI (RFC 9116): an email address becomes mailto:, and a URL must
+// be https. Spaces and line breaks are refused, so the value can't add
+// lines to the file.
+func parseAbuseContact(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	bad := fmt.Errorf("REDROP_ABUSE_CONTACT must be an email address, a mailto: URI, or an https:// URL (got %q)", raw)
+	if strings.ContainsFunc(raw, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return "", bad
+	}
+	addr, isMail := strings.CutPrefix(raw, "mailto:")
+	if !isMail && !strings.Contains(raw, "://") {
+		addr, isMail = raw, true
+	}
+	if isMail {
+		a, err := mail.ParseAddress(addr)
+		if err != nil || a.Address != addr || a.Name != "" {
+			return "", bad
+		}
+		return "mailto:" + addr, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return "", bad
+	}
+	return u.String(), nil
+}
+
+// parseNotifyURL checks REDROP_NOTIFY_URL: an absolute http(s) URL without
+// credentials ("" = notifications off).
+func parseNotifyURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return "", fmt.Errorf("REDROP_NOTIFY_URL must be an http:// or https:// URL without credentials (put a bearer token in REDROP_NOTIFY_TOKEN_FILE)")
+	}
+	return u.String(), nil
+}
+
 // maxTrustedHops bounds REDROP_TRUSTED_HOPS; real proxy chains are short.
 const maxTrustedHops = 10
 
@@ -340,6 +454,25 @@ const (
 // limit sees a new client. With a hop count the ranges no longer decide
 // which entry is read, so there is nothing to warn about.
 func (c *Config) Warnings() []string {
+	var out []string
+	if c.NotifyToken != "" && strings.HasPrefix(c.NotifyURL, "http://") && !loopbackURL(c.NotifyURL) {
+		out = append(out, "REDROP_NOTIFY_URL is plain http:// to a host other than this one, and REDROP_NOTIFY_TOKEN_FILE is set: the bearer token crosses the network unencrypted. Use https://")
+	}
+	return append(out, c.proxyWarnings()...)
+}
+
+// loopbackURL reports a URL whose host is localhost or a loopback address.
+func loopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	ip := net.ParseIP(h)
+	return h == "localhost" || (ip != nil && ip.IsLoopback())
+}
+
+func (c *Config) proxyWarnings() []string {
 	if http.CanonicalHeaderKey(c.ClientIPHeader) != "X-Forwarded-For" || c.TrustedHops > 0 {
 		return nil
 	}

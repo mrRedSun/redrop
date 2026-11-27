@@ -13,7 +13,11 @@ import (
 // The end-to-end migration runs on a database at the previous schema
 // version and leaves every existing artifact and version plaintext.
 func TestE2EMigrationFromPreviousVersion(t *testing.T) {
-	prev := len(migrations) - 1
+	const version = 9
+	prev := version - 1
+	if len(migrations) != version {
+		t.Fatalf("end-to-end migration must be last: got %d, want %d", len(migrations), version)
+	}
 	path := filepath.Join(t.TempDir(), "migration.db")
 	old, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
@@ -22,7 +26,9 @@ func TestE2EMigrationFromPreviousVersion(t *testing.T) {
 	_, err = old.Exec(strings.Join(migrations[:prev], ";\n") + `;PRAGMA user_version=` + strconv.Itoa(prev) + `;
  INSERT INTO users(id,username,quota_bytes,created_at) VALUES('u','publisher',0,1);
  INSERT INTO artifacts(id,slug,user_id,created_at,updated_at,current_version,last_version) VALUES('a','amber-otter-quilt-river','u',1,1,1,1);
- INSERT INTO versions(artifact_id,number,kind,size,files,created_at) VALUES('a',1,'html',1,1,1);`)
+ INSERT INTO versions(artifact_id,number,kind,size,files,created_at) VALUES('a',1,'html',1,1,1);
+ INSERT INTO reports(id,source,artifact_id,owner_id,category,created_at) VALUES('r','visitor','a','u','other',1);
+ INSERT INTO audit(at,actor,action,report_id) VALUES(1,'u','report.resolved','r');`)
 	old.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -32,6 +38,13 @@ func TestE2EMigrationFromPreviousVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var gotVersion, reports, audit int
+	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil || gotVersion != version {
+		t.Fatalf("schema %d, want %d: %v", gotVersion, version, err)
+	}
+	if err := db.DB.QueryRow(`SELECT (SELECT count(*) FROM reports), (SELECT count(*) FROM audit)`).Scan(&reports, &audit); err != nil || reports != 1 || audit != 1 {
+		t.Fatalf("schema 8 reports/audit changed: %d/%d: %v", reports, audit, err)
+	}
 	a, err := db.ArtifactByID(context.Background(), "a")
 	if err != nil {
 		t.Fatal(err)
@@ -96,5 +109,17 @@ func TestE2EArtifactsAndVersionNumbers(t *testing.T) {
 	v, err := db.VersionAt(ctx, id, 3)
 	if err != nil || !v.E2E {
 		t.Fatalf("version 3: %+v %v", v, err)
+	}
+	// Preserve main's suspension-at-commit rule alongside encrypted fields.
+	if _, err := db.DB.Exec(`UPDATE users SET disabled=1 WHERE id=?`, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	blockedID, err := db.CreateArtifact(ctx, &NewArtifact{UserID: u.ID, E2E: true, E2EKeyCheck: "check"}, version(1), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := db.ArtifactByID(ctx, blockedID)
+	if err != nil || !blocked.AdminRevoked || !blocked.E2E || !blocked.CurrentE2E || blocked.E2EKeyCheck != "check" {
+		t.Fatalf("encrypted publication by suspended owner: %+v %v", blocked, err)
 	}
 }

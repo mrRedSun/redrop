@@ -245,44 +245,54 @@ func (s *Service) blobTitle(sum string) string {
 
 // --- owner operations ---
 
-// Create publishes an upload as a new artifact. Every error after the
+// Create publishes an upload as a new artifact, then queues the upload
+// checks on it (they never change the result or delay it).
+func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (Artifact, error) {
+	a, v, err := s.create(ctx, actor, c, set)
+	if err == nil {
+		s.queueScan(a.ID, a.Version, v.Files)
+	}
+	return a, err
+}
+
+// create publishes an upload as a new artifact. Every error after the
 // publication begins, including invalid settings, goes through its finish.
-func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settings) (_ Artifact, err error) {
+func (s *Service) create(ctx context.Context, actor Actor, c Content, set Settings) (_ Artifact, _ *store.NewVersion, err error) {
 	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	defer func() { attempt.finish(err) }()
 	exp, err := s.expiry(set.TTL)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	if err := validateMaxViews(set.MaxViews); err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	pwHash, err := hashArtifactPassword(set.Password)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	var reserved, keyCheck string
 	if c.E2E != nil {
 		if err := checkE2EContent(c); err != nil {
-			return Artifact{}, err
+			return Artifact{}, nil, err
 		}
 		if c.E2E.Version != 1 {
-			return Artifact{}, apperr.Invalid("a new artifact's content is version 1")
+			return Artifact{}, nil, apperr.Invalid("a new artifact's content is version 1")
 		}
 		if reserved, err = s.reservedID(actor, c.E2E.Reservation); err != nil {
-			return Artifact{}, err
+			return Artifact{}, nil, err
 		}
 		keyCheck = c.E2E.KeyCheck
 	}
 	if err := attempt.admit(); err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	v, title, err := s.materialize(ctx, actor, c, nil, attempt)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	if t := strings.TrimSpace(set.Title); t != "" {
 		title = truncate(t, maxTitle)
@@ -293,11 +303,12 @@ func (s *Service) Create(ctx context.Context, actor Actor, c Content, set Settin
 		E2E: c.E2E != nil, E2EKeyCheck: keyCheck,
 	}, v, s.cfg.MaxTotalBytes)
 	if err != nil {
-		return Artifact{}, mapStore(err)
+		return Artifact{}, nil, mapStore(err)
 	}
 	attempt.committed = true
 	s.log.Info("artifact created", "id", id, "user", actor.Username, "kind", v.Kind, "token", actor.TokenName)
-	return s.reload(ctx, id)
+	a, err := s.reload(ctx, id)
+	return a, v, err
 }
 
 // owned loads an artifact that belongs to the actor. Other users' artifacts
@@ -358,43 +369,55 @@ func (s *Service) list(ctx context.Context, f store.ListFilter, status string) (
 	return out, nil
 }
 
-// AddVersion publishes an upload as the new current version (same link).
-func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (_ Artifact, err error) {
+// AddVersion publishes an upload as the new current version (same link),
+// then queues the upload checks on it (they never change the result or
+// delay it).
+func (s *Service) AddVersion(ctx context.Context, actor Actor, id string, c Content) (Artifact, error) {
+	a, v, err := s.addVersion(ctx, actor, id, c)
+	if err == nil {
+		s.queueScan(a.ID, a.Version, v.Files)
+	}
+	return a, err
+}
+
+func (s *Service) addVersion(ctx context.Context, actor Actor, id string, c Content) (_ Artifact, _ *store.NewVersion, err error) {
 	attempt, err := s.beginPublication(ctx, actor, c.UploadID)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	defer func() { attempt.finish(err) }()
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	if err := checkE2EVersion(a, c); err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	if c.E2E != nil {
 		if err := checkE2EContent(c); err != nil {
-			return Artifact{}, err
+			return Artifact{}, nil, err
 		}
 		if c.E2E.Version != a.LastVersion+1 {
 			// The commit checks again; this skips unpacking a lost race.
-			return Artifact{}, mapStore(store.ErrVersionTaken)
+			return Artifact{}, nil, mapStore(store.ErrVersionTaken)
 		}
 	}
 	if err := attempt.admit(); err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	v, _, err := s.materialize(ctx, actor, c, a, attempt)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, nil, err
 	}
 	n, err := s.db.AddVersion(ctx, a.ID, actor.UserID, v, s.cfg.MaxTotalBytes, s.cfg.KeepVersions)
 	if err != nil {
-		return Artifact{}, mapStore(err)
+		return Artifact{}, nil, mapStore(err)
 	}
 	attempt.committed = true
 	s.log.Info("artifact version published", "id", a.ID, "version", n, "user", actor.Username)
-	return s.reload(ctx, a.ID)
+	s.changed(a.ID)
+	out, err := s.reload(ctx, a.ID)
+	return out, v, err
 }
 
 // Update applies a settings patch.
@@ -441,6 +464,7 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 	if err := s.db.UpdateArtifact(ctx, a.ID, u); err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 
@@ -453,6 +477,7 @@ func (s *Service) Rotate(ctx context.Context, actor Actor, id string) (Artifact,
 	if err := s.db.UpdateArtifact(ctx, a.ID, store.ArtifactUpdate{RotateSlug: true}); err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 
@@ -465,6 +490,7 @@ func (s *Service) Delete(ctx context.Context, actor Actor, id string) error {
 		return mapStore(err)
 	}
 	s.log.Info("artifact deleted", "id", a.ID, "user", actor.Username)
+	s.changed(a.ID)
 	return nil
 }
 
@@ -504,6 +530,7 @@ func (s *Service) ActivateVersion(ctx context.Context, actor Actor, id string, n
 	if err := s.db.SetCurrentVersion(ctx, a.ID, number); err != nil {
 		return Artifact{}, mapStore(err)
 	}
+	s.changed(a.ID)
 	return s.reload(ctx, a.ID)
 }
 

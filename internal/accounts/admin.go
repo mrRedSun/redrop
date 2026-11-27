@@ -87,6 +87,19 @@ func (a *Administration) UpdateUser(ctx context.Context, admin *Principal, userI
 			return User{}, apperr.Internal(err)
 		}
 	}
+	// Suspending and unsuspending are queue-relevant actions: a suspended
+	// owner's reports were auto-resolved, and undoing that must leave a
+	// trace. user.suspend is written by the queue's own path; every disable
+	// or re-enable from this page writes one row too.
+	if patch.Disabled != nil {
+		action, detail := "user.suspend", "disabled the account"
+		if !*patch.Disabled {
+			action, detail = "user.unsuspend", "enabled the account"
+		}
+		if err := s.db.WriteAudit(ctx, store.AuditEntry{Actor: admin.user.Username, Action: action, UserID: u.ID, Detail: detail}); err != nil {
+			return User{}, apperr.Internal(err)
+		}
+	}
 	s.log.Info("admin updated user", "admin", admin.user.Username, "user", u.Username)
 	usage, err := s.db.UserUsage(ctx, u.ID)
 	if err != nil {

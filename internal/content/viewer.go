@@ -83,7 +83,11 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	}
 	data.Info = panelFor(h.sharing.ViewerInfo(r.Context(), a, snap), r.URL)
 	data.Info.Feedback = h.sharing.FeedbackOpen(a)
+	// Live reload is for the current version only; a page rendered while no
+	// lease is held never opens the stream.
+	data.Info.Live = data.OldVersion == 0 && h.sharing.Live(a)
 	self := h.selfOrigin(a)
+	data.Info.Report = h.pages.reportLink(self + selfRef(r.URL.RequestURI()))
 	// frame-src also governs where the frame may navigate, so it allows the
 	// web at large; the viewer itself loads nothing but its own two files.
 	navigable := "https:"
@@ -91,8 +95,16 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 		navigable = "http: https:"
 	}
 	directives := []string{"img-src 'self'", "frame-src 'self' " + navigable, "form-action 'none'", "base-uri 'none'", "frame-ancestors 'none'"}
+	// connect-src names exactly the endpoints this page uses.
+	var connect []string
 	if data.Info.Feedback {
-		directives = append(directives, feedbackConnect(self))
+		connect = append(connect, self+feedbackPath)
+	}
+	if data.Info.Live {
+		connect = append(connect, self+livePath)
+	}
+	if len(connect) > 0 {
+		directives = append(directives, "connect-src "+strings.Join(connect, " "))
 	}
 	csp := pagePolicy(self, "", directives...)
 	h.pages.renderWithCSP(w, http.StatusOK, "viewer.html", a.Title, serverIcons, data, csp)
@@ -112,9 +124,11 @@ type viewerData struct {
 type panelData struct {
 	sharing.ViewerInfo
 	Revisions []revisionRow
-	Feedback  bool // the panel holds the feedback form
-	E2E       bool // the content is end-to-end encrypted
-	Download  bool // the panel offers the end-to-end encrypted file for download
+	Feedback  bool   // the panel holds the feedback form
+	E2E       bool   // the content is end-to-end encrypted
+	Download  bool   // the panel offers the end-to-end encrypted file for download
+	Report    string // the report form for this page, on the app origin
+	Live      bool   // the viewer page opens the live reload stream
 }
 
 // feedbackConnect lets a page with the feedback form post to the

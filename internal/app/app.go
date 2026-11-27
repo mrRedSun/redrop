@@ -25,6 +25,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/httpapi"
 	"github.com/mrRedSun/redrop/internal/janitor"
 	"github.com/mrRedSun/redrop/internal/netutil"
+	"github.com/mrRedSun/redrop/internal/notify"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/internal/web"
@@ -45,6 +46,7 @@ type App struct {
 	Sharing  *sharing.Service
 	API      *httpapi.API
 	janitor  *janitor.Janitor
+	notifier *notify.Webhook // nil without REDROP_NOTIFY_URL
 	handler  http.Handler
 }
 
@@ -71,6 +73,11 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 		db.Close()
 		return nil, err
 	}
+	var webhook *notify.Webhook
+	if cfg.NotifyURL != "" {
+		webhook = notify.New(cfg.NotifyURL, cfg.NotifyToken, log)
+		sh.SetNotifier(webhook)
+	}
 	acc := accounts.New(db, cfg, secret, log)
 	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader, TrustedHops: cfg.TrustedHops}
 
@@ -85,6 +92,7 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 	api.Mount(apitypes.E2EIntakePrefix+"{slug}", intake.Page)
 	api.Mount(apitypes.E2EIntakePrefix+"{slug}/{$}", intake.Page)
 	api.Mount("/e2e/intake.js", intake.Script)
+	api.Mount(content.SecurityTxtPath, content.SecurityTxt(cfg, cfg.PublicOrigin()))
 	for _, p := range brand.Paths {
 		api.Mount(p, brand.Handler)
 	}
@@ -92,17 +100,21 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 
 	a := &App{
 		cfg: cfg, log: log, db: db, Accounts: acc, Sharing: sh, API: api,
-		janitor: janitor.New(sh, db, cfg.DataDir, log),
+		janitor: janitor.New(sh, db, cfg.DataDir, log), notifier: webhook,
 	}
 	a.handler = hostRouter(cfg.ContentHost(), content.New(sh, cfg, clients, log, installers), api.Handler())
 	return a, nil
 }
 
-// Close releases what New built: the services' background goroutines,
-// then the database. Call it after Run has returned.
+// Close releases what New built: the services' background goroutines and
+// the notification worker, then the database. Call it after Run has
+// returned.
 func (a *App) Close() error {
 	a.Accounts.Close()
 	a.Sharing.Close()
+	if a.notifier != nil {
+		a.notifier.Close()
+	}
 	return a.db.Close()
 }
 
@@ -145,6 +157,9 @@ func (a *App) Run(ctx context.Context) error {
 		MaxHeaderBytes:    64 << 10,
 		// No read/write timeouts: uploads and downloads can be large and slow.
 	}
+	// Live reload streams never end on their own: end them when shutdown
+	// starts, or Shutdown would wait for them until its timeout.
+	srv.RegisterOnShutdown(a.Sharing.EndLiveStreams)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	a.log.Info("redrop listening", "addr", a.cfg.Listen, "public_url", a.cfg.PublicOrigin(), "content_url", a.cfg.ContentURL.String(), "version", httpapi.Version)

@@ -1106,7 +1106,7 @@ segment  = AES-256-GCM ciphertext of up to 65536 plaintext bytes, then its 16-by
   then encrypts each resulting file. A `.md` file is therefore a rendered
   document plus its original, as without `--e2e`; the server never sees
   either.
-* **Storage (migration 8).** `artifacts.e2e` and
+* **Storage (migration 9).** `artifacts.e2e` and
   `artifacts.e2e_key_check`, `versions.e2e`, and `uploads.artifact_id`
   and `uploads.e2e`, all defaulting to plaintext (and undeclared) for
   existing rows. The API reports `e2e` on artifacts and
@@ -1181,9 +1181,9 @@ counting. It differs from the plain viewer:
   the key check as data attributes. The artifact ID is needed for the
   authenticated data; an ID grants nothing without the owner's token.
   This is the one exception to "the panel never shows IDs".
-* Its script (`viewer.js`, with `e2e.js`) takes a key from the fragment
-  as described in "Where the key goes in the browser" and reloads. The
-  reloaded page reads the stored `CryptoKey`, checks it, decrypts the
+* Its script (`viewer.js`, with `e2e.js`) adopts the intake `CryptoKey`
+  as described in "Where the key goes in the browser", or reads a key
+  stored on an earlier visit. It checks the key and decrypts the
   manifest (which checks the content before anything is framed, and gives
   the tab title), registers the worker, gives it the key, and only then
   points the frame at `/__redrop/v/<N>/<page>`. The
@@ -1245,6 +1245,10 @@ counting. It differs from the plain viewer:
 
 ### What stops working
 
+* **Live reload** is not supported for encrypted artifacts. `watch` still
+  publishes encrypted versions, but its live lease is refused explicitly;
+  the viewer's worker uses pinned version paths, not the plaintext frame's
+  reload flow.
 * **SPA fallback** (refused) and path-based routing in general: inside the
   frame, `location.pathname` is `/__redrop/v/<N>/…`. Hash routers work.
 * **Directory listings:** a bundle without a start page answers `404` at
@@ -1268,7 +1272,7 @@ counting. It differs from the plain viewer:
 
 ### Rollback
 
-Migration 8 adds three columns; an older server ignores them. Rolling back
+Migration 9 adds five columns; an older server ignores them. Rolling back
 the binary alone serves end-to-end artifacts as plain bundles: a file
 listing of opaque names and ciphertext downloads. Nothing leaks, but the
 links stop working until the new binary returns. Delete or keep such
@@ -1855,6 +1859,467 @@ version stays live until the rebuilt content publishes as a normal change.
 Authentication and not-found errors use the normal CLI exit codes. Cancellation
 returns success. The command creates immutable versions; it does not squash
 history or inject live-reload code into uploaded artifacts.
+
+## Abuse handling
+
+The content domain serves arbitrary HTML from invited users. One phishing
+page or piece of malware can get the whole domain flagged by Safe Browsing
+or blocked by ISPs, which breaks every artifact. This section answers issue
+#12: visitors can report a link, an operator gets a queue and a
+notification, and publishing flags two obvious patterns. Nothing is added to
+an artifact's bytes or DOM (see "Principles").
+
+### Decisions
+
+* **Report links live on redrop's own pages only.** The gate page (both the
+  password and the view-limited form), the info panel (viewer page and file
+  page) and the content apex link to the report form. The uniform miss page
+  is not changed: expired, revoked and unknown links must keep answering
+  byte for byte the same (see "Enumeration hardening"), and there is no
+  separate offline or expired page.
+* **The form is on the app origin**, `/report`, a public dashboard route.
+  The content domain is a different registrable domain and the dashboard
+  sends `frame-ancestors 'none'`, so an artifact can neither script the form
+  nor frame it. The link carries the page's URL in the fragment,
+  `/report#url=<page>`. The fragment never reaches a server or a proxy log;
+  the form reads it and fills in the URL field.
+* **No automatic action.** A report never revokes, hides or changes
+  anything by itself. An administrator decides. Otherwise anyone could get
+  any link taken down by reporting it.
+* **Upload checks only flag.** They never block, change or delay a
+  publication, and a failing or slow check is logged and ignored.
+* **Notifications are optional and carry no free text.**
+
+### Reporting
+
+`POST /api/v1/reports`, no account, JSON only:
+
+```json
+{"url": "https://amber-otter-quilt-river.usercontent.example/page.html",
+ "category": "phishing", "details": "Asks for a bank password", "contact": "sam@example.org"}
+```
+
+| Field | Rule |
+|---|---|
+| `url` | required; an `http(s)` URL whose host is `<slug>.<content domain>` with a well-formed slug, or the configured app origin's `/e/<slug>` intake link with one optional trailing slash; at most 2048 bytes. The form strips fragments before sending, and the server strips them again. Intake links are stored as the canonical content URL without query or fragment |
+| `category` | `phishing`, `malware`, `illegal`, `spam` or `other` |
+| `details` | optional, at most 2000 characters (code points), cleaned like a feedback comment (line breaks, controls and invisible characters) |
+| `contact` | optional, at most 200 characters, one line; unverified and never turned into a link |
+
+The checks, in order:
+
+1. **Same origin.** The `X-Redrop-Request: 1` header, `Sec-Fetch-Site`
+   (when present) `same-origin`, and an `Origin` that equals
+   `REDROP_PUBLIC_URL` exactly. `Origin` is required: a report has no
+   cookie to protect, but without the check any website could make its
+   visitors' browsers file reports, from as many networks as it has
+   visitors, past the per-network limit. Otherwise `403`.
+2. A JSON body of at most 8 KiB (`415`, `413`, `400`).
+3. **Rate limit**: `REDROP_REPORTS_PER_HOUR` (default 5) per client network
+   (`netutil.Network`, IPv6 by /64), a fixed one-hour window in a
+   `security.Limiter` of at most 50,000 networks that evicts the oldest.
+   Otherwise `429` with `Retry-After`.
+4. Valid fields (`400`). The URL check is syntax only; it says nothing
+   about whether the link exists.
+5. **Global cap**: fewer than `REDROP_REPORTS_MAX_OPEN` (default 1000)
+   open visitor reports. Otherwise `429` "not accepting reports right
+   now", with the abuse contact when one is configured. This does not
+   depend on the URL.
+6. The slug is looked up (one indexed query, as for a visit). The report is
+   stored only when it names an **active** artifact (one the content host
+   would serve now), the artifact has fewer than
+   `REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT` (default 20) open visitor
+   reports, and the same network has no open report on it. A revoked,
+   expired or used-up link is dropped like an unknown one: it cannot hurt
+   visitors, and storing (or refusing) a report for it would turn the form
+   into an oracle for which hidden links still exist.
+
+Steps 1 to 5 answer the same whatever the URL names. Step 6 always answers
+`202 {"ok": true}`: unknown links, full artifacts and duplicates are
+dropped silently. So the form is not a way to find out which links exist,
+and a reporter can't tell a dropped report from a stored one.
+
+**Network key.** For the duplicate check, a report stores
+`HMAC-SHA256(server secret, "report-network" ‖ network)`, never the address.
+The key is cleared when the report is closed. The rate limiter keeps the
+network in memory only, as every limiter does.
+
+### Upload checks
+
+After a publication commits (new artifact or new version), the service
+scans the new version's files and stores a **system report** for each
+finding. Findings:
+
+* **Credential form**: an HTML file (`text/html`, `.html`, `.htm`) with a
+  `<form>` that contains `<input type=password>` and whose `action` (or a
+  `formaction` on one of its buttons) is an absolute or protocol-relative
+  URL on another host. Category `phishing`.
+* **Executable**: a file whose first bytes are a PE (`MZ` with a `PE\0\0`
+  header), ELF, Mach-O or universal Mach-O image, or whose name ends in a
+  Windows, Android, macOS or Linux installer or script extension (`.exe`,
+  `.msi`, `.scr`, `.apk`, `.dmg`, `.deb`, `.bat`, `.hta`, … see
+  `sharing/scan.go`). Category `malware`. It applies to bundles and to
+  single-file artifacts.
+
+The detail names the file and, for a form, the host it posts to, for
+example `login.html: a password form posts to evil.example`. That is all
+an administrator learns of the content; it is cleaned and shown as text.
+
+**Bounds and scheduling.** The scan runs on one background worker, off the
+publish request path entirely: a publication queues its version's files and
+returns immediately, so the checks never delay a response. The queue holds
+64 jobs; when it is full the scan is dropped and logged. A scan reads at
+most 4 KiB of each file for magic numbers, at most 1 MiB of each HTML
+file, at most 32 MiB in all, and stops after 5 seconds; it stops early at
+the first finding of each kind. A version that is cut short is logged
+(`upload check incomplete`). At most one open system report per artifact
+and finding kind exists, and at most one per owner and kind: a later
+version with the same finding, or another artifact by the same owner with
+it, adds nothing until the first is closed. That second bound is what
+keeps one account from filling the queue with upload flags, one artifact
+at a time.
+
+**Form parsing follows the browser.** A `<form>` start tag inside an open
+form is ignored, as the HTML parser ignores it. The first `<base href>`
+outside a form resolves relative actions. Before a URL is parsed, ASCII
+tab and newline are removed and leading C0 controls and spaces are
+trimmed, as the URL Standard requires, and `input type` is compared
+case-insensitively without trimming.
+
+**Known limits.** Forms built by scripts, `fetch()` posts and password
+fields associated with a form through `form=` from outside it are not
+seen. Executables inside nested archives are not opened. These checks
+catch the careless case and give an operator a lead, not a guarantee.
+
+### Admin queue
+
+Admins see a **Reports** tab: open reports by default, with resolved and
+dismissed as status filters and visitor/system as a source filter. The
+list is paged, 50 to a page with a total count for the filter, so a full
+queue hides nothing: with both sources shown, visitor reports come first
+(newest first within each source), because a visitor took the trouble to
+write what happened and must not be buried under machine flags.
+
+Each report shows its source (visitor or system), category, time, the
+reporter's text and contact (as text), the artifact (title, kind, owner,
+current status, or "deleted"), and its history. Actions:
+
+| Action | Effect |
+|---|---|
+| Resolve / Dismiss / Reopen | sets the report's status |
+| Revoke artifact | the administrator's revocation (migration 4, "Lifecycle"): the owner can't undo it. Every open report on the artifact is resolved |
+| Suspend owner | disables the account and revokes all of its artifacts as an administrator. Every open report on those artifacts is resolved |
+
+**The reported link.** A visitor report keeps the URL the reporter
+submitted, and the queue links to it ("Open reported link"), so an
+administrator can judge the page before acting. This is the one place an
+administrator sees an artifact link, and only one that a third party has
+handed over, the same as an email to the abuse address would. Admin
+results otherwise stay metadata only: `AdminArtifact` is unchanged, and a
+reflection test pins `AdminReport`'s fields. System reports have no link.
+Opening the link is an ordinary visit: it counts a view, a password still
+applies, and the page may be hostile. The dashboard says so.
+
+**Suspension** is the existing "disabled" account state plus revocation:
+
+* the account's sessions end, password and single sign-on sign-in are
+  refused, and its API tokens get `401`, so it can't publish;
+* every artifact it owns gets the administrator's revocation (its links
+  stop at once: the access generation changes). A publication that was
+  already running when the account was suspended commits an artifact that
+  is revoked from the start (`CreateArtifact` copies the owner's disabled
+  flag into `admin_revoked`);
+* an administrator account can't be suspended from the queue. Change its
+  role first; this also rules out suspending yourself or the last admin.
+
+Lifting a suspension is the Users page's "disabled" switch. It brings the
+account and its tokens back, but not its artifacts: an administrator
+restores each one from the Artifacts tab after reviewing it.
+
+**Audit.** Every queue action writes one `audit` row in the same
+transaction as its effect: time, administrator, action, report, artifact,
+user, and a short detail (for example `revoked 3 artifacts, resolved 2
+reports`). Undoing an action from elsewhere in the dashboard writes a row
+too: restoring an artifact (`artifact.restore`) from the Artifacts tab,
+and enabling an account (`user.unsuspend`) from the Users tab. Those rows
+have no report of their own, so they attach to the history of every
+report on the same artifact or user: a takedown that was quietly reversed
+is still visible there. The server logs each action as well. Rows are
+never edited or deleted by redrop.
+
+### Notifications
+
+When `REDROP_NOTIFY_URL` is set, redrop POSTs JSON to it for every stored
+report, visitor or system:
+
+```json
+{"level": "warning", "title": "redrop: abuse report",
+ "message": "Category phishing, artifact 01J…, owner alice.", "key": "redrop-report-01J…"}
+```
+
+The title is `redrop: upload flagged` for a system report. With
+`REDROP_NOTIFY_TOKEN_FILE`, the file's content is sent as
+`Authorization: Bearer …`. The message holds only the category, the
+artifact ID and the owner's username, never the reporter's text, contact or
+URL, nor a flagged file name: those are untrusted and would reach whatever
+renders the notification (a chat client, a phone). `key` lets the receiver
+deduplicate.
+
+Delivery never blocks a request. Messages go into a queue of 64; when it
+is full the message is dropped and logged. One worker sends them, each
+attempt with a 10-second timeout, retrying a network error, `408`, `429` or
+`5xx` up to 4 times in all with waits of 1, 4 and 16 seconds. Other answers
+are logged and dropped. At shutdown the worker stops: an in-flight attempt
+is cancelled and queued messages are logged as dropped. The URL and token
+are never logged.
+
+### security.txt
+
+With `REDROP_ABUSE_CONTACT` set (an email address, a `mailto:` URI, or an
+`https://` URL), `/.well-known/security.txt` (RFC 9116) is served on the
+app origin and on the content apex:
+
+```text
+# Security and abuse contact for this redrop server.
+Contact: mailto:abuse@example.com
+# Report a shared link that is abusive: phishing, malware, illegal content, spam.
+Contact: https://redrop.example.com/report
+Expires: <180 days from the request, in UTC>
+Preferred-Languages: en
+Canonical: https://redrop.example.com/.well-known/security.txt
+```
+
+`Canonical` names the host it was served on. Without the setting the path
+is a `404` on both hosts. Artifact hosts never serve it; an artifact may
+contain its own file at that path on its own subdomain. The value is
+checked at startup: anything else, `http://`, or a value with spaces or
+line breaks, is a configuration error.
+
+### Storage (migration 8)
+
+```sql
+CREATE TABLE reports (
+    id          TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,              -- visitor | system
+    artifact_id TEXT NOT NULL,              -- no foreign key: a report outlives its artifact
+    owner_id    TEXT NOT NULL,              -- the owner when reported
+    version     INTEGER NOT NULL DEFAULT 0, -- system reports: the flagged version
+    kind        TEXT NOT NULL DEFAULT '',   -- system reports: form | executable
+    url         TEXT NOT NULL DEFAULT '',   -- visitor reports: as submitted
+    category    TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT '',
+    contact     TEXT NOT NULL DEFAULT '',
+    network     TEXT NOT NULL DEFAULT '',   -- keyed hash, cleared on close
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  INTEGER NOT NULL,
+    closed_at   INTEGER,
+    closed_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at, actor, action,
+    report_id, artifact_id, user_id, detail);
+```
+
+Indexes cover the queue (`status, created_at`), the per-artifact checks
+(`artifact_id, status`) and a report's history (`audit.report_id`). An older
+server ignores both tables, so rolling back the binary alone just hides the
+queue; artifacts revoked and accounts disabled from it stay so.
+
+### Threat model
+
+* **Report spam.** The per-network limit, the global and per-artifact caps,
+  the per-network duplicate check, the 8 KiB body and the field limits bound
+  rows to about 1,000 open reports of at most about 10 KB. A full queue
+  refuses new reports with a pointer to the abuse contact instead of
+  growing. Webhook messages are bounded by the same limits and by the
+  dropping queue.
+* **Reporting to get content removed.** There is no automatic action, so
+  a flood of reports only fills the queue. The per-artifact cap keeps one
+  link from burying the rest, and duplicates from one network count once.
+* **Enumeration.** The endpoint answers the same for every URL that passes
+  the syntax check, and the limit of 5 an hour per network is far slower
+  than the content host's miss limiter. Only active artifacts are
+  reportable, so a dropped report for a revoked or expired link is
+  indistinguishable from one for an unknown link even under cap pressure.
+* **Cross-site filing.** Required same-origin `Origin`, the custom header
+  (which forces a CORS preflight that is never approved) and JSON only.
+* **Untrusted text in the admin UI.** Reporter text and contact, and the
+  file names and hosts in system findings, are cleaned on input and shown
+  as React text nodes only: controls, invisible characters and the
+  bidirectional embedding, override and isolate controls are removed, so a
+  name cannot render with a misleading order. The contact is never a
+  `mailto:` or other link.
+  The reported URL is a link only because it passed the content-domain
+  check on input; it opens with `rel="noopener noreferrer"` in a new tab.
+* **Untrusted text in the webhook.** None is sent: category, artifact ID
+  and owner username only, all of them from server-controlled alphabets.
+* **Hostile artifacts.** An artifact can draw a fake "report" link that
+  goes elsewhere, as it can fake anything inside itself; the real links
+  live outside the frame. It can't reach the form (other site, no framing).
+* **Scanner input.** The HTML tokenizer and magic checks read bounded
+  prefixes of stored blobs under a deadline; they never execute, render or
+  fetch anything.
+* **Privacy.** No IP address is stored; the duplicate key is a keyed hash,
+  removed on close. The reporter's contact is optional.
+
+### Operator notes
+
+* Register the content domain (the apex and its subdomains) in Google
+  Search Console, so Safe Browsing warnings for any artifact reach you
+  before visitors see them. Do the same for the app origin.
+* Set `REDROP_ABUSE_CONTACT` to an address someone reads, and consider
+  `REDROP_NOTIFY_URL` so new reports don't wait for the dashboard.
+
+## Live reload
+
+While the owner runs `redrop watch`, viewers of the current version see each
+new version without reloading by hand. It answers the rest of issue #15. The
+issue's "injected script" is replaced by the principle above: nothing is added
+to the artifact. redrop's own viewer page watches for a new current version
+and reloads its frame.
+
+### Decisions
+
+* **Opt-in and temporary.** Live mode is on for an artifact only while an
+  owner's `redrop watch` holds a **live lease** on it. `--live` is the
+  default for `watch`; `--no-live` turns it off. The CLI renews the lease
+  while it runs and releases it when it stops; a watcher that dies lets it
+  lapse.
+* **Viewer page only.** Live reload needs redrop's viewer page: an `html` or
+  `bundle` artifact with the info button on, showing the current version.
+  * `--no-info` and `?redrop-info=0` (direct views) get no live reload:
+    there is no redrop page to do it.
+  * `file` artifacts get no live reload: their page is redrop's file page,
+    with no frame to reload, and reloading the page itself would be a new
+    top-level load.
+  * A viewer showing an older version (`?redrop-version=N`) is not live.
+  * The server refuses a lease (`409`) for an artifact with the info button
+    off or a `file` current version. `watch` reports live reload off and
+    retries at the lease renewal interval, so enabling the info button or
+    publishing a framed version can restore it without restarting watch.
+* **When it is off, viewers make no extra requests.** The viewer page
+  includes the live element only while a lease is active. A page whose
+  stream ends is told so (`end`) and stops; it does not poll.
+* **Views.** Reloading never uses a view, so live reload also works on
+  view-limited and `--once` links:
+  * the stream request is not a page load and never records a view;
+  * the frame reload is a frame navigation (`Sec-Fetch-Dest: iframe`), which
+    never counts (see "Gates and view counting");
+  * gated links count only at Open, and a reload never presses Open. A visit
+    grant that ran out while the page was open shows the gate in the frame,
+    exactly as following a link in the frame would.
+
+### Lease
+
+* `PUT /api/v1/artifacts/{id}/live/{session}` creates or renews the lease of
+  one watch session; `DELETE` on the same path releases it. Owner only (token
+  or session); other users' artifacts are `404`. `session` is chosen by the
+  CLI: 16 to 64 characters of `[A-Za-z0-9_-]`. The answer is
+  `{"expires_at", "renew_after_seconds"}`.
+* A lease lasts `REDROP_LIVE_LEASE` (default 60 s). The CLI renews it every
+  third of that (20 s by default), so a missed renewal or two does not end
+  it. Live mode is on while any session's lease is unexpired, so two
+  watchers on one artifact don't switch each other off.
+* **Bounds.** At most 8 sessions per artifact and 32 per owner across their
+  artifacts (`409` beyond either), plus 10,000 leases on the server (`429`
+  beyond). Renewals of existing sessions still work at capacity. Expired
+  leases are pruned by the maintenance sweep, when a lease on the same
+  artifact changes, and before refusing an owner or server whose share is
+  full. One account cannot occupy every server lease slot.
+* A `409` reports `live_off` once per consecutive conflict run and retries
+  at the last successful renewal interval, 20 s before the first success.
+  A later success reports `live_on`. Network failures, `5xx` and `429` keep
+  their bounded retries; authentication and not-found errors stop live
+  renewal without failing the file watcher.
+* Leases live in the server's memory, not the database: there is no
+  migration, and a restart drops them. At default settings the CLI attempts
+  renewal every 20 s, or after 5 s following a transient failure, subject
+  to `Retry-After`. Viewer restart recovery is best effort, not an update
+  guarantee: graceful shutdown requests one reconnect after 25 s. An abrupt
+  drop, a longer outage, or reconnecting before the lease is restored can
+  require manually reloading the viewer. Rolling back removes the feature.
+
+### Stream
+
+`GET /__redrop/live` on the artifact's own host is a server-sent events
+stream.
+
+* **Access.** The request passes the same decision as the content
+  (`sharing.Decide`: not expired, revoked or used up, password entered,
+  visit grant valid; an owner preview counts), live mode must be on, and the
+  current version must be framed. `Sec-Fetch-Site`, when present, must be
+  `same-origin`. Every failure is **the identical miss**: byte for byte the
+  answer to an unknown `/__redrop/` path, spending one token of miss budget.
+  So with live mode off, the endpoint can't be told apart from an unknown
+  path, and a visitor without access learns nothing. No response carries
+  `Access-Control-*` headers.
+* **Events.**
+  * On connect: `retry: 25000` and a `version` event with the current
+    version, so a page that missed an update between its load and the
+    connection catches up. The viewer closes every failed EventSource;
+    this advertised retry does not authorize automatic error reconnects.
+  * `version` with `{"version", "published", "size", "files"}` whenever the
+    current version changes (a publish or a rollback). These are the
+    shown-version facts the info panel already gives a viewer.
+  * `end` when live mode stops, access ends, or the link is revoked, rotated
+    or deleted. The page closes the stream and makes no more requests.
+  * A comment line (`: keep-alive`) every `REDROP_LIVE_KEEPALIVE` (default
+    20 s, at most 29 s), because Cloudflare closes connections idle for about
+    100 s.
+* **Rechecks.** The stream re-reads the artifact and re-runs the access and
+  live checks on every keep-alive and on every change to the artifact
+  (publish, rollback, settings, revoke, rotate, delete, lease release).
+  Revocation, a password change and a released lease end the stream at once;
+  an expired visit grant or a lapsed lease within one keep-alive interval.
+* **Notification.** The sharing service keeps, per artifact, the set of open
+  streams. A change only "pokes" each stream through a one-slot channel and
+  never blocks: pokes coalesce, and each stream reads the artifact itself.
+* **Bounds.** At most `REDROP_LIVE_MAX_STREAMS` (default 1000) streams on
+  the server, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` (default 100) per
+  artifact, one quarter of the server cap per artifact owner (rounded down,
+  minimum 1; default 250), and 16 per client network (keyed like the miss
+  limiter, so a team behind one address still fits). Beyond any limit the
+  answer is `503` with `Retry-After`; the page shows no live indicator.
+  Each write has a 10 s deadline, retained through the terminating chunk;
+  HTTP/1.1 streams close their connection rather than reuse its deadline.
+  A reader is dropped only once writes block after socket buffers fill.
+  With little traffic, a non-reading client can occupy a slot indefinitely,
+  like an idle tab. The admission caps bound those clients. A stream holds
+  about one goroutine and a few KB in the process, plus kernel send buffers
+  that can remain allocated after close until TCP gives up.
+* **Shutdown and reconnects.** Graceful shutdown sends
+  `end` with `{"reconnect":true}` before closing. The viewer closes that
+  EventSource, hides the indicator and makes one attempt after 25 s. Every
+  `error` closes the source without retry, including an error on that one
+  attempt. Terminal `end` events never retry. This prevents tabs behind a
+  shared network from spending its miss budget on automatic reconnects
+  when leases have disappeared. A refused initial or explicitly requested
+  connection still spends one token, preserving the identical miss.
+
+### Viewer side
+
+* The viewer page renders a hidden "Live" row in the info panel
+  (`#rd-live`, with the stream path and the shown version) only while live
+  mode is on, and its CSP adds `connect-src <origin>/__redrop/live`.
+  `viewer.js` opens an `EventSource`; the row shows while the stream is
+  open and hides when it ends or fails for good.
+* **Reload.** On a `version` event for a version other than the one shown,
+  `viewer.js` calls `location.reload()` on the frame's window, so the frame
+  keeps its path, query and fragment and adds no history entry. It skips the
+  reload when the frame is on another origin or on a `/__redrop/` page (an
+  older version's files). Events that arrive during a reload trigger one
+  more reload once it finishes. A 30 s timeout clears pending reload state
+  without making a request, so a cancelled `beforeunload` prompt cannot
+  suppress every later version. A later distinct version retries the reload;
+  a real load exceeding 30 s may lose saved scroll and trailing state.
+* **Scroll.** Before reloading it reads the frame's scroll position. After
+  the reload, if the browser left the page at the top, it scrolls the frame
+  back. Reading the scroll position, `location.reload()` and `scrollTo()` are
+  the only things the viewer does with the artifact's window beyond what
+  "Address bar" lists; nothing is written to its document.
+* **Panel.** The panel's version line, size, "current" mark and the feedback
+  form's version follow the event, so comments are filed against the version
+  on screen. The version list is otherwise as it was when the page loaded; a
+  version published live appears as a new row without a note.
 
 ## Releases and versions
 

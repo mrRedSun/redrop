@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"time"
+
 	"github.com/mrRedSun/redrop/internal/accounts"
 	"github.com/mrRedSun/redrop/internal/sharing"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -131,4 +133,26 @@ func userPatchFromRequest(r api.AdminUpdateUserRequest) accounts.UserPatch {
 
 func inviteFromRequest(r api.CreateInviteRequest) accounts.InviteRequest {
 	return accounts.InviteRequest{Note: r.Note, Role: r.Role, QuotaBytes: r.QuotaBytes, TTL: r.TTL}
+}
+
+func reportDTO(r sharing.AdminReport) api.Report {
+	out := api.Report{ID: r.ID, Source: r.Source, Category: r.Category, Details: r.Details, Contact: r.Contact, ReportedURL: r.ReportedURL,
+		Version: r.Version, Status: r.Status, CreatedAt: r.CreatedAt, ClosedAt: r.ClosedAt, ClosedBy: r.ClosedBy,
+		ArtifactID: r.ArtifactID, OwnerUsername: r.OwnerUsername, OwnerSuspended: r.OwnerSuspended,
+		History: mapItems(r.History, func(e sharing.AuditEntry) api.ReportAction {
+			return api.ReportAction{At: e.At, Actor: e.Actor, Action: e.Action, Detail: e.Detail}
+		})}
+	if r.Artifact != nil {
+		a := adminArtifactDTO(*r.Artifact)
+		out.Artifact = &a
+	}
+	return out
+}
+
+func reportFromRequest(r api.ReportRequest) sharing.ReportInput {
+	return sharing.ReportInput{URL: r.URL, Category: r.Category, Details: r.Details, Contact: r.Contact}
+}
+
+func liveLeaseDTO(l sharing.LiveLease) api.LiveLease {
+	return api.LiveLease{ExpiresAt: l.ExpiresAt, RenewAfterSeconds: int(l.RenewAfter / time.Second)}
 }

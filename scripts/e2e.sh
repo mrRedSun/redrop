@@ -5,8 +5,9 @@
 set -euo pipefail
 BASE=${BASE:-http://$(hostname -I | awk '{print $1}'):8080}
 WORK=$(mktemp -d)
-# A watcher started below is ours: stop it if a check fails first.
-trap '[ -z "${WPID:-}" ] || kill "$WPID" 2>/dev/null; rm -rf "$WORK"' EXIT
+# A watcher and a live stream started below are ours: stop them if a check
+# fails first.
+trap '[ -z "${WPID:-}" ] || kill "$WPID" 2>/dev/null; [ -z "${SPID:-}" ] || kill "$SPID" 2>/dev/null; rm -rf "${WORK:?}"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
 R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
@@ -182,6 +183,40 @@ WPID=
 # show that nothing else was published.
 [ "$(w_versions)" = 2 ] || die "watch made exactly one new version, got $(w_versions)"
 pass "watch: content change published, version printed, clean SIGTERM exit"
+
+# Live reload: while watch runs, the viewer page's stream announces each new
+# current version; reloading uses no views; stopping watch ends the stream,
+# and the stream is then the identical miss.
+STREAM=(-H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Site: same-origin' -H 'Accept: text/event-stream')
+echo '<!doctype html><title>l1</title><p>live one</p>' > "$WORK/live.html"
+LIVE_URL=$($R share "$WORK/live.html" -q)
+LID=$($R info "$LIVE_URL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+[ "$(code_of "${STREAM[@]}" "${LIVE_URL}__redrop/live")" = 404 ] || die "live stream before watch is not the miss"
+curl -fsS "${DOC[@]}" "$LIVE_URL" | grep -q 'id="rd-live"' && die "live row before watch"
+$R watch "$LID" "$WORK/live.html" --debounce 300ms >"$WORK/live.log" 2>"$WORK/live.err" &
+WPID=$!
+l_on() { grep -q "^live reload on" "$WORK/live.err"; }
+wait_until 60 l_on || { cat "$WORK/live.err"; die "watch did not turn live reload on within 60s"; }
+curl -fsS "${DOC[@]}" "$LIVE_URL" | grep -q 'id="rd-live"' || die "viewer page without the live row"
+LVIEWS=$(views_of "$LID")
+command curl -sN --max-time 120 "${STREAM[@]}" "${LIVE_URL}__redrop/live" >"$WORK/stream.txt" &
+SPID=$!
+s_has() { grep -q "$1" "$WORK/stream.txt"; }
+wait_until 60 s_has '"version":1' || { cat "$WORK/stream.txt"; die "live stream did not announce version 1"; }
+echo '<!doctype html><title>l2</title><p>live two</p>' > "$WORK/live.html.tmp"
+mv "$WORK/live.html.tmp" "$WORK/live.html"
+wait_until 60 s_has '"version":2' || { cat "$WORK/stream.txt" "$WORK/live.err"; die "live stream did not announce version 2"; }
+curl -fsS "${FRAME[@]}" "$LIVE_URL" | grep -q 'live two' || die "reloaded frame content"
+[ "$(views_of "$LID")" = "$LVIEWS" ] || die "live stream or frame reload counted a view"
+kill -TERM "$WPID" 2>/dev/null
+wait_until 60 s_has 'event: end' || { cat "$WORK/stream.txt"; die "stopping watch did not end the live stream"; }
+WRC=0; wait "$WPID" || WRC=$?
+WPID=
+[ "$WRC" = 0 ] || die "live watch exit code $WRC after SIGTERM, want 0"
+wait "$SPID" 2>/dev/null || true
+SPID=
+[ "$(code_of "${STREAM[@]}" "${LIVE_URL}__redrop/live")" = 404 ] || die "live stream after watch is not the miss"
+pass "live reload: stream announces new versions while watch runs, no views used, ends with watch"
 
 # one-time link with password
 P=$($R share "$WORK/page.html" --once --password-generate --json)
@@ -618,6 +653,72 @@ PY
 else
   printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
 fi
+
+# abuse reports: the gate page links the report form on the app origin
+# (page in the fragment); the endpoint takes same-origin JSON only and
+# answers an unknown link like a real one; the admin queue shows the report
+# with its link, and revoking from it stops the link for good. An upload
+# with an executable is flagged without changing it. Without
+# REDROP_ABUSE_CONTACT there is no security.txt.
+PUB=$(curl -fsS "$BASE/api/v1/auth/config" | python3 -c 'import json,sys;print(json.load(sys.stdin)["public_url"])')
+RURL=$($R share "$WORK/page-v1.html" --password letmein-please -q)
+RID=$($R info "$RURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+RENC=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote_plus(sys.argv[1]))' "$RURL")
+curl -fsS "${DOC[@]}" "$RURL" | grep -qF "href=\"$PUB/report#url=$RENC\" target=\"_blank\"" || die "gate page links the report form with the page"
+[ "$(code_of "$BASE/report")" = 200 ] || die "report page"
+rbody() { python3 -c 'import json,sys;print(json.dumps({"url":sys.argv[1],"category":"phishing","details":"e2e: fake sign-in","contact":"e2e"}))' "$1"; }
+RH=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json' -H 'Sec-Fetch-Site: same-origin')
+[ "$(code_of "${RH[@]}" -H 'Origin: https://evil.example' -d "$(rbody "${RURL}x.html")" "$BASE/api/v1/reports")" = 403 ] || die "cross-origin report accepted"
+[ "$(code_of "${RH[@]}" -d "$(rbody "${RURL}x.html")" "$BASE/api/v1/reports")" = 403 ] || die "report without Origin accepted"
+OKR=$(curl -fsS "${RH[@]}" -H "Origin: $PUB" -d "$(rbody "${RURL}x.html#frag")" "$BASE/api/v1/reports")
+UNK=$(python3 -c 'import sys,urllib.parse as u;p=u.urlsplit(sys.argv[1]);print(p._replace(netloc="zebra-zebra-zebra-zebra."+p.netloc.split(".",1)[1]).geturl())' "$RURL")
+UNKR=$(curl -fsS "${RH[@]}" -H "Origin: $PUB" -d "$(rbody "$UNK")" "$BASE/api/v1/reports")
+[ "$OKR" = '{"ok":true}' ] && [ "$UNKR" = "$OKR" ] || die "report answers differ: $OKR / $UNKR"
+REPID=$(curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=visitor&page=1" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+assert d["total"]>=1 and d["page"]==1 and d["page_size"]==50, d
+rs=[r for r in d["items"] if r["source"]=="visitor"]
+assert len(rs)==1, rs
+r=rs[0]
+assert r["artifact_id"]==sys.argv[1] and r["reported_url"]==sys.argv[2]+"x.html" and r["category"]=="phishing" and r["status"]=="open", r
+assert r["artifact"] and r["artifact"]["url"]=="" and r["owner_username"]==sys.argv[3], r
+print(r["id"])' "$RID" "$RURL" "$USER") || die "report in the admin queue"
+curl -fsS -b "$CJ" "${H[@]}" -X POST "$BASE/api/v1/admin/reports/$REPID/revoke" | python3 -c 'import json,sys
+r=json.load(sys.stdin)
+assert r["status"]=="resolved" and r["artifact"]["revoked_by_admin"] and r["history"][-1]["action"]=="artifact.revoke", r' || die "revoke from the queue"
+[ "$(code_of "${DOC[@]}" "$RURL")" = 404 ] || die "revoked from the queue, link still works"
+[ "$($R info "$RID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["revoked_by_admin"])')" = True ] || die "owner sees the administrator's revocation"
+# The report form removes an intake link's key before sending it. A client
+# that sends the full link anyway must still never store the fragment.
+python3 -I - "$ELINKF" > "$WORK/e2e-report.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    link = f.read().strip()
+print(json.dumps({"url": link, "category": "other", "details": "e2e intake report"}))
+PY
+[ "$(code_of "${RH[@]}" -H "Origin: $PUB" --data-binary @"$WORK/e2e-report.json" "$BASE/api/v1/reports")" = 202 ] || die "report of an intake link"
+curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=visitor&page=1" | python3 -I -c 'import json,sys
+rows=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
+assert len(rows)==1 and rows[0]["reported_url"]==sys.argv[2], "intake report is missing or retains a key"' "$EID" "$EURL" || die "intake report stores the keyless content URL"
+pass "e2e abuse report: intake accepted, key never stored in the queue"
+mkdir -p "$WORK/exe-site"
+printf '<p>downloads</p>' > "$WORK/exe-site/index.html"
+printf 'MZ not really a program' > "$WORK/exe-site/setup.exe"
+EURL=$($R share "$WORK/exe-site" -q)
+EID=$($R info "$EURL" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+for _ in $(seq 1 50); do
+  N=$(curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=system&page=1" | python3 -c 'import json,sys
+d=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
+print(len(d))' "$EID") && [ "$N" = 1 ] && break
+  sleep 0.2
+done
+curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=system&page=1" | python3 -c 'import json,sys
+d=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
+assert len(d)==1 and d[0]["source"]=="system" and d[0]["category"]=="malware" and d[0]["details"]=="setup.exe: Windows program (.exe)" and d[0]["reported_url"]=="", d' "$EID" || die "executable upload flagged"
+curl -fsS "${EURL}setup.exe" | cmp -s - "$WORK/exe-site/setup.exe" || die "flagged file changed"
+APEX=$(python3 -c 'import sys,urllib.parse as u;p=u.urlsplit(sys.argv[1]);print(p.scheme+"://"+p.netloc.split(".",1)[1])' "$RURL")
+[ "$(code_of "$BASE/.well-known/security.txt")" = 404 ] && [ "$(code_of "$APEX/.well-known/security.txt")" = 404 ] || die "security.txt without REDROP_ABUSE_CONTACT"
+pass "abuse reports: gate link, same-origin form, same answer for unknown links, queue, revoke; executable flagged, served unchanged"
 
 # stdin + revoke/restore + rotate
 SURL=$(echo '# notes' | $R share - --name notes.md -q)

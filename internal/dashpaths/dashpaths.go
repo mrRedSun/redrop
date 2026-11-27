@@ -9,6 +9,10 @@ const (
 	Account       = "/account"
 	AccountLinked = "/account?linked=1"
 	TokensWelcome = "/tokens?welcome=1"
+	// Report is the public abuse report form. Links from the content
+	// domain add the page as "#url=<page>"; a fragment never reaches a
+	// server or a proxy log.
+	Report = "/report"
 
 	// One-time link prefixes; the secret token follows the slash.
 	Setup  = "/setup/"

@@ -2,19 +2,20 @@
 <div id="rd-info" class="rd-panel" popover role="region" aria-label="Shared page info">
 <h2>{{.Title}}</h2>
 <ul class="rd-facts">
-<li>Version {{.Version}}, published <span data-rel="{{iso .Published}}">{{utc .Published}}</span><small data-abs="{{iso .Published}}"></small></li>
+{{if .Live}}<li id="rd-live" class="rd-live" data-src="/__redrop/live" data-version="{{.Version}}" hidden><span class="rd-dot" aria-hidden="true"></span>Live: this page reloads when a new version is published</li>
+{{end}}<li id="rd-shown">Version {{.Version}}, published <span data-rel="{{iso .Published}}">{{utc .Published}}</span><small data-abs="{{iso .Published}}"></small></li>
 <li>{{with .ExpiresAt}}<span data-expires="{{iso .}}">Expires {{utc .}}</span><small data-abs="{{iso .}}"></small>{{else}}Never expires{{end}}</li>
 {{if eq .MaxViews 1}}<li>One-time link: this was the only view.</li>
 {{else if .MaxViews}}<li>{{.ViewsLeft}} of {{.MaxViews}} views left</li>
 {{end}}{{if .Password}}<li>Password-protected</li>
-{{end}}<li>{{bytes .Size}} in {{.Files}} file{{if ne .Files 1}}s{{end}}</li>
+{{end}}<li id="rd-size">{{bytes .Size}} in {{.Files}} file{{if ne .Files 1}}s{{end}}</li>
 {{if .E2E}}<li>End-to-end encrypted: only the full link opens it, and the server can't read it.</li>
 {{end}}</ul>
 {{if .Download}}<button type="button" id="rd-e2e-download" class="rd-e2e-download" hidden>Download the file</button>
 {{end}}
 {{if .Revisions}}<h3>Versions</h3>
 <ol class="rd-revs">{{range .Revisions}}
-<li{{if .Viewing}} aria-current="page"{{end}}>{{if and .Href (not .Viewing)}}<a href="{{.Href}}">Version {{.Number}}</a>{{else}}Version {{.Number}}{{end}}{{if .Current}} <span class="rd-tag">current</span>{{end}}{{if and .Viewing (not .Current)}} <span class="rd-tag">viewing</span>{{end}} · <span data-rel="{{iso .Published}}">{{utc .Published}}</span>{{with .Note}}<span class="rd-note">{{.}}</span>{{end}}</li>{{end}}
+<li data-rev="{{.Number}}"{{if .Viewing}} aria-current="page"{{end}}>{{if and .Href (not .Viewing)}}<a href="{{.Href}}">Version {{.Number}}</a>{{else}}Version {{.Number}}{{end}}{{if .Current}} <span class="rd-tag">current</span>{{end}}{{if and .Viewing (not .Current)}} <span class="rd-tag">viewing</span>{{end}} · <span data-rel="{{iso .Published}}">{{utc .Published}}</span>{{with .Note}}<span class="rd-note">{{.}}</span>{{end}}</li>{{end}}
 </ol>{{end}}
 {{if .Feedback}}<form id="rd-fb" class="rd-fb" data-version="{{.Version}}" data-current="{{.Current}}" hidden>
 <h3>Feedback</h3>
@@ -27,5 +28,5 @@
 <button type="submit" id="rd-fb-send">Send</button>
 <p id="rd-fb-status" class="rd-fb-status" role="status" aria-live="polite"></p>
 </form>
-{{end}}<div class="rd-foot"><img src="/__redrop/favicon.svg" alt="" width="16" height="16">Shared with redrop</div>
+{{end}}<div class="rd-foot"><img src="/__redrop/favicon.svg" alt="" width="16" height="16">Shared with redrop<a class="rd-report" href="{{.Report}}" target="_blank" rel="noopener noreferrer">Report abuse</a></div>
 </div>{{end}}

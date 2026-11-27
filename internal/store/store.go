@@ -62,18 +62,52 @@ CREATE TABLE feedback (
 );
 CREATE INDEX feedback_artifact ON feedback(artifact_id, created_at);`
 
-// schemaV8 marks end-to-end encrypted artifacts and versions (DESIGN.md
+// schemaV8 adds abuse reports and the moderation audit log (DESIGN.md
+// "Abuse handling"). A report names its artifact without a foreign key, so
+// it and its history outlive the artifact.
+const schemaV8 = `CREATE TABLE reports (
+    id          TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    version     INTEGER NOT NULL DEFAULT 0,
+    kind        TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    category    TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT '',
+    contact     TEXT NOT NULL DEFAULT '',
+    network     TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  INTEGER NOT NULL,
+    closed_at   INTEGER,
+    closed_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX reports_status ON reports(status, created_at);
+CREATE INDEX reports_artifact ON reports(artifact_id, status);
+CREATE TABLE audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          INTEGER NOT NULL,
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    report_id   TEXT NOT NULL DEFAULT '',
+    artifact_id TEXT NOT NULL DEFAULT '',
+    user_id     TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX audit_report ON audit(report_id);`
+
+// schemaV9 marks end-to-end encrypted artifacts and versions (DESIGN.md
 // "End-to-end encrypted links"), with the key check the server compares
 // every new version against, and records what each upload was declared
 // for, so plaintext for an encrypted artifact is refused before any byte
 // arrives. Existing rows are plaintext and undeclared.
-const schemaV8 = `ALTER TABLE artifacts ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;
+const schemaV9 = `ALTER TABLE artifacts ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE artifacts ADD COLUMN e2e_key_check TEXT NOT NULL DEFAULT '';
 ALTER TABLE versions ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE uploads ADD COLUMN artifact_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE uploads ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8}
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9}
 
 var ErrNotFound = errors.New("not found")
 

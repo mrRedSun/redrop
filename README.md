@@ -215,7 +215,7 @@ backup learns sizes, file counts and timing, never content, names or titles.
   Feedback is **not** encrypted: comments, quotes and page paths reach the
   server in plaintext.
 - **Stops working:** `--spa`, file listings, the dashboard preview and file
-  names, the server reading `<title>` (pass `--title` to name it in the
+  names, live reload, the server reading `<title>` (pass `--title` to name it in the
   dashboard; titles and notes are plaintext), the artifact's own favicon,
   and seeking in videos over 64 MiB.
 - **Viewing** needs HTTPS, and the server's own address must be reachable
@@ -248,6 +248,19 @@ typed notice events. Ctrl-C stops it. It takes `update`'s content options
 (`--render`, `--entry`, `--as`, `--spa`, `--note`), so a watched `.md` file is
 re-rendered on every change and `--render none` keeps it raw. Folders follow
 the [folder rules](#folder-uploads).
+
+**Live reload** is on while `watch` runs (`--no-live` turns it off). People
+who have the link open in redrop's viewer page see each new version without
+reloading: the viewer page reloads its frame, keeping the page and scroll
+position, and the info panel shows a "Live" row. Nothing is added to the
+artifact. It needs the info button and an HTML page or folder: `--no-info`
+links, direct views (`?redrop-info=0`) and file artifacts are not reloaded.
+Reloads never use a view, so view-limited and `--once` links work too. Live
+mode ends within a minute after `watch` stops or dies; while it is off,
+viewer pages make no extra requests. A temporary refusal (the info button
+off, or all sessions in use) is retried at the renewal interval, so fixing
+the cause restores live reload without restarting `watch`. See
+[`docs/DESIGN.md`](docs/DESIGN.md#live-reload).
 
 ## Develop
 
@@ -282,6 +295,40 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_CONTENT_MISS_BURST`, `REDROP_CONTENT_MISS_PER_MINUTE` | `30`, `5`: unknown or unavailable links a client may request (burst, then per minute) before getting `429` |
 | `REDROP_FEEDBACK_BURST`, `REDROP_FEEDBACK_PER_MINUTE` | `5`, `1`: viewer comments a client may post (burst, then per minute) |
 | `REDROP_FEEDBACK_MAX_PER_ARTIFACT` | `500`: comments one artifact keeps, open or resolved |
+| `REDROP_ABUSE_CONTACT` | unset (default): no `security.txt`. An email address, `mailto:` URI or `https://` URL; serves `/.well-known/security.txt` on the dashboard host and the content apex (see [Abuse handling](#abuse-handling)) |
+| `REDROP_REPORTS_PER_HOUR` | `5`: abuse reports one client network may file per hour |
+| `REDROP_REPORTS_MAX_OPEN`, `REDROP_REPORTS_MAX_OPEN_PER_ARTIFACT` | `1000`, `20`: open visitor reports in all, and on one artifact; past them reports are refused or dropped |
+| `REDROP_NOTIFY_URL`, `REDROP_NOTIFY_TOKEN_FILE` | unset (default): no notifications. A webhook that gets a JSON POST for every new report and upload flag, with the file's token as `Authorization: Bearer` |
+| `REDROP_LIVE_LEASE` | `60s` (15s to 10m): how long a `redrop watch` session's live reload lease lasts; the CLI renews it every third of that |
+| `REDROP_LIVE_KEEPALIVE` | `20s` (1s to 29s): keep-alive interval of live reload streams; keep it under your proxies' idle timeout (Cloudflare: about 100 s) |
+| `REDROP_LIVE_MAX_STREAMS`, `REDROP_LIVE_MAX_STREAMS_PER_ARTIFACT` | `1000`, `100`: open live reload streams on the server and per artifact (plus one quarter of the server cap per artifact owner, 32 watch leases per owner, and 16 per client network); beyond them viewers get no live reload |
+
+## Abuse handling
+
+One phishing page can get the whole content domain flagged by Safe Browsing,
+which breaks every link. redrop gives you the pieces to catch that early;
+[DESIGN.md](docs/DESIGN.md#abuse-handling) has the details and threat model.
+
+- **Register the content domain in [Google Search Console](https://search.google.com/search-console)**
+  (a Domain property covers the apex and every artifact subdomain), and the
+  dashboard's domain too. Safe Browsing then tells you about a flagged page
+  before your visitors see a warning.
+- **Set `REDROP_ABUSE_CONTACT`** to an address someone reads. It appears in
+  `/.well-known/security.txt` on both hosts, next to the report form.
+- **Reports.** Gate pages, the info panel and the content apex link to
+  `/report` on the dashboard host. Anyone can report a link there, without an
+  account. Reports land in **Administration → Reports**, where you can
+  resolve or dismiss them, revoke the artifact (its owner can't undo that), or
+  suspend the owner (the account is disabled and all of its artifacts are
+  revoked). Every action is recorded in the report's history. Nothing happens
+  without an administrator: a report never takes a link down by itself.
+- **Upload checks.** A published page with a password form that posts to
+  another site, and executables in a bundle or shared as a file, are flagged
+  in the same queue. They are only flagged: the content is published and
+  served unchanged.
+- **Notifications.** With `REDROP_NOTIFY_URL`, each new report or flag POSTs
+  `{"level":"warning","title":"…","message":"…","key":"…"}`. The message has
+  the category, artifact ID and owner only, never the reporter's text.
 
 ## Reverse proxy
 
@@ -305,6 +352,11 @@ traefik.http.routers.redrop-content.rule: >-
 Update this rule **before** deploying a version that mints word links; a rule
 that only matches the 26-character format sends new links nowhere. The content
 domain needs a wildcard DNS record and certificate (`*.usercontent.example`).
+
+Live reload streams (`/__redrop/live`, `text/event-stream`) stay open while
+`redrop watch` runs. Proxies must pass them unbuffered (Traefik and Cloudflare
+do; redrop also sends `X-Accel-Buffering: no`) and must not close a
+connection that is idle for less than `REDROP_LIVE_KEEPALIVE`.
 ### Client addresses
 
 Sign-in, link lookups, artifact passwords and link misses are limited per

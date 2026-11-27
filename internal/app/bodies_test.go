@@ -17,6 +17,7 @@ func (h *harness) sessionRaw(method, path, contentType string, body io.Reader) *
 		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("X-Redrop-Request", "1")
+	req.Header.Set("Origin", h.app.cfg.PublicOrigin()) // as a browser sends with every POST
 	req.AddCookie(h.session)
 	resp, err := h.srv.Client().Do(req)
 	if err != nil {

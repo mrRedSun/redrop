@@ -211,9 +211,13 @@ func plaintextArtifact(next http.HandlerFunc) http.HandlerFunc {
 func TestWatchUnauthorizedExitCode(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/uploads" {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		// The live reload lease is refused with the same answer; it
+		// never retries and doesn't count as a publish attempt.
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artifactidabcdef/live/") {
+			requests.Add(1)
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/uploads" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
 		}
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -483,7 +487,9 @@ func TestWatchValidSourcePrintsWatching(t *testing.T) {
 			}
 			_, errOut := captureCLIOutput(t, func() {
 				cmd := newRootCmd()
-				cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef"}, tc.args...))
+				// --no-live: this checks that startup publishes nothing; the
+				// live lease has its own tests.
+				cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef", "--no-live"}, tc.args...))
 				if err := cmd.ExecuteContext(ctx); err != nil {
 					t.Fatalf("watch returned %v; want success", err)
 				}

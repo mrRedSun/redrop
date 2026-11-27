@@ -137,6 +137,8 @@ func (h *Handler) e2eViewer(w http.ResponseWriter, r *http.Request, a *store.Art
 	data.Info.E2E, data.Info.Download = true, snap.Kind == api.KindFile
 	data.Info.Feedback = data.Panel && h.sharing.FeedbackOpen(a)
 	self := h.selfOrigin(a)
+	// The reporter shares the artifact's address, never its decryption key.
+	data.Info.Report = h.pages.reportLink(self + "/")
 	navigable := "https:"
 	if h.cfg.ContentURL.Scheme == "http" {
 		navigable = "http: https:"

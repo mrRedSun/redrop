@@ -50,6 +50,91 @@ export const AdminArtifact = Schema.Struct({
 export type AdminArtifact = typeof AdminArtifact.Type
 export const AdminArtifactList = ListOf(AdminArtifact)
 
+/** One audited action on a report. */
+export const ReportAction = Schema.Struct({
+  at: Timestamp,
+  actor: Schema.String,
+  action: Schema.String,
+  detail: Schema.String,
+})
+
+/**
+ * An abuse report (DESIGN.md "Abuse handling"). `details`, `contact` and
+ * system findings are untrusted text: render them as text only, never as
+ * HTML or a link. `reported_url` is the one artifact link an admin sees:
+ * the one the reporter submitted.
+ */
+export const Report = Schema.Struct({
+  id: Schema.String,
+  source: Schema.Literals(['visitor', 'system']),
+  category: Schema.String,
+  details: Schema.String,
+  contact: Schema.String,
+  reported_url: Schema.String,
+  version: Schema.Number,
+  status: Schema.Literals(['open', 'resolved', 'dismissed']),
+  created_at: Timestamp,
+  closed_at: Schema.NullOr(Timestamp),
+  closed_by: Schema.String,
+  artifact_id: Schema.String,
+  artifact: Schema.NullOr(AdminArtifact),
+  owner_username: Schema.String,
+  owner_suspended: Schema.Boolean,
+  history: Schema.NullOr(Schema.Array(ReportAction)),
+})
+export type Report = typeof Report.Type
+const NonNegativeInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))
+const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))
+export const ReportList = Schema.Struct({
+  items: Schema.NullOr(Schema.Array(Report)),
+  total: NonNegativeInteger,
+  page: PositiveInteger,
+  page_size: PositiveInteger,
+})
+export type ReportList = typeof ReportList.Type
+
+export const ReportStatus = Schema.Literals(['open', 'resolved', 'dismissed'])
+export type ReportStatus = typeof ReportStatus.Type
+export const ReportStatusUpdate = Schema.Struct({ status: ReportStatus })
+
+export const ReportStatusFilter = Schema.Literals(['open', 'resolved', 'dismissed', 'all'])
+export type ReportStatusFilter = typeof ReportStatusFilter.Type
+export const ReportSourceFilter = Schema.Literals(['all', 'visitor', 'system'])
+export type ReportSourceFilter = typeof ReportSourceFilter.Type
+export type ReportFilter = { readonly status: ReportStatusFilter; readonly source: ReportSourceFilter; readonly page: number }
+
+/** Invalid URL filters fall back to the first page of the open queue. */
+export const reportFilterFromSearch = (params: URLSearchParams): ReportFilter => {
+  const page = Number(params.get('page'))
+  return {
+    status: Option.getOrElse(Schema.decodeUnknownOption(ReportStatusFilter)(params.get('status')), () => 'open' as const),
+    source: Option.getOrElse(Schema.decodeUnknownOption(ReportSourceFilter)(params.get('source')), () => 'all' as const),
+    page: Number.isSafeInteger(page) && page > 0 ? page : 1,
+  }
+}
+
+/** Changing either filter starts at page one; paging preserves both filters. */
+export const reportSearch = (params: URLSearchParams, patch: Partial<ReportFilter>): URLSearchParams => {
+  const next = new URLSearchParams(params)
+  if (patch.status !== undefined) {
+    if (patch.status === 'open') next.delete('status')
+    else next.set('status', patch.status)
+  }
+  if (patch.source !== undefined) {
+    if (patch.source === 'all') next.delete('source')
+    else next.set('source', patch.source)
+  }
+  const page = patch.status !== undefined || patch.source !== undefined ? 1 : patch.page
+  if (page !== undefined) {
+    if (page === 1) next.delete('page')
+    else next.set('page', String(page))
+  }
+  return next
+}
+
+/** Only an http(s) address becomes a link, whatever the server sent. */
+export const reportedLink = (r: Pick<Report, 'reported_url'>): string | undefined => (/^https?:\/\//i.test(r.reported_url) ? r.reported_url : undefined)
+
 export const Invite = Schema.Struct({
   id: Schema.String,
   note: Schema.String,

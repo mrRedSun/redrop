@@ -10,7 +10,10 @@ import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
 import * as artifactEndpoints from '@/features/artifacts/endpoints'
 import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, statusLabel, toUpdateRequest } from '@/features/artifacts/schemas'
-import { Stats, AdminArtifact, CreateInviteForm, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
+import { Stats, AdminArtifact, CreateInviteForm, Report, ReportList, reportFilterFromSearch, reportSearch, reportedLink, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
+import * as adminEndpoints from '@/features/admin/endpoints'
+import * as reportEndpoints from '@/features/reports/endpoints'
+import { ReportForm, reportDefaults, toReportRequest } from '@/features/reports/schemas'
 import { NewAccountForm, NewPasswordForm } from '@/features/onboarding/schemas'
 import { CreatedToken, TokenList } from '@/features/tokens/schemas'
 import { psQuote, setupCommand, setupOsFromPlatform, shQuote } from '@/features/tokens/setup-command'
@@ -258,4 +261,87 @@ await test('successful command responses are schema validated too', async () => 
   const h = harness(() => response({ wrong: true }))
   const exit = await h.run(Effect.exit(RedropApi.use((api) => api.call({ method: 'POST', path: ['auth', 'logout'] }))))
   assert(Exit.isFailure(exit))
+})
+
+await test('report form: the page comes from the fragment, limits count characters, empty fields are left out', () => {
+  const page = 'https://amber-otter-quilt-river.usercontent.example/a.html?x=1&y=2'
+  assert.equal(reportDefaults('#url=' + encodeURIComponent(page)).url, page)
+  assert.equal(reportDefaults('').url, '')
+  assert.equal(reportDefaults('#other=1').url, '')
+  const decode = Schema.decodeUnknownOption(ReportForm)
+  const ok = { url: '  ' + page + ' ', category: 'spam', details: ' ', contact: '' }
+  const values = Option.getOrThrow(decode(ok))
+  assert.deepEqual(toReportRequest(values), { url: page, category: 'spam' })
+  assert.deepEqual(toReportRequest({ ...values, details: 'd', contact: 'c' }), { url: page, category: 'spam', details: 'd', contact: 'c' })
+  // 2000 astral characters are 4000 UTF-16 units but within the limit.
+  assert(Option.isSome(decode({ ...ok, details: '😀'.repeat(2000) })))
+  assert(Option.isNone(decode({ ...ok, details: 'a'.repeat(2001) })))
+  assert(Option.isNone(decode({ ...ok, contact: 'a'.repeat(201) })))
+  assert(Option.isNone(decode({ ...ok, url: '   ' })))
+  assert(Option.isNone(decode({ ...ok, category: 'rude' })))
+})
+
+const reportWire = (over: Record<string, unknown> = {}) => ({
+  id: 'r1', source: 'visitor', category: 'phishing', details: '<img src=x onerror=alert(1)>', contact: 'sam', reported_url: 'https://amber-otter-quilt-river.usercontent.example/',
+  version: 0, status: 'open', created_at: '2026-11-18T10:00:00Z', closed_at: null, closed_by: '', artifact_id: 'a1', artifact: null,
+  owner_username: 'bob', owner_suspended: false, history: [{ at: '2026-11-18T10:05:00Z', actor: 'admin', action: 'report.dismissed', detail: '' }], ...over,
+})
+
+await test('admin reports decode; the artifact stays metadata only; only http(s) links are links', () => {
+  const artifact = { id: 'a1', title: 't', kind: 'html', status: 'revoked', owner_username: 'bob', has_password: false, max_views: 0, views: 0, size: 1, total_size: 1,
+    versions: 1, e2e: false, created_at: '2026-11-18T10:00:00Z', expires_at: null, last_viewed_at: null, revoked_by_admin: true, url: 'https://secret.example/' }
+  const r = Schema.decodeUnknownSync(Report)(reportWire({ artifact }))
+  assert.equal(r.details, '<img src=x onerror=alert(1)>')
+  assert(r.artifact && !('url' in r.artifact))
+  assert.equal(r.history?.[0].at.toISOString(), '2026-11-18T10:05:00.000Z')
+  assert.equal(Schema.decodeUnknownSync(Report)(reportWire({ history: null })).history, null)
+  assert(Option.isNone(Schema.decodeUnknownOption(Report)(reportWire({ status: 'pending' }))))
+  assert.equal(reportedLink(r), 'https://amber-otter-quilt-river.usercontent.example/')
+  for (const bad of ['javascript:alert(1)', 'data:text/html,x', '//evil.example/', '']) assert.equal(reportedLink({ reported_url: bad }), undefined)
+})
+
+await test('report queue filters validate URL state and reset paging on a filter change', () => {
+  assert.deepEqual(reportFilterFromSearch(new URLSearchParams('status=dismissed&source=system&page=12')), { status: 'dismissed', source: 'system', page: 12 })
+  assert.deepEqual(reportFilterFromSearch(new URLSearchParams('status=bogus&source=bogus&page=0')), { status: 'open', source: 'all', page: 1 })
+  assert.deepEqual(reportFilterFromSearch(new URLSearchParams('')), { status: 'open', source: 'all', page: 1 })
+  for (const page of ['-1', '1.5', 'Infinity', 'NaN', '2x', '9007199254740992']) {
+    assert.equal(reportFilterFromSearch(new URLSearchParams({ page })).page, 1)
+  }
+  const current = new URLSearchParams('status=resolved&source=visitor&page=8&keep=yes')
+  assert.equal(reportSearch(current, { status: 'dismissed' }).toString(), 'status=dismissed&source=visitor&keep=yes')
+  assert.equal(reportSearch(current, { source: 'system' }).toString(), 'status=resolved&source=system&keep=yes')
+  assert.equal(reportSearch(current, { page: 9 }).toString(), 'status=resolved&source=visitor&page=9&keep=yes')
+  assert.equal(reportSearch(current, { status: 'open', source: 'all' }).toString(), 'keep=yes')
+  assert.equal(current.get('page'), '8')
+})
+
+await test('report queue pages require a total and preserve the paging metadata', () => {
+  const page = Schema.decodeUnknownSync(ReportList)({ items: [reportWire()], total: 501, page: 11, page_size: 50 })
+  assert.equal(page.items?.length, 1)
+  assert.equal(page.total, 501)
+  assert.equal(page.page, 11)
+  assert.equal(page.page_size, 50)
+  for (const invalid of [
+    { items: [] },
+    { items: [], total: -1, page: 1, page_size: 50 },
+    { items: [], total: 0, page: 0, page_size: 50 },
+    { items: [], total: 0, page: 1, page_size: 0 },
+    { items: [], total: 0.5, page: 1, page_size: 50 },
+  ]) assert(Option.isNone(Schema.decodeUnknownOption(ReportList)(invalid)))
+})
+
+await test('report endpoints: page and source queries, bodies and the CSRF header', async () => {
+  const h = harness((path) => (path.startsWith('/api/v1/admin/reports') && !path.endsWith('/reports') ? response(reportWire()) : path.endsWith('/admin/reports') ? response({ items: null, total: 501, page: 11, page_size: 50 }) : response({ ok: true }, 202)))
+  await h.run(reportEndpoints.submit({ url: 'https://x.example/', category: 'spam' }))
+  assert.deepEqual(await h.run(adminEndpoints.reports('all', 'visitor', 11)), { items: [], total: 501, page: 11, page_size: 50 })
+  await h.run(adminEndpoints.setReportStatus('r/1', { status: 'resolved' }))
+  await h.run(adminEndpoints.revokeReported('r1'))
+  await h.run(adminEndpoints.suspendReportedOwner('r1'))
+  assert.deepEqual(h.requests, [
+    { method: 'POST', path: '/api/v1/reports', csrf: '1', body: '{"url":"https://x.example/","category":"spam"}' },
+    { method: 'GET', path: '/api/v1/admin/reports?status=all&source=visitor&page=11', csrf: '1', body: undefined },
+    { method: 'PATCH', path: '/api/v1/admin/reports/r%2F1', csrf: '1', body: '{"status":"resolved"}' },
+    { method: 'POST', path: '/api/v1/admin/reports/r1/revoke', csrf: '1', body: undefined },
+    { method: 'POST', path: '/api/v1/admin/reports/r1/suspend', csrf: '1', body: undefined },
+  ])
 })
