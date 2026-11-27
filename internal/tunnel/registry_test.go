@@ -131,8 +131,15 @@ func TestNewAccessGenerationClosesOldStreams(t *testing.T) {
 	}
 	defer r.Body.Close()
 	within(t, "the request", entered)
+	// Receiving the headers doesn't mean the first body bytes reached the
+	// visitor yet. Wait for them before changing access: cancellation may
+	// correctly discard bytes still in transit.
+	first := make([]byte, len("open"))
+	if _, err := io.ReadFull(r.Body, first); err != nil || string(first) != "open" {
+		t.Fatalf("initial stream bytes: %q %v", first, err)
+	}
 	f.reg.Update("t1", true, 2, nil, "")
-	if b, err := io.ReadAll(r.Body); err == nil || string(b) != "open" {
+	if b, err := io.ReadAll(r.Body); err == nil || len(b) != 0 {
 		t.Fatalf("stream from the old generation: %q %v; want it closed", b, err)
 	}
 	// A request still carrying the old generation is not let through.
