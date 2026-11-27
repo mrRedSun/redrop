@@ -38,7 +38,8 @@ type LiveLease struct {
 
 // HoldLive creates or renews the live lease of a watch session on the
 // actor's artifact. It is refused for an artifact without redrop's viewer
-// page: the info button off, or a file artifact.
+// page (the info button off, or a file artifact) and for a tunnel, which
+// has no versions to publish: its viewers see the running app.
 func (s *Service) HoldLive(ctx context.Context, actor Actor, id, session string) (LiveLease, error) {
 	if !liveSessionRE.MatchString(session) {
 		return LiveLease{}, apperr.Invalid("the live session ID must be 16 to 64 letters, digits, '-' or '_'")
@@ -46,6 +47,9 @@ func (s *Service) HoldLive(ctx context.Context, actor Actor, id, session string)
 	a, err := s.owned(ctx, actor, id)
 	if err != nil {
 		return LiveLease{}, err
+	}
+	if IsTunnel(a) {
+		return LiveLease{}, errTunnelVersions()
 	}
 	switch s.Mode(a, CurrentSnapshot(a)) {
 	case ModeDirect:
@@ -74,7 +78,7 @@ func (s *Service) ReleaseLive(ctx context.Context, actor Actor, id, session stri
 // Live reports whether a's viewers get live reload now: a lease is held and
 // the current version is shown in redrop's viewer frame.
 func (s *Service) Live(a *store.Artifact) bool {
-	return s.live.on(a.ID) && s.Mode(a, CurrentSnapshot(a)) == ModeFramed
+	return !IsTunnel(a) && s.live.on(a.ID) && s.Mode(a, CurrentSnapshot(a)) == ModeFramed
 }
 
 // OpenLiveStream registers a viewer's stream on a from client (a client

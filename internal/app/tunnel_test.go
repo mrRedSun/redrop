@@ -539,6 +539,10 @@ func TestTunnelRefusals(t *testing.T) {
 	if _, err := f.c.Update(ctx, a.ID, &client.Source{Path: page}, nil); client.StatusOf(err) != http.StatusBadRequest {
 		t.Errorf("publish a version to a tunnel: %v", err)
 	}
+	// Live reload is for published versions: a tunnel is live already.
+	if _, err := f.c.HoldLive(ctx, a.ID, "session-0000000000000000"); client.StatusOf(err) != http.StatusBadRequest {
+		t.Errorf("a live reload lease on a tunnel: %v", err)
+	}
 	// Settings that do apply still work.
 	title, ttl := "renamed", "2h"
 	if got, err := f.c.UpdateArtifact(ctx, a.ID, &api.UpdateArtifactRequest{Title: &title, TTL: &ttl}); err != nil || got.Title != "renamed" {

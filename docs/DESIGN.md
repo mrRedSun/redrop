@@ -1238,7 +1238,8 @@ link of the same shape as an artifact link. It answers issue #25.
     migration is needed.
   * Refused for tunnels, with `400`: a view limit (`max_views`, `--once`),
     older versions, the SPA flag, new versions, activating or deleting a
-    version. They don't fit a live app.
+    version, and a live reload lease (`redrop watch`). They don't fit a
+    live app.
   * Tunnels use no storage, so they never count against a quota. Counting
     their traffic against the quota is not done.
 * **The link works while `redrop tunnel` runs.** The CLI keeps one
