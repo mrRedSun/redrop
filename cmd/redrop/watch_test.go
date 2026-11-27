@@ -38,7 +38,7 @@ func TestWatchRejectsInvalidInputsBeforeConfiguration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			captureCLIOutput(t, func() {
 				cmd := newRootCmd()
-				cmd.SetArgs(append([]string{"watch", "artifact-id", tc.path}, tc.flags...))
+				cmd.SetArgs(append([]string{"watch", "artifactidabcdef", tc.path}, tc.flags...))
 				err := cmd.Execute()
 				requireExitCode(t, err, exitUsage)
 				if !strings.Contains(err.Error(), tc.message) {
@@ -84,7 +84,7 @@ func TestWatchCanceledContextSucceeds(t *testing.T) {
 	cancel()
 	out, errOut := captureCLIOutput(t, func() {
 		cmd := newRootCmd()
-		cmd.SetArgs([]string{"--url", srv.URL, "--token", "test-token", "--json", "watch", "artifact-id", path})
+		cmd.SetArgs([]string{"--url", srv.URL, "--token", "test-token", "--json", "watch", "artifactidabcdef", path})
 		if err := cmd.ExecuteContext(ctx); err != nil {
 			t.Fatalf("canceled watch returned %v; want success", err)
 		}
@@ -112,7 +112,7 @@ func TestWatchJSONLines(t *testing.T) {
 	wireNames := []string{"retry", "watch_error", "root_vanished", "rewatch_failed", "tree_changed", "empty_folder", "notice"}
 	out, errOut := captureCLIOutput(t, func() {
 		g.json = true
-		opts := watchOptions("artifact-id", "site", time.Second)
+		opts := watchOptions("artifactidabcdef", "site", time.Second)
 		opts.OnReady()
 		opts.OnPublish(client.WatchResult{
 			Artifact: &api.Artifact{URL: "https://amber-otter-quilt-river.usercontent.example/"},
@@ -141,7 +141,7 @@ func TestWatchJSONLines(t *testing.T) {
 		if _, err := time.Parse(time.RFC3339, stamp); err != nil {
 			t.Fatalf("line %d timestamp: %v", i, err)
 		}
-		want := map[string]any{"id": "artifact-id", "at": stamp}
+		want := map[string]any{"id": "artifactidabcdef", "at": stamp}
 		if i == 0 {
 			want["event"], want["version"], want["url"] = "publish", float64(3), "https://amber-otter-quilt-river.usercontent.example/"
 			want["at"] = at.Format(time.RFC3339)
@@ -171,7 +171,7 @@ func TestWatchTextNotices(t *testing.T) {
 	} {
 		out, errOut := captureCLIOutput(t, func() {
 			g.json = false
-			watchOptions("artifact-id", "site", time.Second).OnNotice(tc.notice)
+			watchOptions("artifactidabcdef", "site", time.Second).OnNotice(tc.notice)
 		})
 		if out != "" || errOut != tc.want {
 			t.Errorf("%s: stdout=%q stderr=%q; want %q", tc.notice.Kind, out, errOut, tc.want)
@@ -194,12 +194,26 @@ func TestCLIProcess(t *testing.T) {
 	t.Fatal("missing CLI arguments")
 }
 
+// plaintextArtifact answers the artifact read that watch makes at startup
+// and before each publish (a plaintext artifact, so no key is needed) and
+// passes every other request to next.
+func plaintextArtifact(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/artifacts/artifactidabcdef" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(api.Artifact{ID: "artifactidabcdef"})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func TestWatchUnauthorizedExitCode(t *testing.T) {
 	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
 		// The live reload lease is refused with the same answer; it
 		// never retries and doesn't count as a publish attempt.
-		if !strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artifact-id/live/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artifactidabcdef/live/") {
 			requests.Add(1)
 			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/uploads" {
 				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -216,7 +230,7 @@ func TestWatchUnauthorizedExitCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCLIProcess$", "--",
-		"--url", srv.URL, "--token", "test-token", "watch", "artifact-id", path, "--debounce", "1ms")
+		"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef", path, "--debounce", "1ms")
 	cmd.Env = append(os.Environ(), "REDROP_TEST_CLI_PROCESS=1", "REDROP_CONFIG="+filepath.Join(t.TempDir(), "missing.json"))
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -281,7 +295,12 @@ func TestWatchLocalErrorExitCode(t *testing.T) {
 // reach the uploader, and an invalid mode is a usage error before any
 // network access.
 func TestWatchPassesRenderOptions(t *testing.T) {
-	t.Setenv("REDROP_URL", "http://redrop.example.com")
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	t.Setenv("REDROP_URL", srv.URL)
 	t.Setenv("REDROP_TOKEN", "rdp_test")
 	t.Setenv("REDROP_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
 	dir := t.TempDir()
@@ -294,7 +313,7 @@ func TestWatchPassesRenderOptions(t *testing.T) {
 	var got *client.Source
 	orig := watchArtifact
 	watchArtifact = func(_ context.Context, up client.Uploader, id string, src *client.Source, _ client.WatchOptions) error {
-		if _, ok := up.(*client.Client); !ok || id != "artifact-id" {
+		if _, ok := up.(*client.Client); !ok || id != "artifactidabcdef" {
 			t.Errorf("uploader=%T id=%q", up, id)
 		}
 		got = src
@@ -318,7 +337,7 @@ func TestWatchPassesRenderOptions(t *testing.T) {
 			got = nil
 			captureCLIOutput(t, func() {
 				cmd := newRootCmd()
-				cmd.SetArgs(append([]string{"watch", "artifact-id"}, tc.args...))
+				cmd.SetArgs(append([]string{"watch", "artifactidabcdef"}, tc.args...))
 				if err := cmd.Execute(); err != nil {
 					t.Fatal(err)
 				}
@@ -344,7 +363,7 @@ func TestWatchPassesRenderOptions(t *testing.T) {
 		got = nil
 		captureCLIOutput(t, func() {
 			cmd := newRootCmd()
-			cmd.SetArgs([]string{"watch", "artifact-id", note, "--render", "bogus"})
+			cmd.SetArgs([]string{"watch", "artifactidabcdef", note, "--render", "bogus"})
 			requireExitCode(t, cmd.Execute(), exitUsage)
 		})
 		if got != nil {
@@ -401,7 +420,7 @@ func TestWatchRejectsBadSourceAtStartup(t *testing.T) {
 				return err
 			}
 			started = false
-			watchErr := run(append([]string{"watch", "artifact-id"}, tc.args...)...)
+			watchErr := run(append([]string{"watch", "artifactidabcdef"}, tc.args...)...)
 			requireExitCode(t, watchErr, exitUsage)
 			if started {
 				t.Fatal("the watcher started for a source every publish rejects")
@@ -422,10 +441,11 @@ func TestWatchRejectsBadSourceAtStartup(t *testing.T) {
 }
 
 // A valid source, or a folder that is empty for now, still starts the real
-// watcher and prints "watching"; nothing is published at startup.
+// watcher and prints "watching"; nothing is published at startup. The only
+// request is the artifact read that tells watch whether to encrypt.
 func TestWatchValidSourcePrintsWatching(t *testing.T) {
 	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -469,7 +489,7 @@ func TestWatchValidSourcePrintsWatching(t *testing.T) {
 				cmd := newRootCmd()
 				// --no-live: this checks that startup publishes nothing; the
 				// live lease has its own tests.
-				cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifact-id", "--no-live"}, tc.args...))
+				cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef", "--no-live"}, tc.args...))
 				if err := cmd.ExecuteContext(ctx); err != nil {
 					t.Fatalf("watch returned %v; want success", err)
 				}
@@ -477,12 +497,12 @@ func TestWatchValidSourcePrintsWatching(t *testing.T) {
 			if !ready || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				t.Fatalf("watch did not become ready; stderr=%q", errOut)
 			}
-			if want := "watching " + tc.args[0] + " -> artifact-id"; !strings.HasPrefix(errOut, want) {
+			if want := "watching " + tc.args[0] + " -> artifactidabcdef"; !strings.HasPrefix(errOut, want) {
 				t.Fatalf("stderr = %q; want it to start with %q", errOut, want)
 			}
 		})
 	}
 	if got := requests.Load(); got != 0 {
-		t.Fatalf("starting watch made %d requests; want none", got)
+		t.Fatalf("starting watch made %d requests besides the artifact read; want none", got)
 	}
 }

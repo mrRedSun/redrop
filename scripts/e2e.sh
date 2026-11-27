@@ -7,7 +7,7 @@ BASE=${BASE:-http://$(hostname -I | awk '{print $1}'):8080}
 WORK=$(mktemp -d)
 # A watcher and a live stream started below are ours: stop them if a check
 # fails first. So are a tunnel and its local test app.
-trap 'for p in "${WPID:-}" "${SPID:-}" "${TPID:-}" "${APID:-}"; do [ -z "$p" ] || kill "$p" 2>/dev/null; done; rm -rf "$WORK"' EXIT
+trap 'for p in "${WPID:-}" "${SPID:-}" "${TPID:-}" "${APID:-}"; do [ -z "$p" ] || kill "$p" 2>/dev/null; done; rm -rf "${WORK:?}"' EXIT
 CJ="$WORK/cookies"
 H=(-H 'X-Redrop-Request: 1' -H 'Content-Type: application/json')
 R=${REDROP_CLI:-/root/redrop-dev/cli/redrop-linux-amd64}
@@ -445,6 +445,215 @@ $R feedback resolve "$FBURL" "$CID" >/dev/null
 [ "$($R feedback "$FBURL" --all --json | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["resolved_at"] is not None)')" = True ] || die "resolved comment in --all"
 pass "feedback: closed by default, opened with set --feedback, posted as a browser would, read with --json, resolved"
 
+# End-to-end encryption (--e2e): the CLI encrypts, the server stores and
+# serves only ciphertext, and Node's WebCrypto with the viewer's own
+# decryptor (scripts/e2e-decrypt.mjs) reads it back with the link's key.
+# Full links (keys included) travel in files under $WORK and on stdin, never
+# in arguments or this script's output.
+# Optional: E2E_DATA_DIR (the server's data dir) also greps the stored blobs;
+# SERVER_LOG_CMD (e.g. "journalctl -u redrop-preview -o cat") greps the
+# server's log for keys and refused uploads. With Chromium installed
+# (CHROMIUM, default chromium), scripts/e2e-browser.mjs runs the viewer in a
+# real browser.
+command -v node >/dev/null || die "node (24+) is needed for the end-to-end decryption check"
+SCRIPTS=$(cd "$(dirname "$0")" && pwd)
+# decrypt LINKFILE [PATH|--list]: decrypt the link in LINKFILE like a viewer.
+decrypt() { local f=$1; shift; node "$SCRIPTS/e2e-decrypt.mjs" "$@" < "$f"; }
+# content_of LINKFILE: the artifact's own address, which the link's intake
+# page on the app origin names (the link itself points at the app).
+content_of() { curl -fsS "${DOC[@]}" "$(sed 's/#.*//' "$1")" | sed -n 's/.*data-content="\([^"]*\)".*/\1/p'; }
+logged_uploads() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'path=/api/v1/uploads' || true; fi; }
+logged_requests() { if [ -n "${SERVER_LOG_CMD:-}" ]; then bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -c 'msg=http ' || true; fi; }
+EMARK="e2e-secret-$RANDOM-$RANDOM"
+mkdir -p "$WORK/e2e-site/docs"
+printf '<!doctype html><title>E2E title</title><p>%s</p><a href="docs/n.txt">n</a>\n' "$EMARK" > "$WORK/e2e-site/index.html"
+printf 'note %s\n' "$EMARK" > "$WORK/e2e-site/docs/n.txt"
+EOUT=$($R share "$WORK/e2e-site" --e2e --json 2>"$WORK/e2e-share.err")
+ELINKF="$WORK/e2e-link"
+python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$EOUT" > "$ELINKF"
+EID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])' <<<"$EOUT")
+EKEY=$(sed 's/.*#k=//' "$ELINKF")
+ELINK=$(sed 's/#.*//' "$ELINKF")
+case "$ELINK" in "$BASE/e/"*) ;; *) die "an e2e link is the app origin's intake page, got $ELINK";; esac
+EURL=$(content_of "$ELINKF")
+[ -n "$EURL" ] || die "the intake page names the artifact's address"
+ih=$(curl -fsS -o "$WORK/e2e-intake.html" -w '%header{cache-control} %header{referrer-policy} %header{cross-origin-opener-policy}' "${DOC[@]}" "$ELINK")
+[ "$ih" = "no-store no-referrer same-origin-allow-popups" ] || die "intake page headers: $ih"
+grep -qF -- "$EKEY" "$WORK/e2e-intake.html" && die "the intake page holds the key"
+[ "${#EKEY}" = 43 ] || die "share --e2e link has no 43-character key"
+grep -q 'end-to-end encrypted' "$WORK/e2e-share.err" || die "share --e2e notice"
+KS="$(dirname "$REDROP_CONFIG")/e2e-keys.json"
+[ "$(stat -c %a "$KS")" = 600 ] || die "key store mode"
+grep -q "$EKEY" "$KS" || die "key saved in the key store"
+$R list --json | python3 -c '
+import json,sys
+a=[x for x in json.load(sys.stdin) if x["id"]==sys.argv[1]][0]
+assert a["e2e"] and "#" not in a["url"] and a["title"]=="", a' "$EID" || die "server view of an e2e artifact"
+pass "share --e2e: link carries the key, key saved (0600), server has no key and no title"
+
+page=$(curl -fsS "${DOC[@]}" "$EURL")
+grep -q 'data-e2e' <<<"$page" || die "e2e viewer page"
+grep -q "$EMARK" <<<"$page" && die "viewer page holds plaintext"
+decrypt "$ELINKF" > "$WORK/e2e-index.out" || die "decrypting the start page"
+cmp -s "$WORK/e2e-index.out" "$WORK/e2e-site/index.html" || die "decrypted start page differs"
+[ "$(decrypt "$ELINKF" docs/n.txt)" = "note $EMARK" ] || die "decrypted docs/n.txt"
+printf '%s#k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' "$ELINK" > "$WORK/e2e-wrong-link"
+decrypt "$WORK/e2e-wrong-link" >/dev/null 2>&1 && die "a wrong key decrypted"
+# Every stored object, as the server serves it, is ciphertext.
+EVER=$(decrypt "$ELINKF" --list | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')
+for obj in manifest $(decrypt "$ELINKF" --list | python3 -c 'import json,sys;print(" ".join(f["object"] for f in json.load(sys.stdin)["files"]))'); do
+  curl -fsS -H 'Sec-Fetch-Dest: empty' "${EURL}__redrop/v/$EVER/$obj" -o "$WORK/e2e-object"
+  head -c 4 "$WORK/e2e-object" | grep -q '^RDE' || die "object $obj lacks the format magic"
+  grep -q "$EMARK" "$WORK/e2e-object" && die "object $obj holds plaintext"
+  grep -q 'E2E title' "$WORK/e2e-object" && die "object $obj holds the title"
+done
+if [ -n "${E2E_DATA_DIR:-}" ]; then
+  grep -rqF "$EMARK" "${E2E_DATA_DIR:?}" && die "the data dir holds the plaintext"
+  grep -rqF "$EKEY" "${E2E_DATA_DIR:?}" && die "the data dir holds the key"
+  pass "e2e: the data dir holds neither plaintext nor key"
+fi
+[ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${EURL}__redrop/e2e-sw.js")" = 200 ] || die "worker script on the e2e host"
+[ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${URL}__redrop/e2e-sw.js")" = 404 ] || die "worker script on a plaintext host"
+pass "e2e: viewer page, Node WebCrypto decryption, ciphertext-only objects, worker on e2e hosts only"
+# A link whose "#" became "%23" (or "?") sends its key in the path (or the
+# query): a top-level load gets a fixed damaged-link page (no viewer, no
+# gate, not cached), and the server log check below covers it (review 33
+# re-checks, M3 and B-2b″).
+for enc in %23 %2523 '?' '?x=1&'; do
+  r=$(curl -s -o "$WORK/e2e-damaged.html" -w '%{http_code} %header{cache-control}' "${DOC[@]}" "${EURL}${enc}k=$EKEY")
+  [ "$r" = "400 no-store" ] && grep -q 'This link is damaged' "$WORK/e2e-damaged.html" || die "a link whose # became $enc must get the damaged-link page (got $r)"
+  grep -qF -- "$EKEY" "$WORK/e2e-damaged.html" && die "the damaged-link page echoes the key"
+  grep -q 'rd-frame' "$WORK/e2e-damaged.html" && die "the damaged-link page frames the path"
+done
+pass "e2e: a link whose # became %23, %2523 or ? gets a fixed damaged-link page"
+
+# Plaintext never goes to an encrypted artifact (review 33 B-1). With the key
+# in this machine's store, update encrypts without --e2e; from the full link
+# on stdin, a machine without the store does too; without any key, update
+# and watch refuse before uploading anything.
+sed -i "s/<p>/<p>v2 /" "$WORK/e2e-site/index.html"
+$R update "$EID" "$WORK/e2e-site" >/dev/null 2>"$WORK/e2e-auto.err" || { cat "$WORK/e2e-auto.err"; die "update of an e2e artifact without --e2e"; }
+grep -q "encrypting with the key from this machine's key store" "$WORK/e2e-auto.err" || die "update without --e2e did not say it encrypts"
+decrypt "$ELINKF" | grep -q "v2 $EMARK" || die "update without --e2e: the link opens version 2"
+mkdir -p "$WORK/e2e-other" "$WORK/e2e-nokey"
+cp "$REDROP_CONFIG" "$WORK/e2e-other/cli.json"
+cp "$REDROP_CONFIG" "$WORK/e2e-nokey/cli.json"
+sed -i "s/<p>v2 /<p>v3 /" "$WORK/e2e-site/index.html"
+REDROP_CONFIG="$WORK/e2e-other/cli.json" $R update - "$WORK/e2e-site" < "$ELINKF" >/dev/null 2>&1 || die "update with the full link on stdin"
+decrypt "$ELINKF" | grep -q "v3 $EMARK" || die "the link opens version 3"
+grep -q "$EKEY" "$WORK/e2e-other/e2e-keys.json" || die "a key that worked is remembered"
+before=$(logged_uploads)
+for cmd in "update $EID $WORK/page.html" "update $EID $WORK/e2e-site --e2e" "watch $EID $WORK/e2e-site"; do
+  set +e
+  # shellcheck disable=SC2086 # the words are the command's arguments
+  REDROP_CONFIG="$WORK/e2e-nokey/cli.json" timeout 60s $R $cmd >/dev/null 2>"$WORK/e2e-nokey.err"; rc=$?
+  set -e
+  [ "$rc" = 2 ] && grep -q 'nothing was uploaded' "$WORK/e2e-nokey.err" || die "'redrop ${cmd%% *}' without a key must exit 2 before uploading (got $rc)"
+done
+[ "$(logged_uploads)" = "$before" ] || die "a refused update or watch started an upload"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"size\":10,\"artifact_id\":\"$EID\"}" "$BASE/api/v1/uploads")
+[ "$code" = 400 ] || die "the server must refuse a plaintext upload declared for an e2e artifact, got $code"
+$R info "$EID" | grep -q "#k=$EKEY" || die "info prints the full link"
+# A "#" that was percent-encoded makes no ID, slug or link: refused before
+# any request (review 33 re-check M2). A client that sends one anyway, once
+# or twice encoded, is not logged with it (checked with the log below).
+before=$(logged_requests)
+ESLUG=$(sed 's|.*/e/||; s|#.*||' "$ELINKF")
+for ref in "$EID%23k=$EKEY" "$ESLUG%23k=$EKEY" "$EID%23k%3D$EKEY" "$EID/%23k=$EKEY"; do
+  for cmd in info "update" watch; do
+    set +e
+    if [ "$cmd" = info ]; then $R info "$ref" >/dev/null 2>"$WORK/e2e-enc.err"; else $R "$cmd" "$ref" "$WORK/e2e-site" >/dev/null 2>"$WORK/e2e-enc.err"; fi
+    rc=$?
+    set -e
+    [ "$rc" = 2 ] || die "'redrop $cmd' of an ID with an encoded #k= must exit 2 (got $rc)"
+    grep -qF -- "$EKEY" "$WORK/e2e-enc.err" && die "'redrop $cmd' echoes an encoded key"
+  done
+done
+[ "$(logged_requests)" = "$before" ] || die "a refused encoded-key argument sent a request"
+for p in "$EID%23k=$EKEY" "$EID%2523k=$EKEY" "$EID%252523k%253D$EKEY"; do
+  curl -s -o /dev/null -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/artifacts/$p"
+done
+$R watch "$EID" "$WORK/e2e-site" --debounce 300ms >"$WORK/e2e-watch.log" 2>"$WORK/e2e-watch.err" &
+WPID=$!
+e_ready() { grep -q "^watching" "$WORK/e2e-watch.err"; }
+e_published() { grep -q "#k=$EKEY" "$WORK/e2e-watch.log"; }
+w_exited() { ! kill -0 "$WPID" 2>/dev/null; }
+wait_until 60 e_ready || { cat "$WORK/e2e-watch.err"; die "watch of an e2e artifact did not start within 60s"; }
+sed "s/<p>v3 /<p>v4 /" "$WORK/e2e-site/index.html" > "$WORK/e2e-index.tmp"
+mv "$WORK/e2e-index.tmp" "$WORK/e2e-site/index.html"
+wait_until 60 e_published || { cat "$WORK/e2e-watch.log" "$WORK/e2e-watch.err"; die "watch of an e2e artifact did not publish within 60s"; }
+decrypt "$ELINKF" | grep -q "v4 $EMARK" || die "watch: the link opens the watched change"
+kill -TERM "$WPID" 2>/dev/null
+wait_until 60 w_exited || die "watch did not exit within 60s of SIGTERM"
+WRC=0; wait "$WPID" || WRC=$?
+WPID=
+[ "$WRC" = 0 ] || die "watch exit code $WRC after SIGTERM"
+pass "e2e: update and watch encrypt with the stored key or the link on stdin, flag or not; without a key nothing is uploaded"
+
+# Gates still apply to the viewer page, the ciphertext and the worker.
+GOUT=$($R share "$WORK/e2e-site/docs/n.txt" --e2e --once --password-generate --json 2>/dev/null)
+GLINKF="$WORK/e2e-gated-link"
+python3 -c 'import json,sys;print(json.load(sys.stdin)["url"])' <<<"$GOUT" > "$GLINKF"
+GPW=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["password"])' <<<"$GOUT")
+GURL=$(content_of "$GLINKF")
+curl -fsS "${DOC[@]}" "$GURL" | grep -q 'password protected' || die "e2e gate"
+[ "$(code_of -H 'Sec-Fetch-Dest: empty' "${GURL}__redrop/v/1/manifest")" = 403 ] || die "ciphertext behind the gate"
+[ "$(code_of -H 'Service-Worker: script' -H 'Sec-Fetch-Dest: serviceworker' "${GURL}__redrop/e2e-sw.js")" = 403 ] || die "worker behind the gate"
+GC="$WORK/e2e-gate-cookies"
+curl -fsS -o /dev/null -c "$GC" -H 'Sec-Fetch-Site: same-origin' --data-urlencode "password=$GPW" "${GURL}__redrop/open"
+GCOOKIE=$(awk '$6 ~ /visit/ {print $6"="$7}' "$GC")
+[ -n "$GCOOKIE" ] || die "visit cookie after open"
+[ "$(REDROP_COOKIE="$GCOOKIE" decrypt "$GLINKF")" = "note $EMARK" ] || die "e2e content during the visit"
+[ "$(code_of "${DOC[@]}" "$GURL")" = 404 ] || die "second visitor of a one-time e2e link"
+pass "e2e: password and one-time gates hold for viewer, ciphertext and worker"
+
+if [ -n "${SERVER_LOG_CMD:-}" ]; then
+  for f in "$ELINKF" "$GLINKF"; do
+    bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -qF -- "$(sed 's/.*#k=//' "$f")" && die "the server log holds an e2e key"
+  done
+  bash -c "$SERVER_LOG_CMD" 2>/dev/null | grep -q '%23\|#k=' && die "the server log holds a fragment"
+  pass "e2e: no key or fragment in the server log"
+fi
+
+# The viewer in a real browser (review 33 B-2, M1, m-A): no route open to a
+# script in the artifact holds the key, gates keep it, SVG files are inert,
+# and revoking stops an open page. Needs Chromium; the links go in a file.
+if command -v "${CHROMIUM:-chromium}" >/dev/null; then
+  B="$WORK/e2e-browser"
+  mkdir -p "$B/probe/docs"
+  cp "$SCRIPTS/e2e-browser-probe.html" "$B/probe/index.html"
+  printf '<!doctype html><meta charset="utf-8"><title>Two</title><h1 id="sec">two-8842</h1><p><a href="../index.html">back</a></p>\n' > "$B/probe/docs/two.html"
+  printf '<!doctype html><title>pw</title><p>pw-page-5150</p>\n' > "$B/pw.html"
+  printf '<!doctype html><title>once</title><p>once-page-6160</p>\n' > "$B/once.html"
+  printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="teal"/><script>parent.document.title="svg-script-ran"</script></svg>' > "$B/logo.svg"
+  printf 'pw-%s\n' "$RANDOM$RANDOM" > "$B/password"
+  P_OUT=$($R share "$B/probe" --e2e --json 2>/dev/null)
+  W_OUT=$($R share "$B/pw.html" --e2e --password-file "$B/password" --json 2>/dev/null)
+  O_OUT=$($R share "$B/once.html" --e2e --once --json 2>/dev/null)
+  S_OUT=$($R share "$B/logo.svg" --e2e --json 2>/dev/null)
+  python3 - "$B/password" "$P_OUT" "$W_OUT" "$O_OUT" "$S_OUT" > "$B/links.json" <<'PY'
+import json, sys
+pw = open(sys.argv[1]).read().strip()
+names = ["probe", "password", "once", "svg"]
+out = {n: {k: json.loads(raw)[k] for k in ("id", "url")} for n, raw in zip(names, sys.argv[2:])}
+out["password"]["password"] = pw
+print(json.dumps(out))
+PY
+  # The browser runs under a memory cap where systemd can apply one, so a
+  # page that misbehaves (a broken viewer, a probe that keeps logging) is
+  # killed instead of filling the host (E2E_BROWSER_MEMORY_MAX, default 2G).
+  BROWSER_CAP=()
+  if command -v systemd-run >/dev/null && systemd-run --scope --quiet -p MemoryMax=64M true >/dev/null 2>&1; then
+    BROWSER_CAP=(systemd-run --scope --quiet -p "MemoryMax=${E2E_BROWSER_MEMORY_MAX:-2G}" -p MemorySwapMax=0 --)
+  fi
+  CHROMIUM="${CHROMIUM:-chromium}" REDROP_CLI="$R" E2E_ELSEWHERE="$BASE/healthz" "${BROWSER_CAP[@]}" node "$SCRIPTS/e2e-browser.mjs" "$B/links.json" > "$B/out.txt" 2>&1 || { cat "$B/out.txt"; die "the viewer failed in the browser"; }
+  sed 's/^/    /' "$B/out.txt"
+  pass "e2e: in Chromium, key intake on the app origin: the artifact, and windows it holds, read no key through a same-tab reopen, a popup, a window it opened, a bfcache restore or a fragment edit; damaged, encoded, %23 and ? links open nothing; gates work; SVG files are inert; revocation stops an open page"
+else
+  printf '  --  e2e: browser checks skipped (no Chromium; set CHROMIUM)\n'
+fi
+
 # tunnel: a tiny local HTTP and WebSocket app, shared with redrop tunnel and a
 # password, fetched through the link as a browser would; offline while the
 # CLI is stopped, back on the same link with --id, and ended by a revoke.
@@ -515,8 +724,18 @@ wait_until 60 grep -q '"event":"online"' "$WORK/tunnel.out" || { cat "$WORK/tunn
 read -r TID TURL < <(head -1 "$WORK/tunnel.out" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["event"]=="tunnel" and d["target"].endswith(":'"$TPORT"'"),d;print(d["id"],d["url"])')
 [ -n "${TURL:-}" ] || die "tunnel --json first line"
 python3 -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$TURL" | grep -Eq '^[a-z]{3,9}(-[a-z]{3,9}){3}$' || die "tunnel link is not four words: $TURL"
-$R info "$TID" --json | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["kind"]=="tunnel" and d["online"] and d["has_password"],d' || die "tunnel info"
-$R list | grep -q "^$TID  *online  *tunnel" || die "redrop list shows the tunnel online"
+$R info "$TID" --json | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["kind"]=="tunnel" and d["online"] and d["has_password"] and not d["e2e"] and not d.get("e2e_link"),d' || die "tunnel info"
+TSLUG=$(python3 -I -c 'import sys,urllib.parse;print(urllib.parse.urlsplit(sys.argv[1]).hostname.split(".")[0])' "$TURL")
+[ "$(code_of "$BASE/e/$TSLUG")" = 200 ] || die "app intake must remain syntax-only for tunnels"
+[ "$(code_of "${DOC[@]}" "${TURL}__redrop/e2e-intake")" = 404 ] || die "tunnel served the key intake helper"
+[ "$(code_of -H 'Sec-Fetch-Dest: serviceworker' -H 'Service-Worker: script' "${TURL}__redrop/e2e-sw.js")" = 404 ] || die "tunnel served the decrypting worker"
+[ "$(code_of -b "$CJ" "${H[@]}" -d '{"e2e":true}' "$BASE/api/v1/tunnels")" = 400 ] || die "server accepted encrypted tunnel creation"
+[ "$(code_of -b "$CJ" "${H[@]}" -X PATCH -d '{"e2e":true}' "$BASE/api/v1/artifacts/$TID")" = 400 ] || die "server accepted encrypted tunnel settings"
+pass "tunnel encryption boundary: app intake stays syntax-only, helper and worker refused, encrypted creation/settings refused"
+# Consume the whole CLI output before grep: a short-circuiting pipe can
+# SIGPIPE a long list, which pipefail would mistake for a failed assertion.
+$R list > "$WORK/tunnel-list.out"
+grep -q "^$TID  *online  *tunnel" "$WORK/tunnel-list.out" || die "redrop list shows the tunnel online"
 curl -fsS "${FRAME[@]}" "${TURL}page" | grep -q 'name="password"' || die "tunnel gate before the app"
 TJ="$WORK/ct"
 [ "$(code_of -c "$TJ" -H 'Sec-Fetch-Site: same-origin' --data-urlencode password=e2e-tunnel-password "${TURL}__redrop/open")" = 303 ] || die "tunnel unlock"
@@ -527,6 +746,7 @@ assert d["xfh"]==sys.argv[1], d' "$(python3 -c 'import sys,urllib.parse;print(ur
 [ "$(curl -fsS -b "$TJ" -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Site: same-origin' -d 'abc' "${TURL}form")" = "posted abc" ] || die "POST through the tunnel"
 vp=$(curl -fsS -b "$TJ" "${DOC[@]}" "${TURL}some/page")
 grep -q '<iframe id="rd-frame"[^>]* src="/some/page"' <<<"$vp" && grep -q 'Live app' <<<"$vp" || die "tunnel viewer page"
+grep -q 'data-e2e\|End-to-end encrypted\|id="rd-size"' <<<"$vp" && die "tunnel got the encrypted viewer or a stored-file panel"
 [ "$(python3 "$WORK/ws_client.py" "$TURL" "rd_visit=$(awk '$6=="rd_visit"{print $7}' "$TJ")")" = "echo: hello" ] || die "WebSocket through the tunnel"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b "$TJ" -H 'Sec-Fetch-Dest: empty' -H 'Sec-Fetch-Site: same-site' "${TURL}api")" = 403 ] || die "same-site request to a tunnel"
 grep -q '^GET /some/page 200 ' "$WORK/tunnel.err" || die "tunnel --log line"
@@ -582,6 +802,19 @@ r=json.load(sys.stdin)
 assert r["status"]=="resolved" and r["artifact"]["revoked_by_admin"] and r["history"][-1]["action"]=="artifact.revoke", r' || die "revoke from the queue"
 [ "$(code_of "${DOC[@]}" "$RURL")" = 404 ] || die "revoked from the queue, link still works"
 [ "$($R info "$RID" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["revoked_by_admin"])')" = True ] || die "owner sees the administrator's revocation"
+# The report form removes an intake link's key before sending it. A client
+# that sends the full link anyway must still never store the fragment.
+python3 -I - "$ELINKF" > "$WORK/e2e-report.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    link = f.read().strip()
+print(json.dumps({"url": link, "category": "other", "details": "e2e intake report"}))
+PY
+[ "$(code_of "${RH[@]}" -H "Origin: $PUB" --data-binary @"$WORK/e2e-report.json" "$BASE/api/v1/reports")" = 202 ] || die "report of an intake link"
+curl -fsS -b "$CJ" "$BASE/api/v1/admin/reports?status=open&source=visitor&page=1" | python3 -I -c 'import json,sys
+rows=[r for r in json.load(sys.stdin)["items"] if r["artifact_id"]==sys.argv[1]]
+assert len(rows)==1 and rows[0]["reported_url"]==sys.argv[2], "intake report is missing or retains a key"' "$EID" "$EURL" || die "intake report stores the keyless content URL"
+pass "e2e abuse report: intake accepted, key never stored in the queue"
 mkdir -p "$WORK/exe-site"
 printf '<p>downloads</p>' > "$WORK/exe-site/index.html"
 printf 'MZ not really a program' > "$WORK/exe-site/setup.exe"
@@ -615,7 +848,7 @@ pass "stdin share, revoke/restore, rotate to a four-word link"
 
 # exit codes
 set +e
-$R info doesnotexist00 >/dev/null 2>&1; [ $? = 4 ] || die "exit code 4 for not found"
+$R info aaaaaaaaaaaaaaaa >/dev/null 2>&1; [ $? = 4 ] || die "exit code 4 for not found"
 $R share "$WORK/page.html" --ttl banana >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for bad ttl"
 $R share "$WORK/notes.md" --render invalid >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for render mode"
 $R share "$WORK/notes.md" --render markdown --as file >/dev/null 2>&1; [ $? = 2 ] || die "exit code 2 for render-kind conflict"

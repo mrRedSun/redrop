@@ -1,0 +1,216 @@
+<!doctype html><meta charset="utf-8"><title>Probe page</title>
+<!-- An e2e artifact for scripts/e2e-browser.mjs: its own script looks for
+     the link's key everywhere a same-origin page can (review 33 B-2), and
+     records what it found in data attributes the driver reads. From then
+     on it watches the viewer's window, by events and by polling, for
+     anything key-like (k=), through a same-tab reopen of the full link and
+     a back/forward cache restore (the re-check of review 33, B-2a). What it
+     sees goes to localStorage, which outlives this document.
+     localStorage rd-probe-mode makes it act as well (the second re-check,
+     B-2a'): "late" rewrites the viewer's address to "/" a second after load,
+     with a History.prototype from a fresh realm; "hard" first replaces the
+     functions and getters the viewer could use on its window, then rewrites
+     the address; "docopen" makes its own address "/" and then replaces the
+     viewer's document with document.open(), which moves the viewer's
+     address there without a navigation. In every mode it also leaves a
+     timer in the viewer's window that copies its live address to
+     localStorage rd-probe-live-href, which outlives the probe's own
+     document. It sets rd-probe-acted just before it acts: acting may end
+     its own document.
+     The third re-check's modes: "capture-strip" rewrites the address from
+     inside a capturing navigate listener that hides the rewrite from later
+     listeners; "nested" rewrites it from inside the viewer's own address
+     update; "stop" calls parent.stop() every millisecond for 10 s. With
+     window.rdOpen() (it needs a click, a user gesture), "popup" opens a
+     popup that keeps a handle on the visitor's tab and watches every
+     document in it for 40 s (B-2a''); "opener" opens an empty window named
+     rdw and watches it, for the visitor to open the link in. Both record in
+     rd-probe-stolen too. -->
+<h1 id="h">probe-4471</h1>
+<p><a id="rel" href="docs/two.html#sec">two</a> <a id="abs" href="/docs/two.html">abs</a></p>
+<script>
+(async () => {
+  const d = document.body.dataset
+  const read = (f) => { try { const v = f(); return typeof v === 'string' ? v : JSON.stringify(v) } catch (e) { return 'ERR ' + e.name } }
+  // Each finding is recorded once, shortened, and the record is capped: a
+  // probe that finds the key on every poll (a broken viewer) must stay small.
+  const logged = new Set()
+  let logBytes = 0
+  const seen = (where, v) => {
+    try {
+      const s = String(v)
+      if (!s.includes('k=')) return
+      const line = where + ': ' + s.slice(0, 400)
+      if (logged.has(line) || logBytes > 16384) return
+      logged.add(line)
+      logBytes += line.length
+      localStorage.setItem('rd-probe-stolen', (localStorage.getItem('rd-probe-stolen') || '') + line + '\n')
+    } catch (e) {}
+  }
+  const look = (where) => {
+    seen(where + ' parent.location', read(() => parent.location.href))
+    seen(where + ' parent.document.URL', read(() => parent.document.URL))
+    seen(where + ' navigation entries', read(() => parent.navigation && parent.navigation.entries().map((e) => e.url)))
+    seen(where + ' current entry', read(() => parent.navigation && parent.navigation.currentEntry && parent.navigation.currentEntry.url))
+    seen(where + ' timing', read(() => parent.performance.getEntries().map((e) => e.name)))
+    seen(where + ' history state', read(() => parent.history.state))
+    seen(where + ' own location', location.href)
+  }
+  const restored = (e) => { if (e.persisted) try { localStorage.setItem('rd-probe-restored', String(Date.now())) } catch (x) {} }
+  for (const w of [window, parent]) {
+    try {
+      w.addEventListener('hashchange', (e) => { seen('hashchange', e.newURL + ' ' + e.oldURL); look('hashchange') })
+      w.addEventListener('popstate', (e) => { seen('popstate', read(() => e.state)); look('popstate') })
+      w.addEventListener('pagehide', () => look('pagehide'))
+      w.addEventListener('pageshow', (e) => { restored(e); look('pageshow') })
+      w.addEventListener('message', (e) => seen('message', read(() => e.data)))
+      if (w.navigation) {
+        w.navigation.addEventListener('navigate', (e) => { seen('navigate', e.destination.url); look('navigate') })
+        // A capturing listener too: under the DOM standard's order it would
+        // run before non-capturing ones (third re-check M5).
+        w.navigation.addEventListener('navigate', (e) => seen('capture navigate', e.destination.url), true)
+        w.navigation.addEventListener('currententrychange', () => look('currententrychange'))
+        w.navigation.addEventListener('navigatesuccess', () => look('navigatesuccess'))
+      }
+    } catch (e) {}
+  }
+  setInterval(() => look('poll'), 50)
+  const mode = (() => { try { return localStorage.getItem('rd-probe-mode') || '' } catch (e) { return '' } })()
+  const acted = () => { try { localStorage.setItem('rd-probe-acted', mode || 'passive') } catch (e) {} }
+  try { parent.setInterval(parent.localStorage.setItem.bind(parent.localStorage, 'rd-probe-live-href'), 20, parent.location) } catch (e) {}
+  const pristineHistory = () => {
+    const f = document.createElement('iframe')
+    document.body.appendChild(f)
+    return f.contentWindow.History.prototype
+  }
+  const strip = () => pristineHistory().replaceState.call(parent.history, null, '', '/' + parent.location.hash)
+  if (mode === 'late') setTimeout(() => { acted(); try { strip() } catch (e) {} }, 1000)
+  if (mode === 'hard') {
+    setTimeout(() => {
+      acted()
+      const P = parent, noop = function () {}
+      try {
+        for (const n of ['preventDefault', 'stopImmediatePropagation', 'stopPropagation']) P.Event.prototype[n] = noop
+        Object.defineProperty(P.NavigateEvent.prototype, 'destination', { get() { throw new Error('probe') } })
+        Object.defineProperty(P.NavigationDestination.prototype, 'sameDocument', { get() { return false } })
+        P.History.prototype.replaceState = noop
+        P.History.prototype.pushState = noop
+        P.Element.prototype.remove = noop
+        P.Document.prototype.querySelectorAll = function () { return [] }
+        P.Reflect.apply = noop
+      } catch (e) {}
+      try { strip() } catch (e) {}
+    }, 1000)
+  }
+  if (mode === 'docopen') {
+    setTimeout(() => {
+      acted()
+      try {
+        history.replaceState(null, '', '/')
+        parent.document.open()
+        parent.document.write('<p>probe-replaced</p>')
+        parent.document.close()
+      } catch (e) {}
+    }, 1000)
+  }
+  if (mode === 'capture-strip') {
+    let mine = false
+    parent.navigation.addEventListener('navigate', (e) => { seen('capture-strip navigate', e.destination.url); if (mine) e.stopImmediatePropagation() }, true)
+    setTimeout(() => {
+      acted()
+      mine = true
+      try { parent.history.replaceState(parent.history.state, '', '/' + parent.location.hash) } catch (e) {}
+      mine = false
+    }, 1000)
+  }
+  if (mode === 'nested') {
+    let done = false
+    parent.navigation.addEventListener('navigate', () => {
+      if (done) return
+      done = true
+      try { parent.history.replaceState(null, '', '/' + parent.location.hash) } catch (e) {}
+    })
+    setTimeout(() => { acted(); history.pushState(null, '', '#nested') }, 1000)
+  }
+  if (mode === 'stop') {
+    setTimeout(() => {
+      acted()
+      const t = setInterval(() => { try { parent.stop() } catch (e) {} }, 1)
+      setTimeout(() => clearInterval(t), 10000)
+    }, 1000)
+  }
+  // watcher is run in a window the probe holds: it records what that
+  // window can read of target() for 40 s, deduped and capped like seen.
+  const watcher = function (target) {
+    const logged = new Set()
+    const note = (where, v) => {
+      try {
+        const s = String(v)
+        if (!s.includes('k=')) return
+        const line = where + ': ' + s.slice(0, 300)
+        const cur = localStorage.getItem('rd-probe-stolen') || ''
+        if (logged.has(line) || cur.length > 8000) return
+        logged.add(line)
+        localStorage.setItem('rd-probe-stolen', cur + line + '\n')
+      } catch (e) {}
+    }
+    const stopAt = Date.now() + 40000
+    let docs = 0, last = null
+    const look = () => {
+      const T = target()
+      if (!T) return
+      try { note('held location', T.location.href) } catch (e) {}
+      try { note('held currentEntry', T.navigation.currentEntry.url) } catch (e) {}
+      try { note('held navigation timing', T.performance.getEntriesByType('navigation').map((x) => x.name).join(' ')) } catch (e) {}
+      try { if (T.document !== last) { last = T.document; docs++; localStorage.setItem('rd-probe-held-docs', String(docs)) } } catch (e) {}
+    }
+    const ch = new MessageChannel()
+    ch.port1.onmessage = () => { look(); if (Date.now() < stopAt) setTimeout(() => ch.port2.postMessage(0), 2) }
+    ch.port2.postMessage(0)
+    localStorage.setItem('rd-probe-held', 'running')
+  }
+  window.rdOpen = () => {
+    if (mode === 'popup') {
+      const w = window.open('', 'rdpop', 'popup,width=300,height=200')
+      if (!w) return 'blocked'
+      w.rdTop = top
+      w.document.write('<!doctype html><title>held</title><script>(' + watcher.toString() + ')(() => window.rdTop)<\/script>')
+      w.document.close()
+      acted()
+      return 'open'
+    }
+    if (mode === 'opener') {
+      const w = window.open('about:blank', 'rdw')
+      if (!w) return 'blocked'
+      watcher(() => w)
+      acted()
+      return 'open'
+    }
+    return 'no mode'
+  }
+  if (!mode) acted()
+  d.ownSession = read(() => Object.entries(sessionStorage))
+  d.parentSession = read(() => Object.entries(parent.sessionStorage))
+  d.local = read(() => Object.entries(localStorage))
+  d.parentNavigationTiming = read(() => parent.performance.getEntriesByType('navigation').map((e) => e.name))
+  d.ownNavigationTiming = read(() => performance.getEntriesByType('navigation').map((e) => e.name))
+  d.parentEntries = read(() => (parent.navigation ? parent.navigation.entries().map((e) => e.url) : 'no Navigation API'))
+  d.parentActivation = read(() => (parent.navigation && parent.navigation.activation ? parent.navigation.activation.entry.url : 'none'))
+  d.parentLocation = read(() => parent.location.href)
+  d.parentHistoryState = read(() => parent.history.state)
+  d.parentDocument = read(() => parent.document.documentElement.outerHTML)
+  d.ownLocation = location.href
+  d.referrer = document.referrer
+  d.windowName = read(() => parent.name + '|' + window.name)
+  try {
+    const db = await new Promise((resolve, reject) => { const r = indexedDB.open('redrop-e2e'); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error) })
+    const all = await new Promise((resolve, reject) => { const r = db.transaction('keys').objectStore('keys').getAll(); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error) })
+    d.storedKeys = JSON.stringify(all.map((v) => ({ type: v && v.key && v.key.type, extractable: v && v.key && v.key.extractable, algorithm: v && v.key && v.key.algorithm && v.key.algorithm.name })))
+    const key = all[0] && all[0].key
+    d.exportKey = key ? await crypto.subtle.exportKey('raw', key).then(() => 'EXPORTED', (e) => 'refused: ' + e.name) : 'no key stored'
+  } catch (e) {
+    d.storedKeys = 'ERR ' + e
+  }
+  d.done = '1'
+})()
+</script>

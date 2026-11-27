@@ -54,6 +54,12 @@ pull requests.
   and deduplicated by content hash. (#20)
 - Viewer feedback: per-artifact comments in the info panel, read back with
   `redrop feedback`; nothing is injected into artifacts. (#24)
+- End-to-end encrypted links (`--e2e`): the CLI encrypts before upload, the
+  key travels in the link's `#k=` fragment, and the server stores and serves
+  only ciphertext. The link (`https://<server>/e/<slug>#k=…`) opens a key
+  intake page on the server's own origin, which hands the artifact's origin
+  only a non-extractable key; redrop's viewer decrypts in the browser, and
+  the key's text never reaches the page's own scripts. (#33)
 - `docs`: artifacts never contain anything redrop-specific. (#19)
 
 ### Fixed
@@ -69,6 +75,11 @@ pull requests.
 
 ### Changed
 
+- The CLI checks an `ID|URL` argument's shape before any request: anything
+  that isn't an artifact ID, a slug or a link exits 2 (usage) without
+  echoing it. A mistyped ID used to reach the server and exit 4 (not
+  found); scripts that treated 4 as "no such artifact" for typos see 2.
+  Unknown IDs of the right shape still exit 4. (#33)
 - CI and supply-chain hardening: Dependabot, SHA-pinned actions,
   least-privilege checkouts, govulncheck in CI, weekly rescans, SECURITY.md. (#28)
 - Go dependency bumps: fsnotify 1.10.1 and kin-openapi 0.153.0. (#29)

@@ -1,0 +1,9 @@
+{{template "head" .}}<main class="card" id="rd-intake" data-content="{{.Data.Content}}">
+<h1>Open an encrypted page</h1>
+<p>This page is end-to-end encrypted. Its key is the part of the link after #, which stays in this browser.</p>
+<p id="rd-intake-msg" role="status"></p>
+<p><button id="rd-intake-open" type="button" hidden>Open the page</button></p>
+<p id="rd-intake-note" hidden>A small window opens for a moment to keep the key for the page, as a key the page can use but not read. It closes by itself.</p>
+<noscript><p>Opening an end-to-end encrypted page needs JavaScript.</p></noscript>
+<script src="/e2e/intake.js"></script>
+{{template "foot" .}}

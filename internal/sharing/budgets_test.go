@@ -71,7 +71,7 @@ func budgetArchive(t *testing.T, headers []tar.Header, bodies [][]byte) []byte {
 func budgetContent(t *testing.T, s *Service, a Actor, b []byte) Content {
 	t.Helper()
 	ctx := context.Background()
-	u, err := s.CreateUpload(ctx, a, int64(len(b)))
+	u, err := s.CreateUpload(ctx, a, int64(len(b)), UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func budgetContent(t *testing.T, s *Service, a Actor, b []byte) Content {
 func TestUploadIdleExpiryAndStats(t *testing.T) {
 	s, a := budgetService(t, 10000, 10000)
 	ctx := context.Background()
-	u, err := s.CreateUpload(ctx, a, 100)
+	u, err := s.CreateUpload(ctx, a, 100, UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestUploadIdleExpiryAndStats(t *testing.T) {
 	if s.db.UploadExists(ctx, u.ID) {
 		t.Error("expired upload reservation retained")
 	}
-	if _, err := s.CreateUpload(ctx, a, 10000); err != nil {
+	if _, err := s.CreateUpload(ctx, a, 10000, UploadTarget{}); err != nil {
 		t.Fatalf("expired capacity not released: %v", err)
 	}
 }
@@ -133,18 +133,18 @@ func TestUploadSessionCapAndRelease(t *testing.T) {
 	s, a := budgetService(t, 10000, 10000)
 	s.cfg.MaxOpenUploads = 2
 	ctx := context.Background()
-	u, err := s.CreateUpload(ctx, a, 0)
+	u, err := s.CreateUpload(ctx, a, 0, UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateUpload(ctx, a, 0); err != nil {
+	if _, err := s.CreateUpload(ctx, a, 0, UploadTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateUpload(ctx, a, 0); err == nil {
+	if _, err := s.CreateUpload(ctx, a, 0, UploadTarget{}); err == nil {
 		t.Fatal("zero-byte uploads bypassed session cap")
 	}
 	s.discardUpload(ctx, u.ID)
-	if _, err := s.CreateUpload(ctx, a, 0); err != nil {
+	if _, err := s.CreateUpload(ctx, a, 0, UploadTarget{}); err != nil {
 		t.Fatalf("abort failed to release capacity: %v", err)
 	}
 }
@@ -205,7 +205,7 @@ func TestPendingUploadBudget(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					_, err := s.CreateUpload(context.Background(), a, 60)
+					_, err := s.CreateUpload(context.Background(), a, 60, UploadTarget{})
 					results <- err
 				}()
 			}

@@ -307,12 +307,25 @@ type Progress func(sent, total int64)
 // settle and tries again.
 var ErrSourceChanged = errors.New("source changed while it was being read")
 
+// UploadTarget declares what an upload is for. A version of an end-to-end
+// encrypted artifact needs its ArtifactID and E2E; the server refuses
+// plaintext declared for such an artifact before any byte is sent.
+type UploadTarget struct {
+	ArtifactID string // the artifact it is a new version of; "" for a new artifact
+	E2E        bool   // end-to-end encrypted content
+}
+
 // UploadFile performs a resumable chunked upload of path and returns the
 // upload ID and SHA-256 to pass to CreateArtifact/CreateVersion. The
 // checksum is taken before the upload and checked against the bytes
 // actually sent; a mismatch (the file changed mid-upload) returns an error
 // wrapping ErrSourceChanged.
 func (c *Client) UploadFile(ctx context.Context, path string, progress Progress) (string, string, error) {
+	return c.UploadFileFor(ctx, path, UploadTarget{}, progress)
+}
+
+// UploadFileFor is UploadFile with the upload declared for target.
+func (c *Client) UploadFileFor(ctx context.Context, path string, target UploadTarget, progress Progress) (string, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", "", err
@@ -333,7 +346,7 @@ func (c *Client) UploadFile(ctx context.Context, path string, progress Progress)
 	sent := &sentHash{h: sha256.New()}
 
 	var up api.Upload
-	if err := c.do(ctx, http.MethodPost, "/api/v1/uploads", &api.CreateUploadRequest{Size: size}, &up); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/api/v1/uploads", &api.CreateUploadRequest{Size: size, ArtifactID: target.ArtifactID, E2E: target.E2E}, &up); err != nil {
 		return "", "", err
 	}
 	chunk := up.ChunkSize

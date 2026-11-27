@@ -222,8 +222,15 @@ func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // prefix. It matches the canonical path (empty and dot segments cleaned,
 // the prefix compared case-insensitively), so /api/v1//invites/<t> and
 // /API/v1/invites/<t> are redacted too, and logs a redacted path in that
-// canonical form.
+// canonical form. Everything from a "#" or "?" on is cut, and from one
+// percent-encoded once or more ("%23", "%2523", "%3F", ...): the decoded
+// path holds one only when a client sent a fragment or query encoded, such
+// as an end-to-end link's #k= key pasted where an ID belongs, and that must
+// never be logged.
 func redactPath(p string) string {
+	if i := encodedCut(p); i >= 0 {
+		p = p[:i] + "#…"
+	}
 	c := path.Clean("/" + p)
 	for _, pre := range dashpaths.SecretPrefixes {
 		if len(c) <= len(pre) || !strings.EqualFold(c[:len(pre)], pre) {
@@ -235,6 +242,26 @@ func redactPath(p string) string {
 		return pre + "…"
 	}
 	return p
+}
+
+// encodedCut is the index of the first "#" or "?" in p, or of the first
+// "%" that starts one encoded ("%23", "%2523", "%3F", "%253f", ...), or -1.
+func encodedCut(p string) int {
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case '#', '?':
+			return i
+		case '%':
+			j := i + 1
+			for strings.HasPrefix(p[j:], "25") {
+				j += 2
+			}
+			if t := strings.ToLower(p[j:min(j+2, len(p))]); t == "23" || t == "3f" {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // LogRequests logs API calls and failed requests (never query strings).

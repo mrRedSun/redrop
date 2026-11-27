@@ -25,6 +25,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
+	"github.com/mrRedSun/redrop/internal/e2e"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/netutil"
 	"github.com/mrRedSun/redrop/internal/security"
@@ -121,10 +122,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// They are never artifact paths: answer before gates and routing.
 		h.miss(w, r)
 		return
-	case isServiceWorkerScript(r):
+	case isServiceWorkerScript(r) && r.URL.Path != e2eWorkerPath:
 		// A service worker would outlive revocation and could answer the
 		// viewer page's own navigations, so no content host serves one,
-		// not even redrop's own scripts.
+		// not even redrop's own scripts. The one exception is the
+		// decrypting worker, on end-to-end encrypted artifacts' hosts only
+		// (e2eWorkerScript), which is built to do neither.
 		h.pages.notFound(w)
 		return
 	case h.serveServerIcon(w, r) || serveViewerAsset(w, r):
@@ -149,6 +152,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case h.misses.Exhausted(h.clients.Network(r)):
 		h.tooManyMisses(w)
+		return
+	}
+	if r.URL.Path == helperPath && slug != "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		// The app-origin intake stays syntax-only. Here, on the content
+		// origin, only a live end-to-end encrypted artifact gets the helper;
+		// every other slug (unknown, gone, plaintext, a tunnel) gets the
+		// identical miss, spending miss budget like any visit, so the helper
+		// is no free oracle and no key is ever stored on a tunnel's origin.
+		a, err := h.sharing.Lookup(r.Context(), slug)
+		grants := sharing.Grants{Visit: h.cookieValue(r, cookieVisit), Preview: h.cookieValue(r, cookiePreview)}
+		if err != nil || !a.E2E || sharing.IsTunnel(a) || h.sharing.Decide(a, grants, time.Now()) == sharing.ShowGone {
+			h.miss(w, r)
+			return
+		}
+		h.e2eIntakeHelper(w, r, slug)
 		return
 	}
 	if r.Method == http.MethodPost && r.URL.Path == feedbackPath {
@@ -176,6 +194,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.preview(w, r, a)
 		case rest == "open":
 			h.open(w, r, a)
+		case rest == "e2e-sw.js":
+			h.e2eWorkerScript(w, r, a)
 		case rest == "live":
 			h.live(w, r, a)
 		case strings.HasPrefix(rest, versionPrefix):
@@ -335,6 +355,9 @@ func (h *Handler) countView(w http.ResponseWriter, r *http.Request, a *store.Art
 // serve answers a path of the artifact link: the viewer page, the file page,
 // or the current version's files.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifact) {
+	if h.damagedE2ELink(w, r, a) {
+		return
+	}
 	d, ok := h.admit(w, r, a)
 	if !ok {
 		return
@@ -358,6 +381,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 		h.serveTunnel(w, r, a, snap, d, direct)
 		return
 	}
+	if h.sharing.Mode(a, snap) == sharing.ModeEncrypted {
+		h.serveE2E(w, r, a, snap, d, direct)
+		return
+	}
 	old := snap.Version != a.CurrentVersion
 	switch {
 	case h.getsViewer(w, r, a, snap, direct):
@@ -374,11 +401,39 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, a *store.Artifac
 	}
 }
 
+// damagedE2ELink answers a top-level load of an end-to-end encrypted link
+// whose key arrived in the path or the query: its "#" became "%23" (or
+// "%2523", ...), or "?" (review 33 re-checks M3 and B-2b″). The answer is
+// fixed and comes before the gates: no viewer, frame address or gate form
+// is built from the request, and no view counts. It reports whether it
+// answered.
+func (h *Handler) damagedE2ELink(w http.ResponseWriter, r *http.Request, a *store.Artifact) bool {
+	if !a.E2E || !wantsViewer(r) {
+		return false
+	}
+	var changedTo string
+	switch {
+	case e2e.HasEncodedFragment(r.URL.Path):
+		changedTo = "%23"
+	case e2e.QueryKeyAttempt(r.URL.RawQuery):
+		changedTo = "?"
+	default:
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	h.pages.message(w, http.StatusBadRequest, "This link is damaged",
+		"Its # was changed to "+changedTo+", so the key in it was sent to this server as part of the address. Nothing was opened. Ask for the link again and open it exactly as you get it.")
+	return true
+}
+
 // serveOldVersion answers /__redrop/v/<N>/<path>: version N's files, only
 // when the owner lets viewers open older versions; otherwise the identical
 // miss. A top-level page load of a framed artifact goes to the viewer form,
 // <path>?redrop-version=N.
 func (h *Handler) serveOldVersion(w http.ResponseWriter, r *http.Request, a *store.Artifact, rest string) {
+	if h.damagedE2ELink(w, r, a) {
+		return
+	}
 	num, sub, _ := strings.Cut(rest, "/")
 	n, err := strconv.Atoi(num)
 	if err != nil || n <= 0 || num != strconv.Itoa(n) {
@@ -387,6 +442,10 @@ func (h *Handler) serveOldVersion(w http.ResponseWriter, r *http.Request, a *sto
 	}
 	d, ok := h.admit(w, r, a)
 	if !ok {
+		return
+	}
+	if a.E2E {
+		h.serveE2EVersion(w, r, a, n, num, rest, sub)
 		return
 	}
 	snap, err := h.sharing.OldVersion(r.Context(), a, n)

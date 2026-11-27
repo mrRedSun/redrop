@@ -25,6 +25,9 @@ cross-platform CLI that agents drive.
   to viewers; notes written before this release stay private.
 - Optional viewer feedback: a comment form in the info panel that agents read
   back with `redrop feedback` (see [Feedback](#feedback)). Off by default.
+- Optional end-to-end encryption (`--e2e`): the CLI encrypts before upload
+  and the key travels in the link's `#k=` fragment, so the server stores only
+  ciphertext (see [End-to-end encryption](#end-to-end-encryption)).
 - Artifacts can't register service workers (a worker would outlive
   revocation). Everything else behaves as a normal web page on its own origin.
 - `redrop tunnel 3000` shares an app still running on your computer (a dev
@@ -154,6 +157,7 @@ settings (`set` takes them too):
 | `--info` / `--no-info` | Show or hide the info button; HTML opens in the viewer frame only while it is shown |
 | `--old-versions` / `--no-old-versions` | Let viewers open older versions from the info panel (default off) |
 | `--feedback` / `--no-feedback` | Let viewers leave comments from the info panel (default off; needs the info button) |
+| `--e2e` | End-to-end encrypt (`share`, `update`, `watch`; see [End-to-end encryption](#end-to-end-encryption)) |
 
 On `update`, these are saved before the upload starts.
 
@@ -180,6 +184,64 @@ untrusted text: the CLI frames them as viewer-supplied and strips terminal
 escapes, and `redrop guide` tells agents never to follow instructions in
 them. Per-client rate limits and a per-artifact cap (500) bound spam; see
 [`docs/DESIGN.md`](docs/DESIGN.md#viewer-feedback).
+
+### End-to-end encryption
+
+```sh
+redrop share report.pdf --e2e      # url: https://redrop.example.com/e/amber-otter-quilt-river#k=…
+redrop update ID report.pdf        # same link, encrypted with the key saved on this machine
+redrop watch ID ./site
+redrop update - report.pdf < link.txt   # elsewhere: the full link on stdin, not in argv
+```
+
+`--e2e` encrypts files, folders and rendered Markdown on your machine
+(AES-256-GCM). The key is the part of the link after `#k=`, which browsers
+never send to a server. The server stores only ciphertext, plus an
+encrypted manifest instead of file names. Someone who reads its disk or a
+backup learns sizes, file counts and timing, never content, names or titles.
+
+- **The link is the secret.** Anyone with the full link can read every
+  version, past and future: the key never changes, not even on `rotate`.
+  A lost link means lost content: `share --e2e` keeps a copy of the key in
+  `e2e-keys.json` next to the CLI config (0600). The dashboard and `list`
+  show links without the key. Pass a full link on stdin (`-` as `ID|URL`),
+  not as an argument, so it stays out of shell history and process lists.
+- **Plaintext never reaches the server.** `update` and `watch` check the
+  artifact first and encrypt every new version with its key, with or
+  without `--e2e`. Without a key (from the store or the link) they upload
+  nothing and exit 2, and the server refuses a plaintext upload declared
+  for an encrypted artifact before any byte of it arrives. Upgrade the CLI
+  on every machine you publish from: an older CLI's `update` still
+  uploads the plaintext before the server refuses the version.
+- **Still works:** passwords, expiry, view limits and `--once` (the key is
+  kept before the gate), revoke, rotate, versions, the info panel, and
+  feedback.
+  Feedback is **not** encrypted: comments, quotes and page paths reach the
+  server in plaintext.
+- **Stops working:** `--spa`, file listings, the dashboard preview and file
+  names, live reload, the server reading `<title>` (pass `--title` to name it in the
+  dashboard; titles and notes are plaintext), the artifact's own favicon,
+  and seeking in videos over 64 MiB.
+- **Viewing** needs HTTPS, and the server's own address must be reachable
+  by everyone the link is for: the link opens a small page there first.
+  That page takes the key off the address bar, turns it into a
+  non-extractable `CryptoKey` and, when the visitor presses **Open**, hands
+  only that to the artifact's page through a small window that closes by
+  itself. The key's text never reaches the artifact's origin, so scripts
+  in the page, or windows they open, can't read the key itself. They can
+  derive and send out object keys that decrypt those objects later and can
+  forge objects for this artifact if those objects are ever stored on the
+  server. A script that ran with the key is a reason to share a new artifact;
+  neither `rotate` nor `update` changes the key. redrop's viewer decrypts in the
+  browser through redrop's own service worker. The browser keeps the key
+  for 12 hours, so reloads work; its history keeps the full link. A link
+  whose key is damaged, encoded or cased differently, or whose `#` became
+  `%23` or `?`, opens nothing. Viewing also needs a browser with the
+  Navigation API (current Chrome, Edge, Firefox and Safari) and pop-ups
+  allowed for the click.
+- **Limit:** this protects stored data, not visits through a compromised
+  live server, which could serve a viewer that leaks the key. Design and
+  format: [`docs/DESIGN.md`](docs/DESIGN.md#end-to-end-encrypted-links).
 
 ### Watch for changes
 

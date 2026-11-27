@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"mime"
-	"net/http"
 	"path"
 	"regexp"
 	"sort"
@@ -19,45 +17,11 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/blob"
+	"github.com/mrRedSun/redrop/internal/contenttype"
+	"github.com/mrRedSun/redrop/internal/e2e"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
-
-func init() {
-	// Distroless images ship no /etc/mime.types; register what artifacts use.
-	for ext, typ := range map[string]string{
-		".md": "text/markdown; charset=utf-8", ".markdown": "text/markdown; charset=utf-8",
-		".txt": "text/plain; charset=utf-8", ".log": "text/plain; charset=utf-8",
-		".csv": "text/csv; charset=utf-8", ".tsv": "text/tab-separated-values; charset=utf-8",
-		".yaml": "text/yaml; charset=utf-8", ".yml": "text/yaml; charset=utf-8", ".toml": "text/plain; charset=utf-8",
-		".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".cjs": "text/javascript; charset=utf-8",
-		".css": "text/css; charset=utf-8", ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
-		".json": "application/json", ".map": "application/json", ".webmanifest": "application/manifest+json",
-		".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
-		".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".flac": "audio/flac",
-		".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
-		".ico": "image/x-icon", ".avif": "image/avif", ".webp": "image/webp", ".svg": "image/svg+xml",
-		".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
-		".zip": "application/zip", ".gz": "application/gzip", ".tar": "application/x-tar", ".7z": "application/x-7z-compressed",
-		".pdf": "application/pdf", ".wasm": "application/wasm", ".xml": "application/xml",
-		".py": "text/plain; charset=utf-8", ".go": "text/plain; charset=utf-8", ".ts": "text/plain; charset=utf-8",
-		".tsx": "text/plain; charset=utf-8", ".sh": "text/plain; charset=utf-8", ".rs": "text/plain; charset=utf-8",
-	} {
-		mime.AddExtensionType(ext, typ)
-	}
-}
-
-// contentTypeFor picks a type by extension, falling back to sniffing.
-func contentTypeFor(name string, head []byte) string {
-	t := mime.TypeByExtension(strings.ToLower(path.Ext(name)))
-	if t == "" {
-		t = http.DetectContentType(head)
-	}
-	if (strings.HasPrefix(t, "text/") || t == "application/json" || t == "image/svg+xml") && !strings.Contains(t, "charset") {
-		t += "; charset=utf-8"
-	}
-	return t
-}
 
 var titleRE = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 
@@ -134,8 +98,14 @@ func (h *headCapture) Write(p []byte) (int, error) {
 }
 
 // extractBundle unpacks a tar.gz into blobs, enforcing file-count and
-// decompressed-size limits and rejecting links and special files.
-func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File, error) {
+// decompressed-size limits and rejecting links and special files. With
+// encrypted set, every file must be an end-to-end object (by its magic), is
+// stored as ciphertext, and the manifest doesn't count against MaxFiles.
+func (s *Service) extractBundle(r io.Reader, attempt *publication, encrypted bool) ([]store.File, error) {
+	maxFiles := s.cfg.MaxFiles
+	if encrypted {
+		maxFiles++
+	}
 	ctx := attempt.ctx
 	gz, err := gzip.NewReader(contextReader{ctx: ctx, r: r})
 	if err != nil {
@@ -191,7 +161,7 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 		if seen[p] {
 			return nil, apperr.Invalid("duplicate normalized bundle path %q", p)
 		}
-		if len(files) >= s.cfg.MaxFiles {
+		if len(files) >= maxFiles {
 			return nil, apperr.Invalid("bundle has more than %d files", s.cfg.MaxFiles)
 		}
 		seen[p] = true
@@ -207,7 +177,14 @@ func (s *Service) extractBundle(r io.Reader, attempt *publication) ([]store.File
 			return nil, s.blobErr(err)
 		}
 		total += size
-		files = append(files, store.File{Path: p, Blob: sum, Size: size, ContentType: contentTypeFor(p, head.buf.Bytes())})
+		ct := contenttype.For(p, head.buf.Bytes())
+		if encrypted {
+			if !e2e.HasMagic(head.buf.Bytes()) {
+				return nil, apperr.Invalid("%q is not end-to-end encrypted content", p)
+			}
+			ct = e2eContentType
+		}
+		files = append(files, store.File{Path: p, Blob: sum, Size: size, ContentType: ct})
 	}
 	if p := fileDirectoryCollision(files); p != "" {
 		return nil, apperr.Invalid("bundle path %q is both a file and a directory", p)

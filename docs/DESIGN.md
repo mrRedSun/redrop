@@ -35,7 +35,7 @@ management dashboard and a cross-platform CLI that agents drive.
 | Access | Unguessable link; optional password; optional max views (1 = one-time) |
 | Link format | Four EFF-wordlist words, e.g. `amber-otter-quilt-river` (~51.7 bits); legacy 26-char base32 links keep working |
 | Versions | Same link, version history, rollback |
-| Encryption at rest | None (rely on host isolation) |
+| Encryption at rest | None by default (rely on host isolation); opt-in end-to-end encryption per artifact, key in the link (see [End-to-end encrypted links](#end-to-end-encrypted-links)) |
 | Limits | 500 MB per version, 50 GB server total, 10 GB default per-user quota |
 | Agent integration | CLI with thorough `--help`, `redrop guide`, `--json` output; no MCP server |
 | Viewer feedback | Off by default; per-artifact comments from the info panel, read back by the owner and agents (see [Viewer feedback](#viewer-feedback)) |
@@ -59,7 +59,9 @@ each other's storage or cookies, while still allowing normal
 worker script, not even redrop's own `/__redrop/` scripts (requests with `Sec-Fetch-Dest: serviceworker` or
 `Service-Worker: script` get `404`): a worker would keep answering after the
 link is revoked or expires, and could take over the viewer page's own
-navigations.
+navigations. The one exception is redrop's own decrypting worker on an
+end-to-end encrypted artifact's host, which is built to avoid both (see
+[End-to-end encrypted links](#end-to-end-encrypted-links)).
 
 On a content domain that is not on the Public Suffix List, an artifact can set
 ordinary parent-domain cookies sent to sibling artifact hosts. Host-only
@@ -240,7 +242,9 @@ anyway. Look-alikes were already possible.
   plus the dashboard origin, so the viewer (and an artifact's own frames) and
   the dashboard preview can frame it.
 * **Service workers.** No artifact host serves a service worker script, so an
-  artifact can't install one that answers the viewer page's navigations. A
+  artifact can't install one that answers the viewer page's navigations.
+  (End-to-end encrypted artifacts get redrop's own worker, scoped to
+  `/__redrop/v/`, which never sees the viewer page's navigations.) A
   worker registered before this release keeps running in browsers that
   already have it until the browser drops it; operators who need a guarantee
   can move to a fresh content domain.
@@ -642,6 +646,650 @@ client) also counts these POSTs.
 * **Privacy.** No raw IP, user agent or cookie is stored. The name is
   optional and unverified. Comments never appear in admin views.
 
+## End-to-end encrypted links
+
+`redrop share --e2e` encrypts an artifact in the CLI before upload, and
+`update` and `watch` encrypt every later version with the same key. The
+server stores and serves only ciphertext. The key travels in the link's
+fragment, which browsers never send to a server, and the link is a page of
+redrop's app origin, where no artifact runs:
+`https://redrop.example.com/e/<slug>#k=<key>`. It answers issue #7. It is
+opt-in per artifact and permanent: an artifact is either end-to-end
+encrypted (every version) or not (no version).
+
+### Threat model
+
+**Protects against** a compromise of the server's storage: a stolen backup,
+a copied data directory, a read-only database leak, or an operator browsing
+the disk. From those an attacker learns only:
+
+* that the artifact is end-to-end encrypted, its kind (`html`, `file` or
+  `bundle`), its title and change notes when the owner gave them (both are
+  plaintext settings), and the usual metadata: owner, times, expiry, views,
+  password hash, slug;
+* the number of files in each version (plus one, the manifest);
+* each file's size, exactly: ciphertext is 20 bytes plus the plaintext plus
+  16 bytes per 64 KiB segment, with no padding. The CLI uploads the
+  objects in a random order, so neither the stored rows nor the blobs'
+  write order follow the source's path order; but someone who can guess a
+  site's layout can still match files to it by their sizes;
+* when versions were published and viewed;
+* viewer comments, if the owner turned feedback on. They are plaintext,
+  including the quoted text and the page path (see below).
+
+It does not learn file contents, file names or paths, content types, the
+start page, or the page `<title>`. It never receives plaintext for an
+end-to-end artifact either: `update` and `watch` read the artifact before
+uploading and encrypt with its key, or refuse, and the server refuses an
+upload declared for such an artifact unless it is declared encrypted,
+before any byte of it arrives (see "Publishing"). **Paths are encrypted**:
+the server stores an encrypted manifest and opaque random object names, and
+the viewer resolves paths from the manifest (see "Viewing"), so the server
+never needs them.
+
+**Does not protect against a malicious or compromised live server.** The
+page that decrypts is redrop's viewer, delivered by the same server. A
+server that wants the key can serve a viewer script that sends it home, the
+next time someone opens the link. This is the known limit of every
+web-delivered end-to-end scheme, and redrop does not pretend otherwise. What
+a malicious server can still do without changing scripts: withhold or
+delete content, serve an older genuine version as the current one
+(rollback), refuse to serve a version, and see request timing. Without the
+key or derived object keys, it cannot alter content, swap files between
+paths, versions or artifacts, or make a viewer show bytes the owner did not
+encrypt: every object is authenticated (see "Format"). A script that ran
+with the key can supply derived object keys to such a server, as below.
+
+**Scripts inside the artifact** (its own code, an analytics tag, a CDN
+library, an XSS in a generated report) run on the artifact's origin, as for
+plain artifacts. They share the viewer's window, so they can read anything
+it holds and rewrite its address, and can replace any function or getter on
+it; they can open windows and keep handles on them, and on the visitor's
+tab. They still can't obtain the key, because its text never reaches their
+origin (review 33 third re-check B-2a″, closed by the owner's choice of key
+intake on another origin):
+* the link is the **app origin's intake page**,
+  `https://<app>/e/<slug>#k=<key>` (see "Where the key goes in the
+  browser"). No artifact runs on the app origin, and a window on the
+  artifact's origin can't read the address of a page on another origin,
+  so the key arrives where none of their code, and no window they hold
+  (a popup, a tab they opened, the visitor's own tab), can read it;
+* only a non-extractable `CryptoKey` crosses to the artifact's origin, by
+  `postMessage` between two of redrop's own pages;
+* a key-like fragment or query on the artifact's origin is a damaged link,
+  never framed (see "Key attempts" and "A link whose `#` became `%23` or
+  `?`");
+* once the frame exists, the navigation guard refuses every same-document
+  change of the viewer's address that the viewer didn't make (see "The
+  navigation guard"), so the artifact can't make the visitor's later edits
+  of the address reach it either.
+
+They can *use* the non-extractable `CryptoKey` the viewer stores: decrypt
+what they can fetch (the current version, and older ones only when the
+owner lets viewers open them), and send out what they decrypted. They
+can't copy the key itself, but they can derive and send out object keys.
+Those keys decrypt those objects later and can make objects that pass
+authentication for this artifact if they are ever stored on the server.
+A script that ran with the key is a reason to share a new artifact:
+neither `rotate` nor `update` changes the key. A browser test
+(`scripts/e2e-browser.mjs`) checks
+every place such a script could look, with a probe artifact that watches
+and one that acts: it rewrites the address (also from inside a capturing
+listener or the viewer's own update), replaces the functions the viewer
+could use, replaces the viewer's document, opens a popup that holds the tab,
+or opens a window the visitor then opens the link in, before the full link
+is opened. Run against the build before intake moved, the popup and window
+cases read the key; now none does.
+
+**The key is permanent.** It is the same for every version, and `rotate`
+keeps it (only the slug changes). There is no way to change an artifact's
+key: whoever holds the full link, key included, can read every version,
+past and future, for as long as the link works. To cut someone off,
+rotate the link or share a new artifact. A lost key means lost content;
+nobody can recover it.
+
+**Also out of scope:** the visitor's device and browser extensions, and
+anyone the link is forwarded to. The visitor's browser history and
+address-bar suggestions keep the full link, key included, as they keep
+any URL the visitor opened; the viewer can't remove that.
+
+### Keys and links
+
+* **Key:** 32 random bytes per artifact (`crypto/rand`), kept for every
+  version, so `update` and `watch` never change the link. In links it is
+  unpadded base64url, 43 characters.
+* **Link:** `https://redrop.example.com/e/<slug>#k=<key>`: the key
+  intake page on the app origin (`REDROP_PUBLIC_URL`), named by the
+  artifact's slug. The API returns it, without the key, as `e2e_link` in
+  the owner's views; the CLI prints it with the key (and `--json` returns
+  that as `url`); the dashboard shows it. The artifact's own address
+  (`url`, `https://<slug>.usercontent.example/`) opens nothing by itself.
+  The server never had the key. The app origin must be reachable by
+  everyone the link is for: a dashboard behind a private network can't
+  serve end-to-end encrypted links.
+* **Fragment grammar.** `#k=<43 characters>`, optionally followed by `&`
+  and the rest. A rest that starts with `/` is a page inside the artifact
+  with its own query and fragment (`#k=…&/docs/a.html?x=1#part`); any other
+  rest is the artifact's own fragment for its start page (`#k=…&part`).
+  After the intake, the viewer gets the rest as its own fragment. A
+  fragment without a key is all rest.
+* **Key attempts.** Any fragment that could hold a key is a key attempt
+  (review 33 re-checks, B-2b, B-2b' and m-7). The fragment is
+  percent-decoded as often as that changes it (up to 8 times; only escapes
+  of ASCII characters, so a malformed one doesn't stop the rest). Every
+  non-ASCII character, and every escape of a non-ASCII byte left, then
+  reads as a space. The result is matched for:
+  * `k` in either case, at the start or after any character that is not a
+    letter or digit, then up to 3 characters that are neither, then `=` or
+    `:` (`K=…`, `&k=…`, ` k=…`, `x&k=…`, `/a.html?k=…`, `k =…`, `k:…`, and
+    encoded forms such as `k%3D…`, `%6B=…`, `k%253D…` and a zero-width
+    space `k%E2%80%8B=…`);
+  * a run of at least 40 base64url characters with both upper and lower
+    case letters, such as a key that lost its `k=`.
+
+  Unless the fragment is exactly the form above, with no key attempt in
+  its rest and no 12 characters of its key in a row in the rest (in either
+  case, however split: a second, damaged copy of the link), the link is
+  damaged. The viewer says so, takes the fragment off
+  the address bar, frames nothing (even with a key stored from an earlier
+  visit), and passes no part of the fragment on. The cost: an artifact's
+  own fragment or page path of either shape (an anchor `#k=2`, a page
+  `?k=1`, a 40-character mixed-case anchor) can't be linked to directly.
+  Lower-case anchors and file names of any length are unaffected. The CLI
+  (`internal/e2e`) applies the same rule to links it is given, so a
+  damaged key there is an error, not a link without a key;
+  `internal/e2e/testdata/fragments.json` holds the cases both sides test.
+  Residual: a link damaged twice over, its `k=` lost entirely (or
+  `xk=`, `key=`) and its key split by a separator or case-folded, passes
+  as the artifact's own fragment, key characters included. Catching that
+  would also refuse ordinary mixed-case page paths. A case-folded key
+  would still need about 2^35 tries against the public key check.
+* **Where the key goes in the browser.** The artifact runs on its own
+  origin, which the viewer shares (see "Viewer frame"), so the key's text
+  never goes there (review 33 B-2 and its re-checks):
+  1. The visitor opens the link: the intake page on the app origin. It
+     holds no artifact data and looks nothing up, so it says nothing about
+     the slug, counts no view and opens no gate. It is never cached
+     (`no-store`), framed (`frame-ancestors 'none'`) or referred
+     (`no-referrer`); its policy allows only its own script
+     (`/e2e/intake.js`, the decryptor and the intake) and its pinned style.
+     It has `Cross-Origin-Opener-Policy: same-origin-allow-popups`, which
+     cuts any window that opened it and keeps only the popup it opens
+     itself. Logs redact the slug in `/e/` paths like a token.
+  2. Its script takes the fragment off the address bar first
+     (`history.replaceState`, before anything asynchronous), applies the
+     key-attempt rule, and imports the key as a non-extractable HKDF
+     `CryptoKey`. The text stays on the app origin, in that page's memory
+     and its navigation-timing entry; browser history and address-bar
+     suggestions also keep the original full link.
+  3. The visitor presses **Open**. That click lets the page open a small
+     window on the artifact's origin, `/__redrop/e2e-intake`: redrop's
+     helper page, with a policy that allows only its own script and no
+     framing. The content handler serves it only for a live end-to-end
+     encrypted artifact, after one slug lookup like any visit (no gate,
+     no view). Every other slug, unknown, gone, plaintext or a tunnel,
+     gets the identical miss and spends miss budget, so the helper is no
+     cheaper oracle than the link itself, and no key is ever stored on a
+     tunnel's or a plaintext artifact's origin. Someone who has the link
+     but not its password can tell from the helper that it is encrypted;
+     the link is the secret that gives this away. A refused slug gets
+     "Not found" in the small window; the intake page offers Open again
+     after its 30-second wait. A valid visit grant still permits the
+     helper during a one-time visit, as it permits the content. The
+     app-origin intake stays syntax-only and reveals nothing about its slug.
+  4. The helper says it is ready to its opener, on the app origin only.
+     The intake page sends it the `CryptoKey` by `postMessage`, to the
+     artifact's origin only, and only to that popup. The helper takes it
+     only from its opener on the app origin, and only a non-extractable
+     HKDF `CryptoKey`. It stores it in the origin's IndexedDB (database
+     `redrop-e2e`) as the intake key, answers, and closes.
+  5. The intake tab goes to the artifact's address with the rest. The
+     viewer adopts the intake key for the artifact once it matches the key
+     check (a wrong one is dropped), gives it to the service worker
+     (`postMessage`), and only then creates the frame. A key stored on an
+     earlier visit is used when no fresh one is waiting.
+
+  The helper gives up after 30 seconds without a valid hand-off and
+  explains that it works only when an encrypted link opens it. Because the
+  helper answers only live encrypted artifacts, an intake link for a
+  plaintext, unknown or tunnel slug stores nothing (fourth re-check n-1).
+  Scripts on the artifact's origin can also overwrite that slot with their own key: the
+  next viewer refuses it once and drops it. This is an accepted same-origin
+  denial of service, like tampering with the viewer itself; reopening the
+  complete link supplies the right key again.
+
+  Why a click and a window, not a hidden frame: the app origin and the
+  content domain are different sites by design (see "Origins"), and
+  browsers partition a cross-site frame's storage by the top-level site. A
+  key stored from a frame inside the intake page would never be found by
+  the viewer, which is top-level on the artifact's origin; a window opened
+  by the intake page is top-level, so it stores where the viewer reads.
+  Browsers open windows only on a click. A prototype in Chromium confirmed
+  both: the hidden frame's key wasn't found, the window's was.
+
+  The stored key lets reloads, the viewer's own links and the artifact's
+  `target=_top` links keep working for 12 hours after the full link was
+  last opened in that browser; after that, or after the site's data is
+  cleared, the full link is needed again. If the browser refuses
+  IndexedDB (some private windows), the page isn't opened rather than
+  keeping the key any other way. A copied address bar has no key, so
+  forward the original link instead. Key text in the viewer's own
+  address (`https://<slug>…/#k=…`) is never a link redrop gives out: the
+  viewer treats it as a damaged link and stores nothing.
+* **The navigation guard** (review 33 re-checks, B-2a and B-2a'). Since
+  the intake moved, a full link is always a page on the app origin, so
+  opening it in a tab where the artifact runs is never a fragment change
+  of the artifact's window. The guard covers what is left of that route:
+  any same-document change of the viewer's address, such as a fragment the
+  visitor types after it, and the artifact rewriting the address. A script
+  in the artifact can do that with one `history.replaceState` (also
+  through a fresh realm's `History.prototype`), with the Navigation API, or
+  by replacing the viewer's document with `document.open()`, which moves
+  the address without a navigation. So the viewer doesn't rely on its
+  address:
+  * Before any frame exists, it registers this window's first `navigate`
+    listener, a capturing one (third re-check M5). At the target, the DOM
+    standard runs capturing listeners before the others, so an artifact's
+    capturing listener added later still runs after it, in any engine
+    (Chromium runs them in the order added). It captures every function
+    and getter that listener and the viewer's own address updates use
+    (`Reflect.apply`, `Event.prototype.preventDefault`,
+    `NavigateEvent.prototype.destination`, `History.prototype.replaceState`,
+    `URL` and the rest). The artifact can later replace them on the
+    window, not the captured ones.
+  * Once the frame exists, every same-document navigation of the page that
+    the viewer didn't start is cancelled (`preventDefault`, so the URL
+    never changes), hidden from later listeners
+    (`stopImmediatePropagation`), and ends the artifact: the guard removes
+    every frame, so none of its code runs in the window again (a removed
+    frame's callbacks don't run). The page then says to open the link in a
+    new tab.
+  * Cancelling is the defence; removing the frames only stops the
+    artifact's ordinary code. The HTML standard makes every push and
+    replace navigation cancelable, the address bar's fragment changes
+    included, and Chromium does so (checked by `scripts/e2e-browser.mjs`,
+    with the tampering and `document.open()` cases). Residual: in a
+    browser that didn't, the frames would still go before the URL changed,
+    but code the artifact left outside them (a frame inside a shadow root
+    of the viewer's page, a popup holding a reference, a timer it set on
+    the viewer's window) could see the new URL, which since the intake
+    moved can hold the key only if the visitor typed it there. Firefox
+    and Safari were not tested.
+  * The viewer's own address updates go through the guard, which knows
+    each by the exact URL it goes to, not by a flag, and hides it from
+    later listeners too. So a write the artifact makes while one is
+    running, from a listener or any other event, is refused like any other
+    (third re-check m-6). They never hold a key.
+  * An artifact can still make the visitor's reopen do nothing, for
+    example by calling `parent.stop()` in a loop: a denial of service
+    only; the key doesn't arrive.
+  * A browser without the Navigation API gets no guard, so the viewer
+    opens nothing there and says why (fail closed).
+
+  The viewer's address also keeps the query `redrop-e2e=1`, which the
+  server drops before it builds the frame's address or a redirect. It
+  predates the intake on the app origin and stays as defence in depth: an
+  address the artifact leaves alone is never the content address a
+  damaged link would reach by a fragment change.
+* **A link whose `#` became `%23` or `?`** (`https://<slug>…/%23k=…` or
+  `…/?k=…`, review 33 re-checks M3 and B-2b″) sends its key to the server
+  in the request path or query, which no browser can avoid. The frame must
+  not get it as well: its address would carry the path and query. On an
+  end-to-end host, a top-level load gets a fixed "This link is damaged"
+  page (400, `Cache-Control: no-store`) before any gate when its path
+  holds a `#` after decoding, or when its query, without redrop's own
+  parameters, is a key attempt (as above). No viewer, frame address or
+  gate form is built from the request, and no view counts. A plaintext
+  artifact's query strings are untouched. An encrypted artifact's page
+  whose own query matches (a `?k=1`) can't be linked to directly. Redrop
+  logs no content-host paths. A reverse proxy in front of it may: operators
+  should not log content-domain request paths and queries, or should strip
+  them. The viewer refuses such a path or query too. An encrypted bundle's
+  file whose name holds a `#` can't be opened by a top-level link to its
+  path; links
+  inside the frame still reach it. On the app origin's intake page,
+  a key-like query gets the same explanation that `#` became `?`; the
+  script removes the query from the address bar before checking it, opens
+  no helper and forwards nothing. The key has already reached the app
+  server in that malformed request, so reverse-proxy query logging must
+  also be disabled there.
+* **Gates stay where they were.** The intake page and its helper run no
+  gate and count no view: the key is stored before the visitor reaches the
+  artifact, whose gate then works as for any link and counts the view
+  once, on the viewer page. The password and Open pages carry one small
+  script, pinned in their policy by its hash, that adds the page's
+  fragment to the form's action, so the link's rest (a page, or the
+  artifact's own fragment) and a plain link's own `#part` survive the gate.
+  Without scripts that fragment is lost, but not the key, which is already
+  stored.
+* **The key never reaches the server.** It is not in any query string,
+  path, header, cookie, API call or log. Fragments are never sent in
+  requests or in `Referer`. The CLI sends only the key check below. Of an
+  argument given as `ID|URL` it uses the part after `#` (`ID#k=…`
+  included) only locally, and sends only what names the artifact: an ID
+  (16 characters of `a-z` and `2-7`), a slug, or a link's slug. Anything
+  else is refused with exit code 2 before any request, and the error
+  doesn't repeat it: `ID%23k=…`, a key whose `#` was percent-encoded,
+  never reaches an API path. The server's log cuts every path at a `#`
+  and at an encoded one (`%23` or `%2523` in the decoded path, and so
+  on), for the clients that send one anyway. The intake page makes no
+  request with the key, and its `/e/<slug>` path is redacted in the log
+  like a token. Tests record every request the CLI sends and every server
+  log line during end-to-end shares, updates and views, and check the key
+  appears nowhere.
+* **Key check.** `HKDF-SHA256(key, salt = "", info = "redrop-e2e/1
+  key-check" ‖ 0x00 ‖ artifact ID)`, 16 bytes, stored with the artifact
+  and sent with every publication. The server refuses a version whose key
+  check differs, so a wrong key can never publish a version the link can't
+  open. The viewer compares it before decrypting, to tell "wrong key" from
+  "damaged content". It reveals nothing about the key.
+* **CLI key store.** `share --e2e` saves the key in `e2e-keys.json` next
+  to the CLI config file (`REDROP_CONFIG`'s directory, or
+  `<user config dir>/redrop/`), keyed by server URL and artifact ID.
+  `update`, `watch`, `info` and `rotate` find it there; `update` and
+  `watch` also take it from a full link given as `ID|URL`, or, to keep the
+  key out of shell history and process lists, on stdin with `-` as
+  `ID|URL` (`redrop update - report.html < link.txt`). The file is
+  written like the config: a fresh 0600 file renamed into place, never
+  through a symlink, and a store path that is a symlink is refused, for
+  reading too. Writers hold the operating system's lock on
+  `e2e-keys.json.lock` (`flock`, or `LockFileEx` on Windows), so
+  concurrent shares don't lose keys; the system releases it when a writer
+  dies, so there is no stale lock to take over. A lock file that is a
+  symlink is refused on every system: Unix opens it with `O_NOFOLLOW`, and
+  every system checks it with `Lstat` before and after the open, so the
+  lock never creates or holds a file a link points to. `delete` removes
+  the key.
+  The key is saved before anything is uploaded, so a failed save never
+  leaves a link without a stored key.
+
+### Format (version 1)
+
+Every stored object (each file, and the manifest) is encrypted on its own.
+All integers are big-endian.
+
+```text
+object   = magic salt segment*
+magic    = 0x52 0x44 0x45 0x01        ("RDE", format version 1)
+salt     = 16 random bytes, fresh for every object
+segment  = AES-256-GCM ciphertext of up to 65536 plaintext bytes, then its 16-byte tag
+```
+
+* **Object key:** `HKDF-SHA256(key, salt = salt, info = "redrop-e2e/1
+  object")`, 32 bytes. A fresh salt per object gives every object its own
+  key, so nonces never repeat under one key, however many versions `watch`
+  publishes.
+* **Segments:** the plaintext is cut into 65536-byte segments. The last
+  one has 1 to 65536 bytes, or 0 bytes when the plaintext is empty (then
+  it is the only one). Segment `i` (from 0) uses nonce `uint88(i) ‖ last`,
+  where `last` is `0x01` for the final segment and `0x00` otherwise. A
+  dropped, added or reordered segment fails its tag (the STREAM
+  construction).
+* **Authenticated data** (the same for every segment of an object):
+
+  ```text
+  magic ‖ salt ‖ type ‖ uint16(len(id)) ‖ id ‖ uint32(version) ‖ uint16(len(path)) ‖ path
+  type = 0x01 manifest, 0x02 file; path is "" for the manifest
+  ```
+
+  So the server can't swap blobs between artifacts (different ID, and a
+  different key), versions (different number) or paths (different path),
+  or present a file as the manifest. Every case fails closed.
+* **Size:** `20 + n + 16 × max(1, ⌈n / 65536⌉)` for `n` plaintext bytes.
+* **Manifest:** UTF-8 JSON, encrypted as type `0x01` with an empty path:
+
+  ```json
+  {"format": 1, "kind": "bundle", "title": "Report", "entry": "index.html",
+   "files": [{"path": "index.html", "object": "q3h…", "type": "text/html; charset=utf-8", "size": 1234}]}
+  ```
+
+  `object` names are 26 characters of `[a-z2-7]` (16 random bytes), unique
+  in the version. `type` is chosen by the CLI with the server's rules
+  (extension, then sniffing the plaintext), from the shared
+  `internal/contenttype` table. `entry` is the start page, or `""` for a
+  bundle without one.
+* **Stored version:** a bundle with exactly one file named `manifest` and
+  one file per object name. The server checks this layout and the magic of
+  every file, refuses anything else, and stores the files as
+  `application/octet-stream`. It can't check the rest: only a key holder
+  can.
+* **Implementations:** `internal/e2e` (Go: the CLI encrypts, tests
+  decrypt) and `internal/content/static/e2e.js` (browser and Node:
+  decrypt, manifest, path resolution). `internal/e2e/testdata/vectors.json`
+  holds vectors produced by the Go encryptor with fixed randomness; a Go
+  test keeps the file current, and the web test suite decrypts every
+  vector with the JavaScript code and checks that tampered variants fail.
+
+### Publishing
+
+* **Share.** The CLI asks for an artifact ID first
+  (`POST /api/v1/artifacts/reservations`), because the ID is part of the
+  authenticated data. The server mints the ID and returns it with a token
+  signed for that user, valid 24 hours. The CLI generates the key, saves
+  it, encrypts version 1 for that ID, uploads, and creates the artifact
+  with `e2e: {reservation, key_check, version: 1}`. The server creates
+  the artifact under the reserved ID. A forged, expired or another user's
+  token is refused (`400`). A reserved ID that is somehow taken is a
+  conflict. Minting the ID on the server keeps IDs unprobeable: a
+  client-chosen ID would need a "taken" answer that reveals other users'
+  IDs.
+* **Plaintext never goes to an end-to-end artifact** (review 33 B-1).
+  `update` and `watch` read the artifact before uploading anything, with
+  or without `--e2e`. For an end-to-end artifact they take its key from
+  the full link given, else the key store, check it, say so on stderr, and
+  publish encrypted. Without a key they exit 2, and nothing was uploaded.
+  `watch` checks at startup. `--e2e` now only insists that the artifact is
+  encrypted. In `pkg/client`, a plaintext `Update`, `UpdateWithOptions`
+  or `UpdateDigest` reads the artifact after preparing the source and
+  before uploading or applying settings, and stops with
+  `ErrEncryptedArtifact`.
+* **Uploads declare their target.** `POST /api/v1/uploads` takes
+  `artifact_id` (the artifact a new version is for) and `e2e`. The server
+  refuses, before any byte is sent, an upload declared for an end-to-end
+  artifact without `e2e` (and the reverse). A publication must match its
+  upload's declaration: an end-to-end artifact's versions come only from
+  uploads declared encrypted for it, an upload declared for one artifact
+  can't become another's version or a new artifact, and encrypted and
+  plaintext can't be swapped. Undeclared uploads still publish plaintext
+  versions of plaintext artifacts, so older CLIs keep working. The server
+  can't stop a client from uploading plaintext as a *new* upload: that is
+  ordinary sharing; it can only refuse to let it near an encrypted
+  artifact. That includes an older CLI's `update` of an end-to-end
+  artifact: it doesn't declare its upload, so it still sends the
+  plaintext to the server before the publication is refused. Anyone who
+  uses `--e2e` should upgrade the CLI on every machine they publish from.
+* **Update and watch.** The CLI reads the artifact (`e2e`,
+  `e2e_key_check`, `next_version`), checks its key against the key check,
+  encrypts for `next_version`, uploads, and publishes with
+  `e2e: {key_check, version}`. The server assigns that number or refuses
+  with `409` and the problem title `version_conflict` (another version
+  took it first), deleting the upload. The CLI then encrypts again for the
+  new number, up to three attempts.
+* **Refusals.** The API refuses a plaintext version on an end-to-end
+  artifact and an end-to-end version on a plaintext one (`400`), a key
+  check that differs from the artifact's (`400`), `spa` on an end-to-end
+  artifact or version (`400`), and a bundle that breaks the layout above
+  (`400`).
+* **Rendering in the CLI.** Everything `Prepare` does still happens
+  first, unchanged: the folder rules, secret filtering, zip conversion,
+  and Markdown rendering with the same renderer and sanitizer. The CLI
+  then encrypts each resulting file. A `.md` file is therefore a rendered
+  document plus its original, as without `--e2e`; the server never sees
+  either.
+* **Storage (migration 9).** `artifacts.e2e` and
+  `artifacts.e2e_key_check`, `versions.e2e`, and `uploads.artifact_id`
+  and `uploads.e2e`, all defaulting to plaintext (and undeclared) for
+  existing rows. The API reports `e2e` on artifacts and
+  versions, and `e2e_key_check` and `next_version` on the owner's artifact.
+
+### Viewing
+
+A browser can't run decrypted HTML at the artifact's own origin, with the
+artifact's normal response headers and working relative URLs, without
+something that answers requests on that origin. The options:
+
+* **`srcdoc`, `about:blank` with `document.write`, or a `blob:` frame:**
+  the document inherits the viewer page's CSP, so the viewer's policy
+  would have to allow any script; its base URL is not the artifact's, so
+  relative links and assets break; a `data:` or sandboxed frame gets a
+  null origin, losing `localStorage` and same-origin `fetch`. Rejected.
+* **A service worker:** the frame loads real URLs on the artifact's
+  origin, and the worker answers them with decrypted bytes and the same
+  headers a normal artifact gets. Chosen, for single files and bundles
+  alike.
+
+**Decision: bundles are supported, through redrop's own service worker.**
+The design stays within the rules of "Viewer frame":
+
+* **It is redrop's script**, `/__redrop/e2e-sw.js` (the shared
+  `e2e.js` followed by the worker), served only on the host of an
+  end-to-end artifact, only after that artifact's gates, with
+  `Cache-Control: no-cache`. Every other content host, and every other
+  service worker script request, still gets `404`. Artifacts still can't
+  register a worker of their own.
+* **Its scope is `/__redrop/v/`**, the version path space, so it never
+  controls the viewer page, never sees a top-level navigation, and can't
+  answer the viewer's own requests. A top-level load of a version path
+  still goes to the server, which redirects it to the viewer form.
+* **It keeps nothing that would outlive revocation.** It has no cache:
+  every request fetches ciphertext from the server, through the gates, and
+  a revoked, expired or used-up link answers the worker with the identical
+  miss, which it passes on. It keeps the key in memory only; after the
+  browser stops it, it asks an open viewer page for the key again. It
+  accepts keys only from top-level windows of its origin. Nothing is
+  injected into the artifact's bytes or DOM.
+* **What it does:** for a request from the frame for
+  `/__redrop/v/<N>/<path>`, it fetches and decrypts version N's manifest
+  (cached in memory per N: numbers are never reused), resolves the path
+  like the server resolves a bundle (exact file, `dir/` to
+  `dir/index.html`, `dir` redirected to `dir/`, the entry for the root),
+  fetches `/__redrop/v/<N>/<object>`, decrypts it with the path in the
+  authenticated data, and answers with the manifest's content type and the
+  security headers of the ciphertext response (`Content-Security-Policy:
+  frame-ancestors …`, `Referrer-Policy`, `X-Content-Type-Options`,
+  `Permissions-Policy`, `Cross-Origin-Resource-Policy`, `X-Robots-Tag`,
+  `Cache-Control`). A decrypted page therefore has the same origin,
+  isolation and CSP as a normal artifact. A root-absolute subresource
+  (`/app.css`) from a frame inside version N resolves in version N. Other
+  origins pass through untouched.
+* **Fails closed.** Objects up to 64 MiB are decrypted completely before
+  any byte is released; a damaged or swapped object answers an error page
+  and nothing of it reaches the page. Larger objects (video) stream, one
+  authenticated segment at a time, so memory stays bounded; a damaged
+  stream stops with a network error after its last good segment. Released
+  bytes are always authenticated; truncation is detected at the end.
+* `?download` on a file answers it as an attachment with its file name.
+
+**The viewer page.** Every top-level page load of an end-to-end artifact,
+at any path, gets redrop's viewer page, after the usual gates and view
+counting. It differs from the plain viewer:
+
+* It always has the frame, even with the info button off (then without
+  button and panel) or with `?redrop-info=0`: there is no direct view of
+  ciphertext.
+* It carries the artifact ID, the shown and current version numbers, and
+  the key check as data attributes. The artifact ID is needed for the
+  authenticated data; an ID grants nothing without the owner's token.
+  This is the one exception to "the panel never shows IDs".
+* Its script (`viewer.js`, with `e2e.js`) adopts the intake `CryptoKey`
+  as described in "Where the key goes in the browser", or reads a key
+  stored on an earlier visit. It checks the key and decrypts the
+  manifest (which checks the content before anything is framed, and gives
+  the tab title), registers the worker, gives it the key, and only then
+  points the frame at `/__redrop/v/<N>/<page>`. The
+  CSP adds `e2e.js` to `script-src`, `worker-src` for the worker script
+  and `connect-src` for `/__redrop/v/`, nothing else.
+* **A fragment the visitor changes** (an edited address, a pasted full
+  link) reloads the viewer while no frame exists yet, for example while it
+  shows "the key is missing", and the reloaded page reads it. Once the
+  frame exists, the navigation guard refuses it and asks for a new tab.
+  The viewer's own address bar updates use `history.replaceState`, which
+  fires no `hashchange`, so only the visitor's changes do.
+* **Address bar, paths kept private.** The address bar shows the frame's
+  page in the fragment, not the path:
+  `https://<slug>…/?redrop-e2e=1#/docs/a.html#part` (plus
+  `&redrop-version=N` for an older version). A reload sends the server
+  only `/` and the marker. The page inside the frame keeps its own
+  fragment, and `#hash` navigation, Back/Forward and `pushState` inside
+  the artifact work as for plain artifacts. Feedback still reports the page as
+  `/docs/a.html#part` (see below).
+* Errors (no key, a damaged key, a key in the path, wrong key, damaged
+  content, an insecure context, a browser without service workers or the
+  Navigation API, the guard's refusal) are shown as text on the viewer
+  page; the frame stays empty.
+* **Needs HTTPS and the Navigation API.** Browsers expose WebCrypto and
+  service workers only to secure contexts (HTTPS, or `localhost`). On a
+  plain-HTTP content domain the viewer explains that it can't decrypt. The
+  navigation guard needs the Navigation API (current Chrome, Edge, Firefox
+  and Safari have it); without it the viewer opens nothing.
+* **Files.** A `file` artifact opens in the same frame. An image is shown
+  on a small redrop page in an `<img>`, as the plain file page shows it, so
+  an SVG's script can't run (review 33 m-A); the `<img>` request gets the
+  file. Other files are served inline when the browser can show them
+  (audio, video, PDF, text as plain text) and as a download otherwise. The
+  panel has a Download button that decrypts in the viewer and saves under
+  the original name.
+* **Requests without Fetch Metadata** (curl, scripts) and frames loading a
+  path outside the version space get a redirect to
+  `/__redrop/v/<current>/<path>`; ciphertext objects are at
+  `/__redrop/v/<N>/manifest` and `/__redrop/v/<N>/<object>`, as
+  `application/octet-stream` attachments. A script with the key can
+  decrypt them; `scripts/e2e-decrypt.mjs` does, with Node's WebCrypto.
+
+### What still works
+
+* **Gates and lifecycle:** passwords, expiry, view limits and `--once`,
+  revoke and restore, rotate, delete, rollback and older versions. They
+  are all enforced by the server on the viewer page and on every
+  ciphertext and worker request, exactly as for plain artifacts, and the
+  intake runs before them (see "Gates stay where they were"). Views count
+  once per visit, on the viewer page; the intake page and its helper count
+  none.
+* **Rotate** gives a new slug; the key stays. The CLI prints the new link
+  with the key when the key store has it.
+* **Feedback**, with a caveat the viewer can't see: comments are
+  **plaintext**. The body, the name, the page path and any quoted text
+  (which comes from the decrypted page) are stored on the server in the
+  clear. Owners who need the content kept private should leave feedback
+  off.
+
+### What stops working
+
+* **Live reload** is not supported for encrypted artifacts. `watch` still
+  publishes encrypted versions, but its live lease is refused explicitly;
+  the viewer's worker uses pinned version paths, not the plaintext frame's
+  reload flow.
+* **SPA fallback** (refused) and path-based routing in general: inside the
+  frame, `location.pathname` is `/__redrop/v/<N>/…`. Hash routers work.
+* **Directory listings:** a bundle without a start page answers `404` at
+  its root. Name the start page with `--entry` or add an `index.html`.
+* **Server-side content handling:** `<title>` extraction (the dashboard
+  shows the ID unless `--title` is given; viewers see the decrypted
+  title), content-type sniffing on the server (the CLI does it before
+  encrypting), and the artifact's own `favicon.ico` (visitors get
+  redrop's).
+* **Root-absolute links** (`<a href="/b.html">`) inside the frame are
+  navigations outside the worker's scope: the server redirects them to the
+  current version's path, so the server sees that path. Relative links
+  never reach the server.
+* **Dashboard:** an `e2e` badge, and no content preview, file names or
+  working "open" link: the server has no key. The dashboard says so.
+* **Size limits** count ciphertext, slightly larger than the plaintext;
+  the manifest doesn't count against `REDROP_MAX_FILES`.
+* **Seeking in large media.** The worker answers whole files and ignores
+  `Range`: a video over 64 MiB plays as it streams, but can't seek ahead
+  of what has arrived, unlike a plain file artifact.
+
+### Rollback
+
+Migration 9 adds five columns; an older server ignores them. Rolling back
+the binary alone serves end-to-end artifacts as plain bundles: a file
+listing of opaque names and ciphertext downloads. Nothing leaks, but the
+links stop working until the new binary returns. Delete or keep such
+artifacts deliberately before a rollback. The worker registered in
+visitors' browsers keeps only the code; without the server's ciphertext
+it serves nothing.
+
 ## Uploads
 
 Cloudflare's free plan rejects request bodies over 100 MB, so uploads are
@@ -916,7 +1564,10 @@ inside their containers on narrow screens. The document is readable without JS.
 The app origin's requests are logged once, by `httpapi.logRequests`: API
 calls and failures, with method, status, size and duration, never query
 strings. A path segment that follows one of `dashpaths.SecretPrefixes`
-(invite, reset and setup tokens) is written as `…`. Fuego's own access log
+(invite, reset and setup tokens) is written as `…`, and anything from a
+`#` or `?` on, or from an encoded one (`%23` or `%3F` in the decoded
+path, from a client that sent `%2523`, or deeper), as `#…`: a fragment or
+query a client sent encoded, such as an end-to-end link's key. Fuego's own access log
 is off, and Fuego's other messages go to redrop's handler at `Info` or
 above only: its debug output includes decoded request bodies, with
 passwords and tokens. A test captures every log line, at debug level,
@@ -1743,7 +2394,7 @@ an artifact's bytes or DOM (see "Principles").
 
 | Field | Rule |
 |---|---|
-| `url` | required; an `http(s)` URL whose host is `<slug>.<content domain>` with a well-formed slug; at most 2048 bytes. Stored without its fragment |
+| `url` | required; an `http(s)` URL whose host is `<slug>.<content domain>` with a well-formed slug, or the configured app origin's `/e/<slug>` intake link with one optional trailing slash; at most 2048 bytes. The form strips fragments before sending, and the server strips them again. Intake links are stored as the canonical content URL without query or fragment |
 | `category` | `phishing`, `malware`, `illegal`, `spam` or `other` |
 | `details` | optional, at most 2000 characters (code points), cleaned like a feedback comment (line breaks, controls and invisible characters) |
 | `contact` | optional, at most 200 characters, one line; unverified and never turned into a link |

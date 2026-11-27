@@ -52,6 +52,8 @@ func (s *Service) HoldLive(ctx context.Context, actor Actor, id, session string)
 		return LiveLease{}, errTunnelVersions()
 	}
 	switch s.Mode(a, CurrentSnapshot(a)) {
+	case ModeEncrypted:
+		return LiveLease{}, apperr.Conflict("live reload is not supported for end-to-end encrypted artifacts; watch still publishes encrypted versions")
 	case ModeDirect:
 		return LiveLease{}, apperr.Conflict("live reload needs the info button: with it off, pages are served directly, without redrop's viewer page")
 	case ModeFilePage:

@@ -41,9 +41,9 @@ var noticeEvents = map[client.NoticeKind]string{
 func watchCmd() *cobra.Command {
 	var cf contentFlags
 	var debounce time.Duration
-	var live, noLive bool
+	var e2e, live, noLive bool
 	cmd := &cobra.Command{
-		Use:   "watch ID|URL PATH",
+		Use:   "watch ID|URL|- PATH",
 		Short: "Republish PATH as a new version whenever it changes",
 		Long: `Watch PATH (a file or a folder, same rules as "redrop update") and publish a
 new version of the artifact whenever its content changes. The link, expiry,
@@ -78,7 +78,13 @@ of exiting. Ctrl-C or SIGTERM stops watching and exits 0. Network errors,
 rate limiting, and server errors are retried with nominal exponential
 backoff from 1s to 60s, with jitter below the cap. Rate-limit responses
 honor Retry-After up to 10 minutes. Auth or not-found errors stop with the
-CLI's usual exit codes.`,
+CLI's usual exit codes.
+
+An end-to-end encrypted artifact's versions are always encrypted with its
+key (from this machine's key store, or the full link given as ID|URL or on
+stdin with "-"), so the link keeps working. Watch reads the artifact at
+startup and exits 2 when it is encrypted and no key is available: nothing
+is uploaded. --e2e insists that the artifact is encrypted.`,
 		Example: `  redrop watch k2j4m9qx7d4a report.html
   redrop watch https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
   redrop watch k2j4m9qx7d4a ./site --debounce 1s --json
@@ -114,11 +120,37 @@ CLI's usual exit codes.`,
 			if err != nil {
 				return err
 			}
-			id, err := resolveID(cmd.Context(), c, args[0])
+			ref, err := linkFromStdin(args[0])
 			if err != nil {
 				return err
 			}
+			id, err := resolveID(cmd.Context(), c, ref)
+			if err != nil {
+				return err
+			}
+			// The artifact and its key are checked at startup, not at the
+			// first change: an end-to-end encrypted artifact is watched with
+			// its key or not at all.
+			key, err := versionKey(cmd.Context(), c, ref, id, e2e)
+			if err != nil {
+				if cmd.Context().Err() != nil {
+					return nil // stopped before watching began
+				}
+				return err
+			}
 			opts := watchOptions(id, args[1], debounce)
+			var up client.Uploader = c
+			if key != nil {
+				key := *key
+				up = &client.E2EUploader{Client: c, Key: key}
+				publish := opts.OnPublish
+				opts.OnPublish = func(r client.WatchResult) {
+					shown := *r.Artifact
+					shown.URL = client.E2ELink(shown.E2ELink, key)
+					r.Artifact = &shown
+					publish(r)
+				}
+			}
 			// Live reload starts once the watcher is ready and ends,
 			// releasing its lease, before watch returns.
 			var session liveSession
@@ -129,7 +161,7 @@ CLI's usual exit codes.`,
 					session.start(cmd.Context(), c, id, opts.OnNotice)
 				}
 			}
-			err = watchArtifact(cmd.Context(), c, id, src, opts)
+			err = watchArtifact(cmd.Context(), up, id, src, opts)
 			session.end()
 			if err != nil {
 				return mapErr(err)
@@ -142,6 +174,7 @@ CLI's usual exit codes.`,
 	}
 	cf.register(cmd)
 	cmd.Flags().DurationVar(&debounce, "debounce", client.DefaultDebounce, "how long the tree must be quiet before publishing (e.g. 500ms, 2s)")
+	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eVersionFlagHelp)
 	cmd.Flags().BoolVar(&live, "live", false, "reload open viewer pages on each new version (the default)")
 	cmd.Flags().BoolVar(&noLive, "no-live", false, "don't reload open viewer pages")
 	return cmd

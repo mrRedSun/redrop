@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -107,11 +108,14 @@ func readSecretFile(p string) (string, error) {
 	return strings.TrimRight(string(b), "\r\n"), nil
 }
 
-// resolveID accepts an artifact ID, its link, or the link's slug.
+// resolveID accepts an artifact ID, its link, or the link's slug. A #k= key
+// (or any fragment) is cut off first: it never reaches the server. Anything
+// that is not one of those shapes is refused before any request.
 func resolveID(ctx context.Context, c *client.Client, arg string) (string, error) {
+	arg = strings.TrimSpace(withoutFragment(arg))
 	slug, err := artifactSlug(arg)
 	if err != nil || slug == "" {
-		return strings.TrimSpace(arg), err
+		return arg, err
 	}
 	list, err := c.ListArtifacts(ctx, "", "all")
 	if err != nil {
@@ -122,35 +126,42 @@ func resolveID(ctx context.Context, c *client.Client, arg string) (string, error
 			return a.ID, nil
 		}
 	}
-	return "", withCode(exitNotFound, "no artifact of yours has the link %s", arg)
+	return "", withCode(exitNotFound, "no artifact of yours has the link with %s", slug)
 }
 
 // artifactSlug returns the slug named by a link (https://<slug>.<content-domain>/,
-// scheme optional) or a bare slug, and "" for anything else, which is taken
-// as an artifact ID. A link whose first label is not a slug is a usage error.
+// or an end-to-end encrypted link https://<app>/e/<slug>; scheme optional)
+// or a bare slug, and "" for an artifact ID. Anything else
+// is a usage error that doesn't echo the argument: it may hold a key whose
+// "#" was percent-encoded (ID%23k=...), and only an ID, a slug or a link's
+// slug ever goes to the server.
 func artifactSlug(arg string) (string, error) {
 	arg = strings.TrimSpace(arg)
-	if ids.ValidSlug(arg) {
+	switch {
+	case ids.ValidSlug(arg):
 		return arg, nil
-	}
-	if !strings.Contains(arg, "://") && !strings.Contains(arg, ".") {
+	case ids.ValidID(arg):
 		return "", nil
-	}
-	raw := arg
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	u, err := url.Parse(raw)
-	if err == nil {
-		label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
-		if ids.ValidSlug(label) {
-			return label, nil
+	case strings.Contains(arg, "://") || strings.Contains(arg, "."):
+		raw := arg
+		if !strings.Contains(raw, "://") {
+			raw = "https://" + raw
+		}
+		if u, err := url.Parse(raw); err == nil {
+			label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
+			if ids.ValidSlug(label) {
+				return label, nil
+			}
+			if s, ok := strings.CutPrefix(u.Path, api.E2EIntakePrefix); ok && ids.ValidSlug(strings.TrimSuffix(s, "/")) {
+				return strings.TrimSuffix(s, "/"), nil
+			}
 		}
 	}
-	return "", withCode(exitUsage, "not an artifact ID or link: %s (links look like https://amber-otter-quilt-river.usercontent.example/)", arg)
+	return "", withCode(exitUsage, "not an artifact ID or link: an ID is %d characters of a-z and 2-7, a link looks like https://amber-otter-quilt-river.usercontent.example/", ids.IDLen)
 }
 
 func printArtifact(a *api.Artifact, extra map[string]string) error {
+	a = withKeyLink(a)
 	if g.json {
 		out := map[string]any{}
 		b, _ := jsonRoundTrip(a)
@@ -218,6 +229,13 @@ func printArtifact(a *api.Artifact, extra map[string]string) error {
 		fb = "on, but closed while the info button is hidden"
 	}
 	fmt.Fprintf(w, "feedback:\t%s\n", fb)
+	if a.E2E {
+		e2e := "end-to-end encrypted (the key is the link's #k= part; the server never had it)"
+		if !strings.Contains(a.URL, "#k=") {
+			e2e = "end-to-end encrypted; this machine has no key, so the url above opens nothing: use the full link from share"
+		}
+		fmt.Fprintf(w, "e2e:\t%s\n", e2e)
+	}
 	if a.PurgeAt != nil {
 		fmt.Fprintf(w, "deleted at:\t%s\n", fmtTime(a.PurgeAt))
 	}
@@ -325,7 +343,7 @@ func shareCmd() *cobra.Command {
 	var cf contentFlags
 	var vf viewerFlags
 	var title, ttl, password, passwordFile string
-	var genPassword, once, quiet bool
+	var genPassword, once, quiet, e2e bool
 	var maxViews int
 	cmd := &cobra.Command{
 		Use:     "share PATH",
@@ -367,6 +385,16 @@ old browsers (no Fetch Metadata) always get the artifact directly. Inside an
 older version, a root-absolute link (/x.html) leads to the current version.
 --feedback lets viewers leave comments from the info panel, optionally
 quoting selected text; only you read them, with "redrop feedback ID".
+
+--e2e encrypts everything on this machine before upload. The key goes in
+the link after #k= (https://<server>/e/<slug>#k=…), which browsers
+never send to a server: the server stores only ciphertext. This intake page
+on the app origin needs an Open click and pop-ups allowed to hand the key
+to the artifact's origin as a non-extractable CryptoKey. The link is the
+secret, and a lost link means lost content (this machine keeps a copy
+of the key for "update" and "watch"). Viewing needs HTTPS. Passwords,
+expiry and view limits still work; SPA fallback, file listings and the
+dashboard preview don't. See "redrop guide".
 
 The link is printed on the first line; it is the only way in, so share it
 deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
@@ -425,8 +453,23 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 				password = generatePassword()
 				extra["password"] = password
 			}
-			a, err := c.Share(cmd.Context(), src, client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old, Feedback: fb != nil && *fb}, progressFn())
-			if err != nil {
+			opts := client.PublishOptions{Title: title, TTL: ttl, Password: password, MaxViews: maxViews, InfoButton: info, OldVersions: old != nil && *old, Feedback: fb != nil && *fb}
+			var a *api.Artifact
+			if e2e {
+				// The key is saved before anything is uploaded.
+				var key client.E2EKey
+				a, key, err = c.ShareE2E(cmd.Context(), src, opts, func(id string, key client.E2EKey) error {
+					if err := saveKey(c.BaseURL, id, key); err != nil {
+						return fmt.Errorf("could not save the key in %s, so nothing was uploaded: %w", keysPath(), err)
+					}
+					return nil
+				}, progressFn())
+				if err != nil {
+					return mapErr(err)
+				}
+				a.URL = client.E2ELink(a.E2ELink, key)
+				e2eNotice(keysPath())
+			} else if a, err = c.Share(cmd.Context(), src, opts, progressFn()); err != nil {
 				return mapErr(err)
 			}
 			warnFeedbackClosed(a, info, fb)
@@ -451,29 +494,46 @@ deliberately. Use "redrop update ID PATH" to publish changes to the same link.`,
 	f.IntVar(&maxViews, "max-views", 0, "stop working after N opens (0 = unlimited)")
 	f.BoolVar(&once, "once", false, "one-time link (same as --max-views 1)")
 	f.BoolVarP(&quiet, "quiet", "q", false, "print only the URL (and generated password)")
+	f.BoolVar(&e2e, "e2e", false, e2eFlagHelp)
 	return cmd
 }
 
 func updateCmd() *cobra.Command {
 	var cf contentFlags
 	var vf viewerFlags
+	var e2e bool
 	cmd := &cobra.Command{
-		Use:   "update ID|URL PATH",
+		Use:   "update ID|URL|- PATH",
 		Short: "Publish a new version of an artifact at the same link",
 		Long: `Upload PATH as a new version of an existing artifact. The link, expiry,
 password, and view limit stay the same; previous versions are kept and can be
 restored with "redrop rollback". --info / --no-info, --old-versions /
 --no-old-versions and --feedback / --no-feedback also change those viewer
-settings; they are saved before the upload.`,
+settings; they are saved before the upload.
+
+An end-to-end encrypted artifact's new version is always encrypted with its
+key, from this machine's key store or the artifact's full link, so the link
+keeps working; without a key, nothing is uploaded and update exits 2.
+--e2e insists that the artifact is encrypted. Pass "-" as ID|URL to read
+the full link from stdin, which keeps its key out of shell history and
+process lists.`,
 		Example: `  redrop update k2j4m9qx7d4a report.html --note "fixed totals"
-  redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa`,
+  redrop update https://amber-otter-quilt-river.usercontent.example/ ./dist --spa
+  redrop update - report.html < link.txt    # the full link, key included, on stdin`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if args[0] == "-" && args[1] == "-" {
+				return withCode(exitUsage, "stdin cannot provide both the link and the content")
+			}
 			c, err := newClient()
 			if err != nil {
 				return err
 			}
-			id, err := resolveID(cmd.Context(), c, args[0])
+			ref, err := linkFromStdin(args[0])
+			if err != nil {
+				return err
+			}
+			id, err := resolveID(cmd.Context(), c, ref)
 			if err != nil {
 				return err
 			}
@@ -486,7 +546,33 @@ settings; they are saved before the upload.`,
 				return err
 			}
 			// The settings are saved before the upload (see UpdateWithOptions).
-			a, err := c.UpdateWithOptions(cmd.Context(), id, src, client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}, progressFn())
+			vo := client.VersionOptions{InfoButton: info, OldVersions: old, Feedback: fb}
+			var key *client.E2EKey
+			if e2e || src.Reader != nil {
+				// Stdin can be read only once, so for it the artifact is
+				// checked before anything is prepared.
+				if key, err = versionKey(cmd.Context(), c, ref, id, e2e); err != nil {
+					return err
+				}
+			}
+			var a *api.Artifact
+			if key == nil {
+				// A plaintext publish reads the artifact after preparing and
+				// before uploading: an end-to-end encrypted artifact stops it
+				// with nothing sent, and its key, if available, encrypts.
+				a, err = c.UpdateWithOptions(cmd.Context(), id, src, vo, progressFn())
+				if errors.Is(err, client.ErrEncryptedArtifact) && src.Reader == nil {
+					if key, err = versionKey(cmd.Context(), c, ref, id, false); err != nil {
+						return err
+					}
+					if key == nil {
+						return withCode(exitGeneral, "artifact %s changed while publishing; try again", id)
+					}
+				}
+			}
+			if key != nil {
+				a, err = c.UpdateE2E(cmd.Context(), id, *key, src, vo, progressFn())
+			}
 			if err != nil {
 				return mapErr(err)
 			}
@@ -496,6 +582,7 @@ settings; they are saved before the upload.`,
 	}
 	cf.register(cmd)
 	vf.register(cmd)
+	cmd.Flags().BoolVar(&e2e, "e2e", false, e2eVersionFlagHelp)
 	return cmd
 }
 
@@ -561,7 +648,7 @@ func listCmd() *cobra.Command {
 
 func infoCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "info ID|URL",
+		Use:     "info ID|URL|-",
 		Aliases: []string{"show", "get"},
 		Short:   "Show details of an artifact",
 		Args:    cobra.ExactArgs(1),
@@ -570,7 +657,11 @@ func infoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			id, err := resolveID(cmd.Context(), c, args[0])
+			ref, err := linkFromStdin(args[0])
+			if err != nil {
+				return err
+			}
+			id, err := resolveID(cmd.Context(), c, ref)
 			if err != nil {
 				return err
 			}
@@ -777,6 +868,9 @@ func deleteCmd() *cobra.Command {
 					return mapErr(fmt.Errorf("%s: %w", arg, err))
 				}
 				deleted = append(deleted, id)
+				if err := forgetKey(c.BaseURL, id); err != nil {
+					fmt.Fprintf(os.Stderr, "redrop: warning: could not remove the key of %s from %s: %v\n", id, keysPath(), err)
+				}
 				if !g.json {
 					fmt.Println("deleted", id)
 				}

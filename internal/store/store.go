@@ -96,7 +96,18 @@ CREATE TABLE audit (
 );
 CREATE INDEX audit_report ON audit(report_id);`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8}
+// schemaV9 marks end-to-end encrypted artifacts and versions (DESIGN.md
+// "End-to-end encrypted links"), with the key check the server compares
+// every new version against, and records what each upload was declared
+// for, so plaintext for an encrypted artifact is refused before any byte
+// arrives. Existing rows are plaintext and undeclared.
+const schemaV9 = `ALTER TABLE artifacts ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artifacts ADD COLUMN e2e_key_check TEXT NOT NULL DEFAULT '';
+ALTER TABLE versions ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE uploads ADD COLUMN artifact_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE uploads ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9}
 
 var ErrNotFound = errors.New("not found")
 

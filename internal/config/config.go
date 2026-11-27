@@ -521,3 +521,8 @@ func (c *Config) ContentFrameSource() string {
 
 // PublicOrigin returns scheme://host[:port] of the dashboard.
 func (c *Config) PublicOrigin() string { return c.PublicURL.Scheme + "://" + c.PublicURL.Host }
+
+// E2ELink returns the link of an end-to-end encrypted artifact without its
+// key: the intake page on the app origin (DESIGN.md "End-to-end encrypted
+// links", "Keys and links"). The key goes in its fragment.
+func (c *Config) E2ELink(slug string) string { return c.PublicOrigin() + api.E2EIntakePrefix + slug }

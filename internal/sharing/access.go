@@ -275,12 +275,13 @@ type Snapshot struct {
 	Size       int64
 	Files      int
 	Published  time.Time
+	E2E        bool // end-to-end encrypted: its files are ciphertext objects
 }
 
 // CurrentSnapshot is a's current version.
 func CurrentSnapshot(a *store.Artifact) Snapshot {
 	return Snapshot{ArtifactID: a.ID, Version: a.CurrentVersion, Kind: a.Kind, Entry: a.Entry, SPA: a.SPA,
-		Size: a.Size, Files: a.Files, Published: a.Published}
+		Size: a.Size, Files: a.Files, Published: a.Published, E2E: a.CurrentE2E}
 }
 
 // snapshotAt returns retained version v of a (the current one when v is 0
@@ -294,7 +295,7 @@ func (s *Service) snapshotAt(ctx context.Context, a *store.Artifact, v int) (Sna
 		return Snapshot{}, false
 	}
 	return Snapshot{ArtifactID: a.ID, Version: row.Number, Kind: row.Kind, Entry: row.Entry, SPA: row.SPA,
-		Size: row.Size, Files: row.Files, Published: row.CreatedAt}, true
+		Size: row.Size, Files: row.Files, Published: row.CreatedAt, E2E: row.E2E}, true
 }
 
 func (s *Service) fileAt(ctx context.Context, snap Snapshot, p string) *store.File {
@@ -305,8 +306,13 @@ func (s *Service) fileAt(ctx context.Context, snap Snapshot, p string) *store.Fi
 	return f
 }
 
-// ResolvePath maps a URL path onto one version's content.
+// ResolvePath maps a URL path onto one version's content. End-to-end
+// encrypted versions have no paths the server knows: only E2EObject
+// reaches their objects.
 func (s *Service) ResolvePath(ctx context.Context, snap Snapshot, urlPath string) Target {
+	if snap.E2E {
+		return Target{}
+	}
 	switch snap.Kind {
 	case api.KindHTML:
 		if urlPath == "/" || urlPath == "/index.html" {

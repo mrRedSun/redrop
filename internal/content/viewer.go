@@ -19,7 +19,7 @@ import (
 // info button outside the frame. It runs no inline script: its behaviour is
 // the static /__redrop/viewer.js, its look /__redrop/viewer.css.
 
-//go:embed static/viewer.js static/viewer.css
+//go:embed static/viewer.js static/viewer.css static/e2e.js
 var viewerFS embed.FS
 
 type viewerAsset struct {
@@ -28,16 +28,22 @@ type viewerAsset struct {
 	etag        string
 }
 
+func newViewerAsset(b []byte, contentType string) viewerAsset {
+	sum := sha256.Sum256(b)
+	return viewerAsset{body: b, contentType: contentType, etag: `"` + hex.EncodeToString(sum[:8]) + `"`}
+}
+
 var viewerAssets = func() map[string]viewerAsset {
 	out := map[string]viewerAsset{}
-	for name, ct := range map[string]string{"viewer.js": "text/javascript; charset=utf-8", "viewer.css": "text/css; charset=utf-8"} {
+	for name, ct := range map[string]string{"viewer.js": "text/javascript; charset=utf-8", "viewer.css": "text/css; charset=utf-8", "e2e.js": "text/javascript; charset=utf-8"} {
 		b, err := viewerFS.ReadFile("static/" + name)
 		if err != nil {
 			panic(err)
 		}
-		sum := sha256.Sum256(b)
-		out[reservedPrefix+name] = viewerAsset{body: b, contentType: ct, etag: `"` + hex.EncodeToString(sum[:8]) + `"`}
+		out[reservedPrefix+name] = newViewerAsset(b, ct)
 	}
+	// The intake helper's script (intake.go), served like these.
+	out[helperScriptPath] = helperScript
 	return out
 }()
 
@@ -74,7 +80,7 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 	}
 	h.countView(w, r, a, d)
 	frameSrc := withoutParams(r.URL, paramVersion, paramInfo)
-	data := viewerData{FrameSrc: frameSrc, Latest: withoutParams(r.URL, paramVersion)}
+	data := viewerData{FrameSrc: frameSrc, Latest: withoutParams(r.URL, paramVersion), Panel: true}
 	if snap.Version != a.CurrentVersion {
 		data.OldVersion, data.FrameSrc = snap.Version, selfRef(versionBase(snap.Version)+frameSrc)
 	}
@@ -109,9 +115,11 @@ func (h *Handler) viewer(w http.ResponseWriter, r *http.Request, a *store.Artifa
 
 type viewerData struct {
 	Info       panelData
+	Panel      bool // the info button and panel are shown
 	FrameSrc   string
-	OldVersion int    // the older version shown, 0 for the current one
-	Latest     string // this page without the version parameter
+	OldVersion int            // the older version shown, 0 for the current one
+	Latest     string         // this page without the version parameter
+	E2E        *e2eViewerData // end-to-end encrypted: the frame is set by the script
 }
 
 // panelData is the info panel as templates render it, shared by the viewer
@@ -120,6 +128,8 @@ type panelData struct {
 	sharing.ViewerInfo
 	Revisions []revisionRow
 	Feedback  bool   // the panel holds the feedback form
+	E2E       bool   // the content is end-to-end encrypted
+	Download  bool   // the panel offers the end-to-end encrypted file for download
 	Report    string // the report form for this page, on the app origin
 	Live      bool   // the viewer page opens the live reload stream
 }

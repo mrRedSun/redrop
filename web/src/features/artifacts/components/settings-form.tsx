@@ -96,7 +96,7 @@ export function SettingsForm({ artifact, spa }: { artifact: Artifact; spa: boole
             </FormItem>
           )} />
         )}
-        {artifact.kind === 'bundle' && (
+        {artifact.kind === 'bundle' && !artifact.e2e && (
           <FormField control={form.control} name="spa" render={({ field }) => (
             <FormItem className="flex items-center justify-between gap-4 rounded-lg border p-3">
               <div className="space-y-0.5">

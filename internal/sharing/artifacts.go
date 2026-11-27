@@ -13,6 +13,7 @@ import (
 
 	"github.com/mrRedSun/redrop/internal/apperr"
 	"github.com/mrRedSun/redrop/internal/blob"
+	"github.com/mrRedSun/redrop/internal/contenttype"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
@@ -34,6 +35,7 @@ type Content struct {
 	Entry    string
 	SPA      bool
 	Note     string
+	E2E      *E2EContent // end-to-end encrypted content; nil for plaintext
 }
 
 // Settings are the access settings of a new artifact.
@@ -110,10 +112,14 @@ func hashArtifactPassword(pw string) (string, error) {
 
 // materialize verifies a completed upload and stores it as version files.
 // It returns the version and a suggested title.
-func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attempt *publication) (*store.NewVersion, string, error) {
+// target is the artifact the version is for, nil for a new artifact.
+func (s *Service) materialize(ctx context.Context, actor Actor, c Content, target *store.Artifact, attempt *publication) (*store.NewVersion, string, error) {
 	up, err := s.db.UploadByID(ctx, actor.UserID, c.UploadID)
 	if err != nil {
 		return nil, "", apperr.NotFound("upload not found or expired")
+	}
+	if err := checkUploadTarget(up, target, c); err != nil {
+		return nil, "", err
 	}
 	if up.Received != up.Size {
 		return nil, "", apperr.Conflict("upload incomplete: %d of %d bytes received", up.Received, up.Size)
@@ -135,6 +141,24 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attem
 	}
 
 	v := &store.NewVersion{UploadID: up.ID, Kind: c.Kind, SPA: c.SPA, Note: truncate(strings.TrimSpace(c.Note), maxNote), TokenName: actor.TokenName}
+	if c.E2E != nil {
+		// Ciphertext objects: the kind is the owner's label only, and there
+		// is no title, entry or type the server could read.
+		switch c.Kind {
+		case api.KindHTML, api.KindFile, api.KindBundle:
+		default:
+			return nil, "", apperr.Invalid("kind must be html, file, or bundle")
+		}
+		files, err := s.extractBundle(f, attempt, true)
+		if err != nil {
+			return nil, "", err
+		}
+		if err := e2eFiles(files); err != nil {
+			return nil, "", err
+		}
+		v.Files, v.E2E, v.Expect = files, true, c.E2E.Version
+		return v, "", nil
+	}
 	var title string
 	switch c.Kind {
 	case api.KindHTML:
@@ -154,10 +178,10 @@ func (s *Service) materialize(ctx context.Context, actor Actor, c Content, attem
 			return nil, "", s.blobErr(err)
 		}
 		v.Entry = name
-		v.Files = []store.File{{Path: name, Blob: sum, Size: size, ContentType: contentTypeFor(name, head.buf.Bytes())}}
+		v.Files = []store.File{{Path: name, Blob: sum, Size: size, ContentType: contenttype.For(name, head.buf.Bytes())}}
 		title = name
 	case api.KindBundle:
-		files, err := s.extractBundle(f, attempt)
+		files, err := s.extractBundle(f, attempt, false)
 		if err != nil {
 			return nil, "", err
 		}
@@ -250,10 +274,23 @@ func (s *Service) create(ctx context.Context, actor Actor, c Content, set Settin
 	if err != nil {
 		return Artifact{}, nil, err
 	}
+	var reserved, keyCheck string
+	if c.E2E != nil {
+		if err := checkE2EContent(c); err != nil {
+			return Artifact{}, nil, err
+		}
+		if c.E2E.Version != 1 {
+			return Artifact{}, nil, apperr.Invalid("a new artifact's content is version 1")
+		}
+		if reserved, err = s.reservedID(actor, c.E2E.Reservation); err != nil {
+			return Artifact{}, nil, err
+		}
+		keyCheck = c.E2E.KeyCheck
+	}
 	if err := attempt.admit(); err != nil {
 		return Artifact{}, nil, err
 	}
-	v, title, err := s.materialize(ctx, actor, c, attempt)
+	v, title, err := s.materialize(ctx, actor, c, nil, attempt)
 	if err != nil {
 		return Artifact{}, nil, err
 	}
@@ -261,8 +298,9 @@ func (s *Service) create(ctx context.Context, actor Actor, c Content, set Settin
 		title = truncate(t, maxTitle)
 	}
 	id, err := s.db.CreateArtifact(ctx, &store.NewArtifact{
-		UserID: actor.UserID, TokenID: actor.TokenID, TokenName: actor.TokenName,
+		ID: reserved, UserID: actor.UserID, TokenID: actor.TokenID, TokenName: actor.TokenName,
 		Title: title, PasswordHash: pwHash, MaxViews: set.MaxViews, ExpiresAt: exp, InfoButton: set.InfoButton, OldVersions: set.OldVersions, Feedback: set.Feedback,
+		E2E: c.E2E != nil, E2EKeyCheck: keyCheck,
 	}, v, s.cfg.MaxTotalBytes)
 	if err != nil {
 		return Artifact{}, nil, mapStore(err)
@@ -355,10 +393,22 @@ func (s *Service) addVersion(ctx context.Context, actor Actor, id string, c Cont
 	if IsTunnel(a) {
 		return Artifact{}, nil, errTunnelVersions()
 	}
+	if err := checkE2EVersion(a, c); err != nil {
+		return Artifact{}, nil, err
+	}
+	if c.E2E != nil {
+		if err := checkE2EContent(c); err != nil {
+			return Artifact{}, nil, err
+		}
+		if c.E2E.Version != a.LastVersion+1 {
+			// The commit checks again; this skips unpacking a lost race.
+			return Artifact{}, nil, mapStore(store.ErrVersionTaken)
+		}
+	}
 	if err := attempt.admit(); err != nil {
 		return Artifact{}, nil, err
 	}
-	v, _, err := s.materialize(ctx, actor, c, attempt)
+	v, _, err := s.materialize(ctx, actor, c, a, attempt)
 	if err != nil {
 		return Artifact{}, nil, err
 	}
@@ -411,6 +461,9 @@ func (s *Service) Update(ctx context.Context, actor Actor, id string, p Patch) (
 			return Artifact{}, err
 		}
 		u.MaxViews = p.MaxViews
+	}
+	if p.SPA != nil && *p.SPA && a.E2E {
+		return Artifact{}, errE2ESPA
 	}
 	if p.Revoked != nil && !*p.Revoked && a.AdminRevoked {
 		return Artifact{}, apperr.Forbidden("an administrator revoked this artifact; only an administrator can restore it")

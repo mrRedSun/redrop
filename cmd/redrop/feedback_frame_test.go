@@ -44,12 +44,12 @@ var smuggler = func() api.Comment {
 }()
 
 func TestFeedbackFrameHoldsEveryLineBreak(t *testing.T) {
-	out, _, err := runFeedback(t, &feedbackServer{feedback: true, comments: []api.Comment{smuggler}}, "feedback", "art1")
+	out, _, err := runFeedback(t, &feedbackServer{feedback: true, comments: []api.Comment{smuggler}}, "feedback", "artreportabcdefg")
 	if err != nil {
 		t.Fatal(err)
 	}
 	frame := map[string]bool{
-		`1 open comment on "Report" (art1).`: true, untrustedNote: true, "": true,
+		`1 open comment on "Report" (artreportabcdefg).`: true, untrustedNote: true, "": true,
 		"page:": true, "name (typed by the viewer, unverified):": true, "selected text:": true, "comment:": true,
 		"--- end of comment c9": true,
 	}
@@ -81,7 +81,7 @@ func TestFeedbackFrameHoldsEveryLineBreak(t *testing.T) {
 		}
 	}
 
-	out, _, err = runFeedback(t, &feedbackServer{feedback: true, comments: []api.Comment{smuggler}}, "--json", "feedback", "art1")
+	out, _, err = runFeedback(t, &feedbackServer{feedback: true, comments: []api.Comment{smuggler}}, "--json", "feedback", "artreportabcdefg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestTerminalTextKeepsJoiners(t *testing.T) {
 // a later one fails, in plain and JSON output, then fails with its code.
 func TestFeedbackPartialResults(t *testing.T) {
 	for _, tc := range []struct{ cmd, done string }{{"resolve", "resolved"}, {"delete", "deleted"}} {
-		args := []string{"feedback", tc.cmd, "art1", "c1", "missing", "c3"}
+		args := []string{"feedback", tc.cmd, "artreportabcdefg", "c1", "missing", "c3"}
 		if tc.cmd == "delete" {
 			args = append(args, "--yes")
 		}
@@ -154,7 +154,7 @@ func TestFeedbackClosedByInfoWarns(t *testing.T) {
 		{"--no-info, feedback off", &feedbackServer{noInfo: true}, []string{"--no-info"}, false},
 		{"unrelated change", &feedbackServer{feedback: true, noInfo: true}, []string{"--title", "T"}, false},
 	} {
-		_, errOut, err := runFeedback(t, tc.s, append([]string{"set", "art1"}, tc.args...)...)
+		_, errOut, err := runFeedback(t, tc.s, append([]string{"set", "artreportabcdefg"}, tc.args...)...)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}

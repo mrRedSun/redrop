@@ -113,6 +113,25 @@ func TestRedactPath(t *testing.T) {
 		"/Setup/abc/":                      "/setup/…",
 		"/invite/":                         "/invite/",
 		"/api/v1/artifacts//x":             "/api/v1/artifacts//x",
+		// Review 33 M2: a fragment that arrived as %23, such as an
+		// end-to-end link's key, is never logged.
+		"/api/v1/artifacts/x#k=SECRETKEY":        "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x#k=SECRETKEY/views":  "/api/v1/artifacts/x#…",
+		"/api/v1/invites/abc#k=SECRETKEY/accept": "/api/v1/invites/…",
+		"/#k=SECRETKEY":                          "/#…",
+		// Review 33 re-check M2: and one that arrived as %2523 (a %23 in
+		// the decoded path), or encoded deeper.
+		"/api/v1/artifacts/x%23k=SECRETKEY":        "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x%2523k%3DSECRETKEY":    "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x/%23k=SECRETKEY/views": "/api/v1/artifacts/x/#…",
+		"/api/v1/invites/abc%23k=SECRETKEY/accept": "/api/v1/invites/…",
+		"/api/v1/artifacts/x%25%23k=SECRETKEY":     "/api/v1/artifacts/x%25#…",
+		"/api/v1/artifacts/x%2k=SECRETKEY%25":      "/api/v1/artifacts/x%2k=SECRETKEY%25",
+		"/api/v1/artifacts/x%20name":               "/api/v1/artifacts/x%20name",
+		// n-2 of the second re-check: an encoded "?" too.
+		"/api/v1/artifacts/x?k=SECRETKEY":           "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x%3Fk=SECRETKEY":         "/api/v1/artifacts/x#…",
+		"/api/v1/artifacts/x%253fk=SECRETKEY/views": "/api/v1/artifacts/x#…",
 	}
 	for in, want := range cases {
 		if got := redactPath(in); got != want {

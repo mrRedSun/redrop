@@ -7,6 +7,11 @@ import "time"
 // ReservedPrefix is the server-owned URL path segment that uploads cannot use.
 const ReservedPrefix = "__redrop"
 
+// E2EIntakePrefix is the app-origin path of an end-to-end encrypted link's
+// key intake page; the artifact's slug follows it, and the key goes in the
+// fragment: https://<app>/e/<slug>#k=<key>.
+const E2EIntakePrefix = "/e/"
+
 // Artifact kinds.
 const (
 	KindHTML   = "html"
@@ -26,6 +31,12 @@ const (
 // account already has a publication running or waiting. The upload stays
 // valid; retry the same request after a short delay.
 const CodePublicationBusy = "publication_in_progress"
+
+// CodeVersionConflict is the problem title of the 409 returned when end-to-end
+// encrypted content was encrypted for a version number another version took
+// first. The upload is deleted; encrypt for the artifact's next_version and
+// publish again.
+const CodeVersionConflict = "version_conflict"
 
 // Roles.
 const (
@@ -136,6 +147,11 @@ type CreatedToken struct {
 
 type CreateUploadRequest struct {
 	Size int64 `json:"size" validate:"gte=0"`
+	// ArtifactID and E2E declare what the upload is for. An end-to-end
+	// encrypted artifact's versions need both, and the server refuses a
+	// plaintext upload declared for one before any byte is sent.
+	ArtifactID string `json:"artifact_id,omitempty" description:"The artifact this upload is a new version of; required for end-to-end encrypted artifacts"`
+	E2E        bool   `json:"e2e,omitempty" description:"The content is end-to-end encrypted; must match the artifact"`
 }
 
 type Upload struct {
@@ -155,6 +171,27 @@ type PublishRequest struct {
 	Entry    string `json:"entry,omitempty" description:"Entry page for bundles (default index.html)"`
 	SPA      bool   `json:"spa,omitempty" description:"Serve the entry page for unknown extension-less paths"`
 	Note     string `json:"note,omitempty" description:"Change note; viewers see it in the info panel's version list"`
+	// E2E marks end-to-end encrypted content (see E2EPublish).
+	E2E *E2EPublish `json:"e2e,omitempty" description:"Set when the upload is end-to-end encrypted content; omit for plaintext"`
+}
+
+// --- end-to-end encrypted links (DESIGN.md "End-to-end encrypted links") ---
+
+// E2EPublish declares end-to-end encrypted content: a bundle of a manifest
+// and encrypted objects, bound to an artifact ID and a version number. The
+// server never receives the key.
+type E2EPublish struct {
+	KeyCheck    string `json:"key_check" validate:"required" description:"The key's check value for this artifact (see the format); every version must match the artifact's"`
+	Version     int    `json:"version" validate:"gte=1" description:"The version number the content was encrypted for: 1 for a new artifact, else the artifact's next_version"`
+	Reservation string `json:"reservation,omitempty" description:"New artifacts only: the token from POST /artifacts/reservations; the artifact gets its ID"`
+}
+
+// ArtifactReservation is an artifact ID minted before an end-to-end share,
+// because encrypted content is bound to it.
+type ArtifactReservation struct {
+	ID        string    `json:"id"`
+	Token     string    `json:"token" description:"Pass as e2e.reservation when creating the artifact"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type CreateArtifactRequest struct {
@@ -193,6 +230,7 @@ type Version struct {
 	CreatedAt  time.Time `json:"created_at"`
 	TokenName  string    `json:"token_name,omitempty"`
 	Current    bool      `json:"current"`
+	E2E        bool      `json:"e2e" description:"End-to-end encrypted: the server stores only ciphertext"`
 }
 
 type Artifact struct {
@@ -222,6 +260,12 @@ type Artifact struct {
 	Feedback      bool       `json:"feedback" description:"Whether viewers can leave comments from the info panel (only while the info button is shown)"`
 	// RevokedByAdmin is set when an administrator revoked the artifact.
 	RevokedByAdmin bool `json:"revoked_by_admin" description:"An administrator revoked it (status revoked); only an administrator can restore it"`
+	E2E            bool `json:"e2e" description:"End-to-end encrypted: the server stores only ciphertext and the link's key is not in url"`
+	// E2EKeyCheck and NextVersion are in owner views only.
+	E2EKeyCheck string `json:"e2e_key_check,omitempty" description:"Owner only: the end-to-end key's check value"`
+	// E2ELink is in owner views of end-to-end encrypted artifacts only.
+	E2ELink     string `json:"e2e_link,omitempty" description:"End-to-end encrypted only: the link to give out, on the app origin, without its #k= key"`
+	NextVersion int    `json:"next_version,omitempty" description:"Owner only: the number the next published version gets"`
 	// Online is set for a tunnel whose redrop tunnel command is connected.
 	Online bool `json:"online" description:"Tunnels only: the owner's redrop tunnel is connected; always false for other kinds"`
 }

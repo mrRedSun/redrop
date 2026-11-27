@@ -37,10 +37,18 @@ export const Artifact = Schema.Struct({
   feedback: Schema.Boolean,
   /** An administrator revoked it (status `revoked`); only an administrator can restore it. */
   revoked_by_admin: Schema.Boolean,
+  /** End-to-end encrypted: the server holds only ciphertext, and `url` lacks the key (DESIGN.md). */
+  e2e: Schema.Boolean,
+  /** End-to-end encrypted only: the link to give out, on this server's own origin, without its `#k=` key. */
+  e2e_link: Schema.optionalKey(Schema.String),
   /** Tunnels only: the owner's `redrop tunnel` is connected. Always false for other kinds. */
   online: Schema.Boolean,
 })
 export type Artifact = typeof Artifact.Type
+
+/** The link people open: an end-to-end encrypted artifact's goes through this server's key intake page. */
+export const shareLink = (a: { readonly url: string; readonly e2e: boolean; readonly e2e_link?: string }): string =>
+  a.e2e && a.e2e_link ? a.e2e_link : a.url
 
 /** A tunnel's connection, for labels: online while its `redrop tunnel` runs. */
 export const tunnelState = (a: { readonly online: boolean }): string => (a.online ? 'online' : 'offline')

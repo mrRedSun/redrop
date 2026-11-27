@@ -119,9 +119,9 @@ func (s *Service) queueFull() error {
 	return apperr.RateLimited("%s", msg)
 }
 
-// reportedLink checks that raw is a link to an artifact host of this
-// server's content domain, by syntax only, and returns its slug and the link
-// to store (without a fragment).
+// reportedLink checks content-host and configured app-origin intake URLs by
+// syntax only. Content URLs keep their path and query, without a fragment;
+// intake URLs become canonical content URLs, without a query or fragment.
 func (s *Service) reportedLink(raw string) (slug, link string, err error) {
 	bad := apperr.Invalid("Enter the address of a page shared from this server, like %s.", s.cfg.ArtifactURL("amber-otter-quilt-river"))
 	raw = strings.TrimSpace(raw)
@@ -131,6 +131,14 @@ func (s *Service) reportedLink(raw string) (slug, link string, err error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Opaque != "" {
 		return "", "", bad
+	}
+	if s.cfg.PublicURL != nil && u.Scheme == s.cfg.PublicURL.Scheme && strings.EqualFold(u.Host, s.cfg.PublicURL.Host) {
+		path, ok := strings.CutPrefix(u.EscapedPath(), api.E2EIntakePrefix)
+		slug := strings.TrimSuffix(path, "/")
+		if !ok || !ids.ValidSlug(slug) {
+			return "", "", bad
+		}
+		return slug, s.cfg.ArtifactURL(slug), nil
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	label, ok := strings.CutSuffix(host, "."+s.cfg.ContentHost())
@@ -182,7 +190,7 @@ type AdminReport struct {
 	Category    string
 	Details     string // untrusted: the reporter's text, or the finding
 	Contact     string // untrusted, unverified
-	ReportedURL string // visitor reports: the link as submitted; "" for system reports
+	ReportedURL string // visitor reports: the normalized, fragment-free link; "" for system reports
 	Version     int    // system reports: the flagged version
 	Status      string
 	CreatedAt   time.Time

@@ -10,7 +10,10 @@
 {{else if .MaxViews}}<li>{{.ViewsLeft}} of {{.MaxViews}} views left</li>
 {{end}}{{if .Password}}<li>Password-protected</li>
 {{end}}{{if not .Tunnel}}<li id="rd-size">{{bytes .Size}} in {{.Files}} file{{if ne .Files 1}}s{{end}}</li>
+{{end}}{{if .E2E}}<li>End-to-end encrypted: only the full link opens it, and the server can't read it.</li>
 {{end}}</ul>
+{{if .Download}}<button type="button" id="rd-e2e-download" class="rd-e2e-download" hidden>Download the file</button>
+{{end}}
 {{if and .Revisions (not .Tunnel)}}<h3>Versions</h3>
 <ol class="rd-revs">{{range .Revisions}}
 <li data-rev="{{.Number}}"{{if .Viewing}} aria-current="page"{{end}}>{{if and .Href (not .Viewing)}}<a href="{{.Href}}">Version {{.Number}}</a>{{else}}Version {{.Number}}{{end}}{{if .Current}} <span class="rd-tag">current</span>{{end}}{{if and .Viewing (not .Current)}} <span class="rd-tag">viewing</span>{{end}} · <span data-rel="{{iso .Published}}">{{utc .Published}}</span>{{with .Note}}<span class="rd-note">{{.}}</span>{{end}}</li>{{end}}

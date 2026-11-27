@@ -53,7 +53,8 @@ export const reportDefaults = (hash: string): typeof ReportForm.Encoded => ({
 })
 
 export const toReportRequest = (v: ReportValues): typeof ReportRequest.Type => ({
-  url: v.url,
+  // Strip fragments even from invalid inputs so an e2e key never enters a request.
+  url: v.url.split('#', 1)[0],
   category: v.category,
   ...(v.details !== '' && { details: v.details }),
   ...(v.contact !== '' && { contact: v.contact }),

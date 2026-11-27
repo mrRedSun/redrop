@@ -72,6 +72,8 @@ func sumBytes(data []byte) string { s := sha256.Sum256(data); return hex.EncodeT
 // finalization checksum against the captured bytes rather than supplying
 // a precomputed digest to Watch.
 type uploadServer struct {
+	e2e      bool                      // the artifact the fake serves is end-to-end encrypted
+	declared []api.CreateUploadRequest // every upload request, as sent
 	mu       sync.Mutex
 	uploads  map[string][]byte
 	versions int
@@ -93,6 +95,7 @@ func newUploadClient(t *testing.T) (*Client, *uploadServer) {
 				http.Error(w, err.Error(), 400)
 				return
 			}
+			state.declared = append(state.declared, req)
 			id := fmt.Sprint(len(state.uploads) + 1)
 			state.uploads[id] = nil
 			if state.onStart != nil {
@@ -108,6 +111,8 @@ func newUploadClient(t *testing.T) (*Client, *uploadServer) {
 			}
 			state.uploads[id] = append(state.uploads[id], data...)
 			json.NewEncoder(w).Encode(api.Upload{ID: id, Received: int64(len(state.uploads[id]))})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/"):
+			json.NewEncoder(w).Encode(api.Artifact{ID: strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/"), E2E: state.e2e})
 		case r.Method == "POST" && (r.URL.Path == "/api/v1/artifacts" || strings.HasSuffix(r.URL.Path, "/versions")):
 			var req api.PublishRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1005,5 +1010,35 @@ func TestWalkStartBelowRoot(t *testing.T) {
 		if fmt.Sprint(dirs) != want {
 			t.Errorf("start %s: dirs=%v; want %s", start, dirs, want)
 		}
+	}
+}
+
+// A plaintext update of an end-to-end encrypted artifact stops before
+// anything is prepared or uploaded; a plaintext artifact's updates declare
+// the artifact they are for.
+func TestPlaintextUpdateOfEncryptedArtifactUploadsNothing(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "page.html", "<p>secret</p>")
+	c, state := newUploadClient(t)
+	state.e2e = true
+	if _, err := c.Update(context.Background(), "art", &Source{Path: filepath.Join(dir, "page.html")}, nil); !errors.Is(err, ErrEncryptedArtifact) {
+		t.Fatalf("Update: %v", err)
+	}
+	if _, _, err := c.UpdateDigest(context.Background(), "art", &Source{Path: filepath.Join(dir, "page.html")}, nil); !errors.Is(err, ErrEncryptedArtifact) {
+		t.Fatalf("UpdateDigest: %v", err)
+	}
+	var usage *UsageError
+	if _, err := c.Update(context.Background(), "art", &Source{Path: filepath.Join(dir, "page.html")}, nil); !errors.As(err, &usage) {
+		t.Fatalf("not a usage error (exit 2): %v", err)
+	}
+	if len(state.declared) != 0 {
+		t.Fatalf("uploads were started: %+v", state.declared)
+	}
+	state.e2e = false
+	if _, err := c.Update(context.Background(), "art", &Source{Path: filepath.Join(dir, "page.html")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.declared) != 1 || state.declared[0].ArtifactID != "art" || state.declared[0].E2E {
+		t.Fatalf("declared uploads: %+v", state.declared)
 	}
 }

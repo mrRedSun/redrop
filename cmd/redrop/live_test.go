@@ -25,12 +25,12 @@ type liveServer struct {
 }
 
 func (s *liveServer) handler(t *testing.T) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.requests = append(s.requests, r.Method+" "+r.URL.Path)
 		refuse := s.refuse
 		s.mu.Unlock()
-		if !strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artifact-id/live/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/artifactidabcdef/live/") {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		switch {
@@ -85,7 +85,7 @@ func runLiveWatch(t *testing.T, s *liveServer, args ...string) (string, string, 
 	var err error
 	out, errOut := captureCLIOutput(t, func() {
 		cmd := newRootCmd()
-		cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifact-id", page}, args...))
+		cmd.SetArgs(append([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef", page}, args...))
 		err = cmd.Execute()
 	})
 	return out, errOut, err
@@ -113,7 +113,7 @@ func TestWatchLiveRefusedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ev watchEvent
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &ev); err != nil || ev.Event != "live_off" || ev.ID != "artifact-id" || !strings.Contains(ev.Error, "info button") {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &ev); err != nil || ev.Event != "live_off" || ev.ID != "artifactidabcdef" || !strings.Contains(ev.Error, "info button") {
 		t.Fatalf("stdout %q: want one live_off event with the reason (%v)", out, err)
 	}
 	if got := s.seen(); len(got) != 1 {
@@ -122,7 +122,7 @@ func TestWatchLiveRefusedJSON(t *testing.T) {
 }
 
 func TestWatchNoLive(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(plaintextArtifact(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
@@ -136,7 +136,7 @@ func TestWatchNoLive(t *testing.T) {
 	var err error
 	_, errOut := captureCLIOutput(t, func() {
 		cmd := newRootCmd()
-		cmd.SetArgs([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifact-id", page, "--no-live"})
+		cmd.SetArgs([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef", page, "--no-live"})
 		err = cmd.Execute()
 	})
 	if err != nil || strings.Contains(errOut, "live") {
@@ -145,7 +145,7 @@ func TestWatchNoLive(t *testing.T) {
 
 	captureCLIOutput(t, func() {
 		cmd := newRootCmd()
-		cmd.SetArgs([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifact-id", page, "--live", "--no-live"})
+		cmd.SetArgs([]string{"--url", srv.URL, "--token", "test-token", "watch", "artifactidabcdef", page, "--live", "--no-live"})
 		err = cmd.Execute()
 	})
 	requireExitCode(t, err, exitUsage)

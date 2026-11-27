@@ -2,7 +2,9 @@ package content
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -25,6 +27,8 @@ type pages struct {
 	tmpl *template.Template
 	css  template.CSS
 	csp  string
+	// gateCSP is csp plus the gate's one inline script, pinned by hash.
+	gateCSP string
 	// pageDirectives are the default policy's directives after style-src,
 	// shared with the file page's policy (see pagePolicy).
 	pageDirectives []string
@@ -41,6 +45,12 @@ const (
 // origin) set, it also allows the viewer's script and stylesheet, pinned to
 // their paths on that origin.
 func pagePolicy(self, styles string, directives ...string) string {
+	return pagePolicyScripts(self, styles, nil, directives...)
+}
+
+// pagePolicyScripts is pagePolicy that also allows the given reserved
+// scripts on this origin, before the viewer's.
+func pagePolicyScripts(self, styles string, scripts []string, directives ...string) string {
 	parts := []string{"default-src 'none'"}
 	if self != "" {
 		styles = strings.TrimSpace(styles + " " + self + viewerCSS)
@@ -49,7 +59,11 @@ func pagePolicy(self, styles string, directives ...string) string {
 		parts = append(parts, "style-src "+styles)
 	}
 	if self != "" {
-		parts = append(parts, "script-src "+self+viewerJS)
+		src := "script-src"
+		for _, s := range scripts {
+			src += " " + self + s
+		}
+		parts = append(parts, src+" "+self+viewerJS)
 	}
 	return strings.Join(append(parts, directives...), "; ")
 }
@@ -65,13 +79,32 @@ func newPages(cfg *config.Config) *pages {
 		"utc":   func(t time.Time) string { return t.UTC().Format("2 Jan 2006, 15:04 UTC") },
 	}).ParseFS(templateFS, "templates/*.html"))
 	directives := []string{"img-src 'self'", "media-src 'self'", "frame-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'self' " + cfg.PublicOrigin()}
+	gate := append([]string{"script-src '" + gateScriptHash() + "'"}, directives...)
 	return &pages{
 		cfg:            cfg,
 		tmpl:           t,
 		css:            template.CSS(css),
 		csp:            pagePolicy("", "'unsafe-inline'", directives...),
+		gateCSP:        pagePolicy("", "'unsafe-inline'", gate...),
 		pageDirectives: directives,
 	}
+}
+
+// gateScriptHash is the CSP source of gate.html's inline script, which
+// keeps the link's fragment through the gate (DESIGN.md "End-to-end
+// encrypted links", "What still works").
+func gateScriptHash() string {
+	b, err := templateFS.ReadFile("templates/gate.html")
+	if err != nil {
+		panic(err)
+	}
+	_, script, ok := strings.Cut(string(b), "<script>")
+	script, _, ok2 := strings.Cut(script, "</script>")
+	if !ok || !ok2 {
+		panic("gate.html has no inline script")
+	}
+	sum := sha256.Sum256([]byte(script))
+	return "sha256-" + base64.StdEncoding.EncodeToString(sum[:])
 }
 
 type pageData struct {
@@ -120,11 +153,11 @@ func (p *pages) gate(w http.ResponseWriter, status int, a *store.Artifact, errMs
 	if a.MaxViews > 0 {
 		remaining = a.MaxViews - a.Views
 	}
-	p.render(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
+	p.renderWithCSP(w, status, "gate.html", "Shared link", serverIcons, map[string]any{
 		"Password": a.PasswordHash != "", "Remaining": remaining, "Error": errMsg, "Next": next,
 		"Action": "/" + api.ReservedPrefix + "/open",
 		"Report": p.reportLink(strings.TrimSuffix(p.cfg.ArtifactURL(a.Slug), "/") + selfRef(next)),
-	})
+	}, p.gateCSP)
 }
 
 // reportLink is the app origin's report form for page, a URL on an

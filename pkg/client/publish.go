@@ -392,7 +392,7 @@ type PublishOptions struct {
 // Share prepares, uploads, and publishes a new artifact. If the source
 // changes while it is read, it is prepared and uploaded once more.
 func (c *Client) Share(ctx context.Context, src *Source, opts PublishOptions, progress Progress) (*api.Artifact, error) {
-	u, err := retrySourceChange(func() (*upload, error) { return c.prepareAndUpload(ctx, src, progress, nil) })
+	u, err := retrySourceChange(func() (*upload, error) { return c.prepareAndUpload(ctx, src, UploadTarget{}, progress, nil) })
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +444,9 @@ func (c *Client) UpdateWithOptions(ctx context.Context, artifactID string, src *
 		applied = true
 		return nil
 	}
-	u, err := retrySourceChange(func() (*upload, error) { return c.prepareAndUpload(ctx, src, progress, apply) })
+	u, err := retrySourceChange(func() (*upload, error) {
+		return c.prepareAndUpload(ctx, src, UploadTarget{ArtifactID: artifactID}, progress, apply)
+	})
 	if err == nil {
 		req := u.request(src)
 		var a *api.Artifact
@@ -466,7 +468,7 @@ func (c *Client) UpdateWithOptions(ctx context.Context, artifactID string, src *
 // ErrSourceChanged means the source changed while it was read, and the
 // caller decides when to try again.
 func (c *Client) UpdateDigest(ctx context.Context, artifactID string, src *Source, progress Progress) (string, *api.Artifact, error) {
-	u, err := c.prepareAndUpload(ctx, src, progress, nil)
+	u, err := c.prepareAndUpload(ctx, src, UploadTarget{ArtifactID: artifactID}, progress, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -487,13 +489,21 @@ func (u *upload) request(src *Source) api.PublishRequest {
 // prepareAndUpload is the shared Prepare + UploadFile step. beforeUpload,
 // if set, runs after a successful Prepare and before the upload; its error
 // aborts the step. Excluded folder entries are reported through
-// src.OnSkipped, once per successful upload.
-func (c *Client) prepareAndUpload(ctx context.Context, src *Source, progress Progress, beforeUpload func() error) (*upload, error) {
+// src.OnSkipped, once per successful upload. A plaintext version is
+// checked against its artifact after Prepare (so local errors come first)
+// and before anything else is sent: an end-to-end encrypted artifact gets
+// ErrEncryptedArtifact, and nothing is uploaded or applied.
+func (c *Client) prepareAndUpload(ctx context.Context, src *Source, target UploadTarget, progress Progress, beforeUpload func() error) (*upload, error) {
 	p, err := Prepare(src)
 	if err != nil {
 		return nil, err
 	}
 	defer p.Close()
+	if target.ArtifactID != "" && !target.E2E {
+		if err := c.checkPlaintextTarget(ctx, target.ArtifactID); err != nil {
+			return nil, err
+		}
+	}
 	if beforeUpload != nil {
 		if err := beforeUpload(); err != nil {
 			return nil, err
@@ -502,7 +512,7 @@ func (c *Client) prepareAndUpload(ctx context.Context, src *Source, progress Pro
 	if p.Digest == "" && src.Reader == nil && src.beforeRead != nil {
 		src.beforeRead(p.Filename)
 	}
-	id, blobSum, err := c.UploadFile(ctx, p.File, progress)
+	id, blobSum, err := c.UploadFileFor(ctx, p.File, target, progress)
 	if err != nil {
 		if p.Digest == "" && src.Reader == nil && errors.Is(err, fs.ErrNotExist) {
 			// File is the source itself, found by Prepare a moment ago:

@@ -44,6 +44,8 @@ export const AdminArtifact = Schema.Struct({
   last_viewed_at: Schema.NullOr(Timestamp),
   /** Set by an administrator; "Restore" clears only this, never the owner's own revocation. */
   revoked_by_admin: Schema.Boolean,
+  /** End-to-end encrypted: nobody on the server can read the content. */
+  e2e: Schema.Boolean,
   /** Tunnels only: the owner's `redrop tunnel` is connected. */
   online: Schema.Boolean,
 })

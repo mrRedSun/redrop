@@ -23,7 +23,7 @@ import (
 func uploadContent(t *testing.T, s *Service, a Actor, kind string, b []byte) Content {
 	t.Helper()
 	ctx := context.Background()
-	u, err := s.CreateUpload(ctx, a, int64(len(b)))
+	u, err := s.CreateUpload(ctx, a, int64(len(b)), UploadTarget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestPublicationOneTurnPerAccount(t *testing.T) {
 	b := addUser(t, s, "v", 10000)
 	ctx := context.Background()
 	upload := func(actor Actor) string {
-		u, err := s.CreateUpload(ctx, actor, 0)
+		u, err := s.CreateUpload(ctx, actor, 0, UploadTarget{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -239,7 +239,7 @@ func TestPublicationKeepsUploadAfterCancellationOrConflict(t *testing.T) {
 	ctx := context.Background()
 	t.Run("incomplete", func(t *testing.T) {
 		s, a := budgetService(t, 10000, 10000)
-		u, err := s.CreateUpload(ctx, a, 10)
+		u, err := s.CreateUpload(ctx, a, 10, UploadTarget{})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -102,11 +102,13 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 					var uploaded bytes.Buffer
 					publishPath := "/api/v1/artifacts"
 					if command == "update" {
-						publishPath += "/artifact-id/versions"
+						publishPath += "/artifactidabcdef/versions"
 					}
 					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						w.Header().Set("Content-Type", "application/json")
 						switch {
+						case r.Method == http.MethodGet && r.URL.Path == "/api/v1/artifacts/artifactidabcdef" && command == "update":
+							json.NewEncoder(w).Encode(api.Artifact{ID: "artifactidabcdef"}) // plaintext: no key needed
 						case r.Method == http.MethodPost && r.URL.Path == "/api/v1/uploads":
 							json.NewEncoder(w).Encode(api.Upload{ID: "upload-id", ChunkSize: 1 << 20})
 						case r.Method == http.MethodPut && r.URL.Path == "/api/v1/uploads/upload-id":
@@ -118,7 +120,7 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 							json.NewEncoder(w).Encode(api.Upload{ID: "upload-id", Received: int64(uploaded.Len())})
 						case r.Method == http.MethodPost && r.URL.Path == publishPath:
 							json.NewEncoder(w).Encode(api.Artifact{
-								ID: "artifact-id", URL: "https://amber-otter-quilt-river.usercontent.example/",
+								ID: "artifactidabcdef", URL: "https://amber-otter-quilt-river.usercontent.example/",
 								Kind: "bundle", Version: 2, Files: len(wantFiles),
 							})
 						default:
@@ -131,7 +133,7 @@ func TestFolderUploadSkippedNotice(t *testing.T) {
 						cmd := newRootCmd()
 						args := []string{"--url", srv.URL, "--token", "test-token", command}
 						if command == "update" {
-							args = append(args, "artifact-id")
+							args = append(args, "artifactidabcdef")
 						}
 						args = append(args, dir)
 						if jsonOutput {
@@ -278,7 +280,7 @@ func TestSecretFolderSelectionRefused(t *testing.T) {
 		{".aws", home}, {filepath.Join(home, ".ssh"), home}, {".gnupg/", home},
 		{".aws/sub", home}, {".", filepath.Join(home, ".aws")}, {"creds", home},
 	} {
-		for _, command := range [][]string{{"share"}, {"update", "artifact-id"}, {"watch", "artifact-id"}} {
+		for _, command := range [][]string{{"share"}, {"update", "artifactidabcdef"}, {"watch", "artifactidabcdef"}} {
 			t.Run(command[0]+" "+tc.path, func(t *testing.T) {
 				t.Chdir(tc.cwd)
 				_, errOut := captureCLIOutput(t, func() {
@@ -322,7 +324,7 @@ func TestSecretWatchStartupWarnings(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if err := client.Watch(ctx, nil, "artifact-id", src, client.WatchOptions{OnReady: cancel}); err != nil {
+		if err := client.Watch(ctx, nil, "artifactidabcdef", src, client.WatchOptions{OnReady: cancel}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -360,7 +362,7 @@ func TestSecretExplicitWatchStartupWarning(t *testing.T) {
 				}
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				if err := client.Watch(ctx, nil, "artifact-id", src, client.WatchOptions{OnReady: cancel}); err != nil {
+				if err := client.Watch(ctx, nil, "artifactidabcdef", src, client.WatchOptions{OnReady: cancel}); err != nil {
 					t.Fatal(err)
 				}
 			})
@@ -425,6 +427,20 @@ func TestMarkdownUsageExitCodes(t *testing.T) {
 	}
 }
 
+func TestShareHelpE2EIntake(t *testing.T) {
+	cmd := shareCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Help(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"https://<server>/e/<slug>#k=", "Open", "pop-ups"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("share --help omits %q", want)
+		}
+	}
+}
+
 func TestArtifactSlug(t *testing.T) {
 	cases := map[string]string{
 		// links, both formats, with or without scheme, port, path, case
@@ -432,13 +448,18 @@ func TestArtifactSlug(t *testing.T) {
 		"https://AMBER-otter-quilt-river.usercontent.example:8443/": "amber-otter-quilt-river",
 		"amber-otter-quilt-river.usercontent.example/docs/a.txt":    "amber-otter-quilt-river",
 		"http://s3eybdkc67r7zegmb7qbugpmvy.usercontent.example/":    "s3eybdkc67r7zegmb7qbugpmvy",
+		// A page path that looks like an intake still names its host's artifact.
+		"https://amber-otter-quilt-river.usercontent.example/e/brave-lion-mint-cloud": "amber-otter-quilt-river",
+		// end-to-end encrypted links: the app origin's intake page
+		"https://redrop.example.com/e/amber-otter-quilt-river":    "amber-otter-quilt-river",
+		"redrop.example.com/e/amber-otter-quilt-river/":           "amber-otter-quilt-river",
+		"https://redrop.example.com/e/s3eybdkc67r7zegmb7qbugpmvy": "s3eybdkc67r7zegmb7qbugpmvy",
 		// bare slugs
 		"amber-otter-quilt-river":     "amber-otter-quilt-river",
 		" s3eybdkc67r7zegmb7qbugpmvy": "s3eybdkc67r7zegmb7qbugpmvy",
-		// artifact IDs and unknown words are IDs
-		"hoctdvkdnl33xpx3":  "",
-		"doesnotexist00":    "",
-		"amber-otter-quilt": "",
+		// artifact IDs
+		"hoctdvkdnl33xpx3":    "",
+		" hoctdvkdnl33xpx3\n": "",
 	}
 	for in, want := range cases {
 		got, err := artifactSlug(in)
@@ -450,14 +471,29 @@ func TestArtifactSlug(t *testing.T) {
 		"https://redrop.example.com/artifacts/abc",
 		"https://amber-otter-quilt.usercontent.example/",
 		"https://amber-otter-quilt-river-stone.usercontent.example/",
+		"https://redrop.example.com/e/amber-otter-quilt",
+		"https://redrop.example.com/e/",
 		"https://s3eybdkc67r7zegmb7qbugpmv.usercontent.example/",
 		"https://amber-0tter-quilt-river.usercontent.example/",
 		"usercontent.example",
+		// Review 33 re-check M2: anything but an ID, a slug or a link is
+		// refused before any request, without echoing it.
+		"doesnotexist00",
+		"amber-otter-quilt",
+		"HOCTDVKDNL33XPX3",
+		"hoctdvkdnl33xpx3%23k=SECRETKEY",
+		"hoctdvkdnl33xpx3%23k%3DSECRETKEY",
+		"hoctdvkdnl33xpx3/%23k=SECRETKEY",
+		"hoctdvkdnl33xpx3%2523k=SECRETKEY",
+		"amber-otter-quilt-river%23k=SECRETKEY",
+		"hoctdvkdnl33xpx3 SECRETKEY",
 	} {
 		_, err := artifactSlug(in)
 		var ee *exitError
 		if !errors.As(err, &ee) || ee.code != exitUsage {
 			t.Errorf("artifactSlug(%q) error %v, want a usage error", in, err)
+		} else if strings.Contains(err.Error(), "SECRETKEY") || strings.Contains(err.Error(), "%23") {
+			t.Errorf("artifactSlug(%q) echoes its argument: %v", in, err)
 		}
 	}
 }

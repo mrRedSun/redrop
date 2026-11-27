@@ -19,7 +19,7 @@ func (a *API) createUpload(c fuego.ContextWithBody[api.CreateUploadRequest]) (ap
 	if err != nil {
 		return api.Upload{}, err
 	}
-	u, err := a.sharing.CreateUpload(c.Context(), actorFrom(c.Context()), body.Size)
+	u, err := a.sharing.CreateUpload(c.Context(), actorFrom(c.Context()), body.Size, sharing.UploadTarget{ArtifactID: body.ArtifactID, E2E: body.E2E})
 	if err != nil {
 		return api.Upload{}, err
 	}
@@ -73,6 +73,12 @@ func (a *API) createArtifact(c fuego.ContextWithBody[api.CreateArtifactRequest])
 		return api.Artifact{}, err
 	}
 	return artifactDTO(m), nil
+}
+
+// reserveArtifact mints an artifact ID for an end-to-end share, whose
+// content is bound to the ID before it is uploaded.
+func (a *API) reserveArtifact(c fuego.ContextNoBody) (api.ArtifactReservation, error) {
+	return reservationDTO(a.sharing.Reserve(actorFrom(c.Context()))), nil
 }
 
 func (a *API) getArtifact(c fuego.ContextNoBody) (api.Artifact, error) {

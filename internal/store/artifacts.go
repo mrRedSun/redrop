@@ -32,10 +32,12 @@ type Artifact struct {
 	ExpiresAt      *time.Time
 	ExhaustedAt    *time.Time
 	LastViewedAt   *time.Time
-	InfoButton     *bool // nil = server default
-	OldVersions    bool  // viewers may open older versions
-	Feedback       bool  // viewers may leave comments
-	LastVersion    int   // highest version number ever used
+	InfoButton     *bool  // nil = server default
+	OldVersions    bool   // viewers may open older versions
+	Feedback       bool   // viewers may leave comments
+	LastVersion    int    // highest version number ever used
+	E2E            bool   // end-to-end encrypted: every version is ciphertext
+	E2EKeyCheck    string // the key check every version must match ("" when plaintext)
 
 	// Current version details (joined).
 	Kind      string
@@ -46,6 +48,8 @@ type Artifact struct {
 	SPA       bool
 	TotalSize int64
 	Versions  int
+	// CurrentE2E: the current version is end-to-end encrypted.
+	CurrentE2E bool
 }
 
 // Status computes the lifecycle state at time t.
@@ -76,6 +80,11 @@ type NewVersion struct {
 	Note      string
 	TokenName string
 	Files     []File
+	E2E       bool // end-to-end encrypted
+	// Expect is the number the version must get, or 0 for the next one.
+	// End-to-end encrypted content is bound to its number, so it can't take
+	// another (ErrVersionTaken).
+	Expect int
 }
 
 func (v *NewVersion) size() int64 {
@@ -88,7 +97,8 @@ func (v *NewVersion) size() int64 {
 
 const artifactSelect = `SELECT a.id, a.slug, a.user_id, u.username, coalesce(a.token_id,''), a.token_name, a.title, a.current_version, a.password_hash,
 	a.max_views, a.views, a.previews, a.access_gen, a.revoked, a.admin_revoked, a.created_at, a.updated_at, a.expires_at, a.exhausted_at, a.last_viewed_at, a.info_button, a.viewer_old_versions, a.feedback, a.last_version,
-	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0), coalesce(v.created_at,0),
+	a.e2e, a.e2e_key_check,
+	coalesce(v.kind,''), coalesce(v.size,0), coalesce(v.files,0), coalesce(v.entry,''), coalesce(v.spa,0), coalesce(v.created_at,0), coalesce(v.e2e,0),
 	(SELECT coalesce(sum(size),0) FROM versions WHERE artifact_id = a.id),
 	(SELECT count(*) FROM versions WHERE artifact_id = a.id)
 	FROM artifacts a JOIN users u ON u.id = a.user_id
@@ -102,7 +112,8 @@ func scanArtifact(r scanner) (*Artifact, error) {
 	var info sql.NullBool
 	err := r.Scan(&a.ID, &a.Slug, &a.UserID, &a.OwnerUsername, &a.TokenID, &a.TokenName, &a.Title, &a.CurrentVersion, &a.PasswordHash,
 		&a.MaxViews, &a.Views, &a.Previews, &a.AccessGen, &a.Revoked, &a.AdminRevoked, &created, &updated, &exp, &exh, &last, &info, &a.OldVersions, &a.Feedback, &a.LastVersion,
-		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &published, &a.TotalSize, &a.Versions)
+		&a.E2E, &a.E2EKeyCheck,
+		&a.Kind, &a.Size, &a.Files, &a.Entry, &a.SPA, &published, &a.CurrentE2E, &a.TotalSize, &a.Versions)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -162,8 +173,8 @@ func (s *Store) ListArtifacts(ctx context.Context, f ListFilter) ([]*Artifact, e
 }
 
 func insertVersion(ctx context.Context, tx *sql.Tx, artifactID string, number int, v *NewVersion) error {
-	if _, err := tx.ExecContext(ctx, `INSERT INTO versions (artifact_id, number, kind, size, files, entry, spa, note, note_public, token_name, created_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)`,
-		artifactID, number, v.Kind, v.size(), len(v.Files), v.Entry, v.SPA, v.Note, v.TokenName, now()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO versions (artifact_id, number, kind, size, files, entry, spa, note, note_public, token_name, created_at, e2e) VALUES (?,?,?,?,?,?,?,?,1,?,?,?)`,
+		artifactID, number, v.Kind, v.size(), len(v.Files), v.Entry, v.SPA, v.Note, v.TokenName, now(), v.E2E); err != nil {
 		return err
 	}
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO files (artifact_id, version, path, blob, size, content_type) VALUES (?,?,?,?,?,?)`)
@@ -180,6 +191,9 @@ func insertVersion(ctx context.Context, tx *sql.Tx, artifactID string, number in
 }
 
 type NewArtifact struct {
+	// ID is a reserved artifact ID (end-to-end encrypted content is bound to
+	// it), or "" to mint one.
+	ID           string
 	UserID       string
 	TokenID      string
 	TokenName    string
@@ -190,6 +204,8 @@ type NewArtifact struct {
 	InfoButton   *bool // nil = server default
 	OldVersions  bool
 	Feedback     bool
+	E2E          bool   // end-to-end encrypted
+	E2EKeyCheck  string // required with E2E
 }
 
 // ErrQuota is returned when a write would exceed a quota.
@@ -221,8 +237,20 @@ func checkQuota(ctx context.Context, tx *sql.Tx, userID, replacing string, userB
 	return nil
 }
 
+// ErrIDTaken means a reserved artifact ID is already in use.
+var ErrIDTaken = errors.New("artifact ID already in use")
+
+// ErrVersionTaken means a version could not get the number it expected.
+var ErrVersionTaken = errors.New("version number already taken")
+
 func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersion, maxTotal int64) (string, error) {
-	id := ids.ID()
+	id := na.ID
+	if id == "" {
+		id = ids.ID()
+	}
+	if v.Expect > 1 {
+		return "", ErrVersionTaken
+	}
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		if err := finishMaterialization(ctx, tx, na.UserID, v.UploadID); err != nil {
 			return err
@@ -238,10 +266,13 @@ func (s *Store) CreateArtifact(ctx context.Context, na *NewArtifact, v *NewVersi
 		if err := s.withNewSlug(func(slug string) error {
 			// An owner suspended while this publication ran gets an artifact
 			// revoked from the start (DESIGN.md "Abuse handling").
-			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, feedback, last_version, admin_revoked)
-			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,1,(SELECT disabled FROM users WHERE id = ?))`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions, na.Feedback, na.UserID)
+			_, err := tx.ExecContext(ctx, `INSERT INTO artifacts (id, slug, user_id, token_id, token_name, title, current_version, password_hash, max_views, created_at, updated_at, expires_at, info_button, viewer_old_versions, feedback, last_version, e2e, e2e_key_check, admin_revoked)
+			VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,1,?,?,(SELECT disabled FROM users WHERE id = ?))`, id, slug, na.UserID, tok, na.TokenName, na.Title, na.PasswordHash, na.MaxViews, n, n, nullTime(na.ExpiresAt), nullBool(na.InfoButton), na.OldVersions, na.Feedback, na.E2E, na.E2EKeyCheck, na.UserID)
 			return err
 		}); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed: artifacts.id") {
+				return ErrIDTaken
+			}
 			return err
 		}
 		return insertVersion(ctx, tx, id, 1, v)
@@ -262,6 +293,9 @@ func (s *Store) AddVersion(ctx context.Context, artifactID, userID string, v *Ne
 		// Never reuse a number, even one whose version was deleted.
 		if err := tx.QueryRowContext(ctx, `SELECT max(last_version, coalesce((SELECT max(number) FROM versions WHERE artifact_id = ?), 0)) + 1 FROM artifacts WHERE id = ?`, artifactID, artifactID).Scan(&number); err != nil {
 			return notFound(err)
+		}
+		if v.Expect != 0 && v.Expect != number {
+			return ErrVersionTaken
 		}
 		if err := insertVersion(ctx, tx, artifactID, number, v); err != nil {
 			return err
@@ -404,14 +438,15 @@ type VersionRow struct {
 	NotePublic bool // shown to viewers; false for notes written before they could be
 	TokenName  string
 	CreatedAt  time.Time
+	E2E        bool // end-to-end encrypted
 }
 
 // VersionAt returns one version's row, or ErrNotFound when it is not retained.
 func (s *Store) VersionAt(ctx context.Context, artifactID string, number int) (VersionRow, error) {
 	var v VersionRow
 	var created int64
-	err := s.DB.QueryRowContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at FROM versions WHERE artifact_id = ? AND number = ?`, artifactID, number).
-		Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created)
+	err := s.DB.QueryRowContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at, e2e FROM versions WHERE artifact_id = ? AND number = ?`, artifactID, number).
+		Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created, &v.E2E)
 	if err != nil {
 		return VersionRow{}, notFound(err)
 	}
@@ -420,7 +455,7 @@ func (s *Store) VersionAt(ctx context.Context, artifactID string, number int) (V
 }
 
 func (s *Store) ListVersions(ctx context.Context, artifactID string) ([]VersionRow, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at FROM versions WHERE artifact_id = ? ORDER BY number DESC`, artifactID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT number, kind, size, files, entry, spa, note, note_public, token_name, created_at, e2e FROM versions WHERE artifact_id = ? ORDER BY number DESC`, artifactID)
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +464,7 @@ func (s *Store) ListVersions(ctx context.Context, artifactID string) ([]VersionR
 	for rows.Next() {
 		var v VersionRow
 		var created int64
-		if err := rows.Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created); err != nil {
+		if err := rows.Scan(&v.Number, &v.Kind, &v.Size, &v.Files, &v.Entry, &v.SPA, &v.Note, &v.NotePublic, &v.TokenName, &created, &v.E2E); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = ts(created)
@@ -580,13 +615,20 @@ type Upload struct {
 	Received     int64
 	Materialized int64 // private in-flight or failed-cleanup reservation
 	ExpiresAt    time.Time
+	UploadTarget
+}
+
+// UploadTarget is what an upload was declared for when it started.
+type UploadTarget struct {
+	ArtifactID string // the artifact it is a new version of; "" when undeclared
+	E2E        bool   // end-to-end encrypted content
 }
 
 var ErrUploadLimit = errors.New("too many open uploads")
 
-func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl time.Duration, maxTotal int64, maxOpen int) (*Upload, error) {
+func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, target UploadTarget, ttl time.Duration, maxTotal int64, maxOpen int) (*Upload, error) {
 	n := now()
-	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: ts(n + int64(ttl/time.Second))}
+	u := &Upload{ID: ids.Random(16), UserID: userID, Size: size, ExpiresAt: ts(n + int64(ttl/time.Second)), UploadTarget: target}
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM uploads WHERE user_id = ?`, userID).Scan(&count); err != nil {
@@ -598,7 +640,7 @@ func (s *Store) CreateUpload(ctx context.Context, userID string, size int64, ttl
 		if err := checkQuota(ctx, tx, userID, "", size, size, maxTotal); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at) VALUES (?,?,?,?,?)`, u.ID, userID, size, n, u.ExpiresAt.Unix())
+		_, err := tx.ExecContext(ctx, `INSERT INTO uploads (id, user_id, size, created_at, expires_at, artifact_id, e2e) VALUES (?,?,?,?,?,?,?)`, u.ID, userID, size, n, u.ExpiresAt.Unix(), target.ArtifactID, target.E2E)
 		return err
 	})
 	return u, err
@@ -649,8 +691,8 @@ func (s *Store) ResetMaterialization(ctx context.Context, userID, id string) err
 func (s *Store) UploadByID(ctx context.Context, userID, id string) (*Upload, error) {
 	var u Upload
 	var exp int64
-	err := s.DB.QueryRowContext(ctx, `SELECT id, user_id, size, received, materialized, expires_at FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now()).
-		Scan(&u.ID, &u.UserID, &u.Size, &u.Received, &u.Materialized, &exp)
+	err := s.DB.QueryRowContext(ctx, `SELECT id, user_id, size, received, materialized, expires_at, artifact_id, e2e FROM uploads WHERE id = ? AND user_id = ? AND expires_at > ?`, id, userID, now()).
+		Scan(&u.ID, &u.UserID, &u.Size, &u.Received, &u.Materialized, &exp, &u.ArtifactID, &u.E2E)
 	if err != nil {
 		return nil, notFound(err)
 	}

@@ -103,8 +103,8 @@ func TestAdminArtifactCarriesNoSecrets(t *testing.T) {
 	}
 	walk(reflect.TypeOf(AdminArtifact{}))
 	sort.Strings(names)
-	// Online (a tunnel's CLI is connected) is metadata; admins list and end tunnels.
-	want := []string{"CreatedAt", "ExpiresAt", "Feedback", "Files", "HasPassword", "ID", "InfoButton", "Kind", "LastViewedAt", "MaxViews", "OldVersions", "Online", "OwnerUsername",
+	// Encryption and tunnel connectivity are metadata; the key check is owner-only.
+	want := []string{"CreatedAt", "E2E", "ExpiresAt", "Feedback", "Files", "HasPassword", "ID", "InfoButton", "Kind", "LastViewedAt", "MaxViews", "OldVersions", "Online", "OwnerUsername",
 		"Previews", "PurgeAt", "RevokedByAdmin", "Size", "Status", "Title", "TokenName", "TotalSize", "UpdatedAt", "Version", "Versions", "Views"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("AdminArtifact fields changed:\n got %v\nwant %v", names, want)
