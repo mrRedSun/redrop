@@ -434,8 +434,10 @@ func TestSMTPFailureClassification(t *testing.T) {
 		recipient bool
 	}{
 		{"transient recipient", "RCPT", 450, StageRecipient, false, false},
-		{"permanent recipient", "RCPT", 550, StageRecipient, true, true},
-		{"invalid mailbox", "RCPT", 553, StageRecipient, true, true},
+		// A bare 550/553 without an enhanced status fails the message but
+		// does not suppress the address (relays also use it for policy).
+		{"bare permanent recipient", "RCPT", 550, StageRecipient, true, false},
+		{"bare invalid mailbox", "RCPT", 553, StageRecipient, true, false},
 		{"auth required at RCPT", "RCPT", 530, StageRecipient, true, false},
 		{"bad command at RCPT", "RCPT", 503, StageRecipient, true, false},
 		{"ambiguous transaction at RCPT", "RCPT", 554, StageRecipient, true, false},
@@ -475,18 +477,24 @@ func TestSMTPFailureClassification(t *testing.T) {
 
 func TestSMTPEnhancedRecipientStatus(t *testing.T) {
 	for _, tc := range []struct {
-		status    string
+		reply     string
 		recipient bool
 	}{
-		{"5.1.1", true},
-		{"5.2.1", true},
-		{"5.7.1", false},
-		{"5.3.0", false},
-		{"5.4.1", false},
-		{"5.0.0", false},
+		{"550 5.1.1 no such user", true},
+		{"553 5.1.3 bad address syntax", true},
+		{"552 5.2.2 mailbox full", true},
+		{"550 5.2.1 mailbox disabled", true},
+		{"550 5.7.1 relaying denied", false},
+		{"550 5.3.0 system error", false},
+		{"550 5.4.1 no route", false},
+		{"550 5.0.0 unknown", false},
+		{"550 Relaying denied", false},
+		{"550 no such user here", false},
+		{"554 5.1.1 transaction failed", false},
+		{"550", false},
 	} {
-		t.Run(tc.status, func(t *testing.T) {
-			srv := startSMTP(t, smtpFixture{replies: map[string]string{"RCPT": "550 " + tc.status + " " + secretLink}})
+		t.Run(tc.reply, func(t *testing.T) {
+			srv := startSMTP(t, smtpFixture{replies: map[string]string{"RCPT": tc.reply + " " + secretLink}})
 			err := smtpClient(t, srv, Plain, "").Send(context.Background(), smtpMessage())
 			var permanent *PermanentError
 			if !errors.As(err, &permanent) || permanent.Recipient != tc.recipient {
@@ -609,6 +617,15 @@ func TestSMTPConfiguration(t *testing.T) {
 			t.Fatal("invalid SMTP configuration accepted")
 		}
 	}
+	// n-3: no AUTH without TLS except to a loopback relay.
+	if _, err := NewSMTP(SMTPConfig{Addr: "smtp.example.com:25", TLS: Plain, InsecurePlain: true, From: "sender@example.com", Username: "user", Password: "password"}); err == nil {
+		t.Fatal("cleartext AUTH to a remote relay accepted")
+	}
+	for _, host := range []string{"127.0.0.1", "[::1]", "localhost"} {
+		if _, err := NewSMTP(SMTPConfig{Addr: host + ":25", TLS: Plain, InsecurePlain: true, From: "sender@example.com", Username: "user", Password: "password"}); err != nil {
+			t.Fatalf("loopback test relay %s refused: %v", host, err)
+		}
+	}
 	path := filepath.Join(t.TempDir(), "invalid.pem")
 	if err := os.WriteFile(path, []byte("not a certificate"), 0600); err != nil {
 		t.Fatal(err)
@@ -657,6 +674,16 @@ func TestSMTPAlreadyCanceled(t *testing.T) {
 	}
 	if err := m.Send(ctx, smtpMessage()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context cancellation, got %v", err)
+	}
+}
+
+func TestSMTPHelloNamesSenderDomain(t *testing.T) {
+	srv := startSMTP(t, smtpFixture{})
+	if err := smtpClient(t, srv, Plain, "").Send(context.Background(), smtpMessage()); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.snapshot(); len(got) == 0 || got[0] != "EHLO example.com" {
+		t.Fatalf("EHLO did not name the sender's domain: %v", got)
 	}
 }
 

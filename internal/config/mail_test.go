@@ -38,7 +38,7 @@ func TestMailConfiguration(t *testing.T) {
 	t.Run("private relay", func(t *testing.T) {
 		t.Setenv("REDROP_SMTP_USERNAME", "relay-user")
 		t.Setenv("REDROP_SMTP_PASSWORD_FILE", pass)
-		t.Setenv("REDROP_NOTIFY_EMAIL", "ops@example.com, ops@example.com, second@example.com")
+		t.Setenv("REDROP_NOTIFY_EMAIL", "ops@example.com, ops@EXAMPLE.com, Second@Example.COM")
 		c := &Config{}
 		if err := c.loadMail(); err != nil {
 			t.Fatal(err)
@@ -46,11 +46,14 @@ func TestMailConfiguration(t *testing.T) {
 		if !c.MailEnabled() || c.SMTPTLS != "starttls" || c.SMTPPassword != "password-for-tests" || len(c.NotifyEmail) != 2 || c.AlertInterval != 10*time.Minute {
 			t.Fatalf("settings: %+v", c)
 		}
+		if c.NotifyEmail[0] != "ops@example.com" || c.NotifyEmail[1] != "Second@example.com" {
+			t.Fatalf("recipient domains not normalized: %v", c.NotifyEmail)
+		}
 	})
 	for _, test := range []struct{ key, value string }{
 		{"REDROP_SMTP_ADDR", "bad"}, {"REDROP_SMTP_ADDR", ":587"}, {"REDROP_SMTP_ADDR", "smtp.example.com:0"}, {"REDROP_SMTP_ADDR", "smtp.example.com:65536"},
 		{"REDROP_SMTP_TLS", "none"}, {"REDROP_SMTP_TLS", "plain"}, {"REDROP_SMTP_USERNAME", "missing-password"}, {"REDROP_SMTP_PASSWORD_FILE", pass},
-		{"REDROP_MAIL_FROM", "bad"}, {"REDROP_MAIL_FROM", "A\r\nB <x@example.com>"}, {"REDROP_NOTIFY_EMAIL", "A <a@example.com>"}, {"REDROP_NOTIFY_EMAIL", "a@example.com,,b@example.com"},
+		{"REDROP_MAIL_FROM", "bad"}, {"REDROP_MAIL_FROM", "A\r\nB <x@example.com>"}, {"REDROP_NOTIFY_EMAIL", "A <a@example.com>"}, {"REDROP_NOTIFY_EMAIL", "a@example.com,,b@example.com"}, {"REDROP_NOTIFY_EMAIL", "ops@[192.0.2.1]"},
 		{"REDROP_NOTIFY_EMAIL_INTERVAL", "0s"}, {"REDROP_NOTIFY_EMAIL_INTERVAL", "25h"},
 	} {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {

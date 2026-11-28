@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/store"
@@ -21,9 +22,14 @@ func (q *Queue) SetAlerts(addresses []string, interval time.Duration, queueURL s
 // wakes the worker; no SMTP or database work runs in the request.
 func (q *Queue) Notify(reportID string) { q.Wake() }
 
+// queueAlerts enqueues every recipient's due digest. A recipient whose
+// digest is held (the address is suppressed, or the queue is full) does not
+// stop the others; the hold is logged once until it clears. Logs name the
+// recipient by its position in REDROP_NOTIFY_EMAIL, never by address.
 func (q *Queue) queueAlerts(ctx context.Context, at time.Time) error {
-	for _, addr := range q.addresses {
-		err := q.db.QueueMailAlert(ctx, addr, q.interval, at, func(reports []store.Report) (*store.OutgoingMail, error) {
+	var first error
+	for i, addr := range q.addresses {
+		held, err := q.db.QueueMailAlert(ctx, addr, q.interval, at, func(reports []store.Report) (*store.OutgoingMail, error) {
 			list := make([]ReportAlert, 0, len(reports))
 			for _, r := range reports {
 				list = append(list, ReportAlert{ID: r.ID, Category: r.Category, Source: r.Source, Created: r.CreatedAt})
@@ -33,11 +39,25 @@ func (q *Queue) queueAlerts(ctx context.Context, at time.Time) error {
 				return nil, err
 			}
 			m.To = addr
-			return q.Prepare(m, "alert", "")
+			return q.Prepare(m, "alert")
 		})
 		if err != nil {
-			return err
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		switch {
+		case held == nil:
+			delete(q.held, addr)
+		case !q.held[addr]:
+			q.held[addr] = true
+			if errors.Is(held, store.ErrMailBounced) {
+				q.log.Warn("report alert held: this recipient permanently refused mail; after fixing it, run redrop-server mail-unbounce with its address", "recipient", i+1)
+			} else {
+				q.log.Warn("report alert held: the mail queue is full", "recipient", i+1)
+			}
 		}
 	}
-	return nil
+	return first
 }

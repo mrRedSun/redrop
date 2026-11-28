@@ -56,9 +56,13 @@ func (c *Config) loadMail() error {
 		for _, v := range strings.Split(raw, ",") {
 			v = strings.TrimSpace(v)
 			a, e := mail.ParseAddress(v)
-			if e != nil || a.Name != "" || a.Address != v || len(v) > 254 || strings.ContainsAny(v, "\r\n\x00") {
-				return fmt.Errorf("REDROP_NOTIFY_EMAIL must contain comma-separated bare addresses")
+			at := strings.LastIndexByte(v, '@')
+			if e != nil || a.Name != "" || a.Address != v || len(v) > 254 || strings.ContainsAny(v, "\r\n\x00") || at < 1 || strings.ContainsAny(v[at+1:], "[]") {
+				return fmt.Errorf("REDROP_NOTIFY_EMAIL must contain comma-separated bare addresses with domain names")
 			}
+			// The domain is case-insensitive; store it in lower case, as
+			// the mail layer does, so suppression and alert state match.
+			v = v[:at+1] + strings.ToLower(v[at+1:])
 			key := strings.ToLower(v)
 			if !seen[key] {
 				c.NotifyEmail = append(c.NotifyEmail, v)

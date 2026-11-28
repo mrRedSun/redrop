@@ -40,7 +40,11 @@ type Discard struct{}
 func (Discard) Send(context.Context, Message) error { return nil }
 
 // ValidAddress checks one bare address (no display name) of at most 254
-// characters, and returns it trimmed. Invite emails and alert recipients
+// characters and returns it trimmed, with its domain in lower case so that
+// the bounce list and alert state match however the domain was typed (the
+// local part keeps its case: RFC 5321 leaves it to the receiving server).
+// Domain literals such as a@[192.0.2.1] are refused: they would make the
+// relay deliver straight to an address. Invite emails and alert recipients
 // pass through it before anything is stored.
 func ValidAddress(s string) (string, error) {
 	if strings.ContainsAny(s, "\r\n") {
@@ -54,7 +58,21 @@ func ValidAddress(s string) (string, error) {
 	if err != nil || a.Name != "" || a.Address != s {
 		return "", fmt.Errorf("a valid email address, without a display name")
 	}
-	return s, nil
+	i := strings.LastIndexByte(s, '@')
+	if i < 1 || strings.ContainsAny(s[i+1:], "[]") {
+		return "", fmt.Errorf("an email address with a domain name, not an IP address")
+	}
+	return NormalizeAddress(s), nil
+}
+
+// NormalizeAddress lower-cases the domain of an address already checked by
+// ValidAddress. Command-line tools use it to name a bounce-list entry.
+func NormalizeAddress(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '@'); i >= 0 {
+		return s[:i+1] + strings.ToLower(s[i+1:])
+	}
+	return s
 }
 
 // esc escapes text for the HTML part.
@@ -65,7 +83,8 @@ func esc(s string) string { return html.EscapeString(s) }
 // with a plain-text and an HTML part, both base64-encoded so the message is
 // 7-bit clean for any relay. There is no tracking: no images, no external
 // styles, and the only links are the ones the templates put in. A message
-// with Raw set renders as its own bytes.
+// with Raw set renders as its own bytes. Each call mints a new Message-ID
+// and Date, so a resend is a new message, not a duplicate.
 func RenderWith(from string, m Message, now time.Time) ([]byte, error) {
 	fromAddr, err := parseSender(from)
 	if err != nil {

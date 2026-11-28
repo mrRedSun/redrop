@@ -61,7 +61,7 @@ func TestConcurrentMailAdmissionAndClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			o := &OneTime{Role: "user", Email: "to@example.com", ExpiresAt: at.Add(time.Hour)}
-			m := &OutgoingMail{To: o.Email, Kind: "invite", Body: []byte("ciphertext")}
+			m := &OutgoingMail{To: o.Email}
 			errs <- s.CreateMailedInvite(ctx, o, ids.Hash(ids.Secret()), "same-admin", m, at)
 		}()
 	}
@@ -86,7 +86,7 @@ func TestConcurrentMailAdmissionAndClaim(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute)
+			m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, mintTestHash)
 			if err != nil {
 				t.Errorf("claim: %v", err)
 				return
@@ -106,19 +106,74 @@ func TestConcurrentMailAdmissionAndClaim(t *testing.T) {
 	if len(seen) != 10 {
 		t.Fatal("missing claim")
 	}
-	if _, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, mintTestHash); !errors.Is(err, ErrNotFound) {
 		t.Fatal("claimed sending row")
 	}
 	if err := s.RecoverMail(ctx); err != nil {
 		t.Fatal(err)
 	}
-	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute)
+	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, mintTestHash)
 	if err != nil || m.Attempts != 2 {
 		t.Fatalf("recovery lost attempt count: %v", err)
 	}
 }
 
-func TestCleanupExpiredInviteBodies(t *testing.T) {
+func mintTestHash() string { return ids.Hash(ids.Secret()) }
+
+// H-1: claiming an invite row replaces the invite's hash, in the same
+// transaction, with the hash the caller minted, and fills in what the email
+// needs. A row with a body for an invite never exists.
+func TestClaimRotatesInviteHash(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "rotate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	at := time.Now()
+	o := &OneTime{Role: "admin", Note: "welcome", Email: "to@example.com", ExpiresAt: at.Add(time.Hour)}
+	if err := s.CreateMailedInvite(ctx, o, "placeholder", "actor", &OutgoingMail{To: o.Email, Inviter: "Ada", Body: []byte("never stored")}, at); err != nil {
+		t.Fatal(err)
+	}
+	if row, err := s.MailByInvite(ctx, o.ID); err != nil || len(row.Body) != 0 || row.Inviter != "Ada" || row.Kind != "invite" {
+		t.Fatalf("invite row: %+v %v", row, err)
+	}
+	secret := ids.Secret()
+	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, func() string { return ids.Hash(secret) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Note != "welcome" || m.Role != "admin" || !m.Expires.Equal(o.ExpiresAt.Truncate(time.Second)) || m.Inviter != "Ada" {
+		t.Fatalf("claimed invite details: %+v", m)
+	}
+	if _, err := s.OneTimeByHash(ctx, PurposeInvite, ids.Hash(secret)); err != nil {
+		t.Fatal("claim did not install the minted hash")
+	}
+	if _, err := s.OneTimeByHash(ctx, PurposeInvite, "placeholder"); err == nil {
+		t.Fatal("the placeholder hash still works")
+	}
+}
+
+// m-B: the bounce list can be cleared.
+func TestUnbounceMail(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "unbounce.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	if _, err := s.DB.Exec(`INSERT INTO mail_bounced(address,at) VALUES('to@example.com',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := s.UnbounceMail(ctx, "to@example.com"); err != nil || !removed {
+		t.Fatal(removed, err)
+	}
+	if removed, err := s.UnbounceMail(ctx, "to@example.com"); err != nil || removed {
+		t.Fatal("second unbounce reported a removal", err)
+	}
+}
+
+func TestExpiredInviteMailIsCancelled(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "cleanup.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -127,21 +182,17 @@ func TestCleanupExpiredInviteBodies(t *testing.T) {
 	at := time.Now()
 	ctx := t.Context()
 	o := &OneTime{Role: "user", ExpiresAt: at.Add(time.Minute)}
-	m := &OutgoingMail{To: "to@example.com", Kind: "invite", Body: []byte("ciphertext")}
+	m := &OutgoingMail{To: "to@example.com"}
 	if err := s.CreateMailedInvite(ctx, o, "hash", "actor", m, at); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CleanupMail(ctx, at.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	row, err := s.MailByInvite(ctx, o.ID)
-	if err != nil || len(row.Body) != 0 {
-		t.Fatal("expired secret retained")
-	}
-	if _, err := s.ClaimMail(ctx, at.Add(2*time.Minute), time.Minute); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ClaimMail(ctx, at.Add(2*time.Minute), time.Minute, func() string { t.Fatal("rotated an expired invite"); return "" }); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired invite sent: %v", err)
 	}
-	row, err = s.MailByInvite(ctx, o.ID)
+	row, err := s.MailByInvite(ctx, o.ID)
 	if err != nil || row.Status != MailFailed {
 		t.Fatal("empty claim rolled back expired-mail cancellation")
 	}

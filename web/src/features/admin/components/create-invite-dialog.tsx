@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { useAtomSet, useAtomSuspense } from '@effect/atom-react'
 import { Redacted } from 'effect'
 import { Atom } from 'effect/reactivity'
+import { MailCheck } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { FormRootError } from '@/components/form-root-error'
 import { SecretReveal } from '@/components/secret-reveal'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
@@ -18,7 +20,7 @@ import { CreateInviteForm, createInviteDefaults, type CreatedInvite } from '../s
 
 const ttlLabels = { '1d': '1 day', '7d': '7 days', '30d': '30 days' } as const
 
-/** Creates an invite link and shows it once. */
+/** Creates an invite: shows a link-only invite's link once, or confirms the email. */
 export function CreateInviteDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const [created, setCreated] = useState<CreatedInvite | null>(null)
   const reset = useAtomSet(admin.createInvite)
@@ -38,10 +40,7 @@ export function CreateInviteDialog({ open, onOpenChange }: { open: boolean; onOp
         </DialogHeader>
         {created ? (
           <>
-            <SecretReveal label="Invite link" value={Redacted.value(created.url)}>
-              <p className="text-muted-foreground text-xs">{created.role === 'admin' ? 'Administrator invite. ' : ''}Expires {formatDate(created.expires_at)}.</p>
-              {created.email && <p className="text-muted-foreground text-xs">Invite email to {created.email}. Delivery status is shown in the invite list.</p>}
-            </SecretReveal>
+            <CreatedInviteResult created={created} />
             <DialogFooter><Button onClick={() => close(false)}>Done</Button></DialogFooter>
           </>
         ) : (
@@ -49,6 +48,32 @@ export function CreateInviteDialog({ open, onOpenChange }: { open: boolean; onOp
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * A link-only invite shows its link once. An emailed invite has no link to
+ * show: the server mints it when it sends the email, and every send (Send
+ * again included) replaces the previous link.
+ */
+export function CreatedInviteResult({ created }: { created: CreatedInvite }) {
+  const details = `${created.role === 'admin' ? 'Administrator invite. ' : ''}Expires ${formatDate(created.expires_at)}.`
+  if (created.url === undefined) {
+    return (
+      <Alert>
+        <MailCheck />
+        <AlertTitle>Emailed to {created.email}</AlertTitle>
+        <AlertDescription>
+          <p>The link is only in the email; sending again replaces it. Delivery status is shown in the invite list.</p>
+          <p>{details}</p>
+        </AlertDescription>
+      </Alert>
+    )
+  }
+  return (
+    <SecretReveal label="Invite link" value={Redacted.value(created.url)}>
+      <p className="text-muted-foreground text-xs">{details}</p>
+    </SecretReveal>
   )
 }
 
@@ -63,7 +88,7 @@ export function InviteForm({ onCreated }: { onCreated: (i: CreatedInvite) => voi
           <FormItem>
             <FormLabel>Email (optional)</FormLabel>
             <FormControl><Input type="email" autoComplete="email" maxLength={254} placeholder="recipient@example.com" {...field} /></FormControl>
-            <FormDescription>Email the invite link, or leave empty to share it yourself.</FormDescription>
+            <FormDescription>Email the invite link, or leave empty to get a link to share yourself. An emailed link is only in the email.</FormDescription>
             <FormMessage />
           </FormItem>
         )} />}

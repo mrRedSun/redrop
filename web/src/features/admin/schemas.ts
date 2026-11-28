@@ -171,8 +171,12 @@ export const Invite = Schema.Struct({
 export type Invite = typeof Invite.Type
 export const InviteList = ListOf(Invite)
 
-/** Returned only at creation; the URL carries the one-time secret. */
-export const CreatedInvite = Schema.Struct({ ...Invite.fields, url: Schema.RedactedFromValue(Schema.String) })
+/**
+ * Returned only at creation. A link-only invite carries its URL, the
+ * one-time secret. An emailed invite has none: the server mints the link
+ * when it sends the email, so the link exists only in the email.
+ */
+export const CreatedInvite = Schema.Struct({ ...Invite.fields, url: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)) })
 export type CreatedInvite = typeof CreatedInvite.Type
 
 export const ResetLink = Schema.Struct({ url: Schema.RedactedFromValue(Schema.String), expires_at: Timestamp })

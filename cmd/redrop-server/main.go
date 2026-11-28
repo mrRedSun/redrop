@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/mrRedSun/redrop/internal/accounts"
@@ -16,6 +17,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/httpapi"
 	"github.com/mrRedSun/redrop/internal/mail"
+	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/internal/webui"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
@@ -27,9 +29,12 @@ Usage:
   redrop-server openapi                Print the OpenAPI document
   redrop-server invite [--admin] [--email ADDR]
                                        Print a new invite link (works offline);
-                                       with --email, queue it for delivery
+                                       with --email, queue the invite instead and
+                                       print its ID: the link is only in the email
   redrop-server reset USERNAME         Print a password reset link (also clears TOTP)
   redrop-server mail-test --to ADDR    Send a test message and print the SMTP result
+  redrop-server mail-unbounce ADDR     Let mail go to an address that permanently
+                                       refused it before (works offline)
   redrop-server healthcheck            Exit 0 if the local server answers /healthz
   redrop-server version
 
@@ -56,6 +61,8 @@ func main() {
 		err = reset(args)
 	case "mail-test":
 		err = mailTest(args)
+	case "mail-unbounce":
+		err = mailUnbounce(args)
 	case "healthcheck":
 		err = healthcheck()
 	case "version", "--version", "-v":
@@ -170,9 +177,44 @@ func invite(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(inv.URL)
 	if *email != "" {
-		fmt.Fprintln(os.Stderr, "invite email queued; the serving process will deliver it")
+		// The link is minted when the serving process sends the email, so
+		// there is none to print: a printed one would stop working then.
+		fmt.Println(inv.ID)
+		fmt.Fprintln(os.Stderr, "invite queued; the serving process emails the link (Administration → Invites shows the status)")
+		return nil
+	}
+	fmt.Println(inv.URL)
+	return nil
+}
+
+// mailUnbounce removes an address from the bounce list, after a permanent
+// refusal turned out to be fixable (a mailbox recreated, a relay fixed).
+func mailUnbounce(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: redrop-server mail-unbounce ADDR")
+	}
+	addr, err := mail.ValidAddress(args[0])
+	if err != nil {
+		return fmt.Errorf("mail-unbounce needs %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(filepath.Join(cfg.DataDir, "redrop.db"))
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+	removed, err := db.UnbounceMail(context.Background(), addr)
+	if err != nil {
+		return err
+	}
+	if removed {
+		fmt.Println("removed from the bounce list; mail to it is allowed again")
+	} else {
+		fmt.Println("not on the bounce list; nothing changed")
 	}
 	return nil
 }

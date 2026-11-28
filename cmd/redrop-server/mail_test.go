@@ -31,8 +31,39 @@ func TestOfflineInviteQueuesWithoutRunningWorker(t *testing.T) {
 		t.Fatalf("invite: %v", err)
 	}
 	row, err := s.MailByInvite(t.Context(), invites[0].ID)
-	if err != nil || row.Status != store.MailQueued || row.Attempts != 0 {
-		t.Fatalf("offline tool started delivery: %v", err)
+	if err != nil || row.Status != store.MailQueued || row.Attempts != 0 || len(row.Body) != 0 {
+		t.Fatalf("offline tool started delivery or stored a body: %v", err)
+	}
+}
+
+func TestMailUnbounce(t *testing.T) {
+	dir := serverMailEnv(t)
+	if err := mailUnbounce(nil); err == nil {
+		t.Fatal("missing address accepted")
+	}
+	if err := mailUnbounce([]string{"bad-address"}); err == nil {
+		t.Fatal("invalid address accepted")
+	}
+	s, err := store.Open(filepath.Join(dir, "redrop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO mail_bounced(address,at) VALUES('person@example.com',1)`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	// The domain is matched case-insensitively, as stored.
+	if err := mailUnbounce([]string{"person@EXAMPLE.com"}); err != nil {
+		t.Fatal(err)
+	}
+	s, err = store.Open(filepath.Join(dir, "redrop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM mail_bounced`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("address still suppressed: %d %v", n, err)
 	}
 }
 func TestMailTestValidationDoesNotOpenDatabase(t *testing.T) {

@@ -32,6 +32,12 @@ func (s *Service) inviteURLFrom(o *store.OneTime, secret string) string {
 	return s.cfg.PublicOrigin() + linkPaths[o.Purpose] + secret
 }
 
+// InviteURL is the absolute invite link for a token. The mail worker uses it
+// to render an invite email with the token it has just minted.
+func (s *Service) InviteURL(secret string) string {
+	return s.cfg.PublicOrigin() + linkPaths[store.PurposeInvite] + secret
+}
+
 // lookupLink finds an unused, unexpired one-time link, rate limited per IP.
 func (s *Service) lookupLink(ctx context.Context, network, purpose, token string) (*store.OneTime, error) {
 	if !s.linkLimiter.Allow(network) {

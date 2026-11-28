@@ -125,7 +125,8 @@ type InviteRequest struct {
 
 // CreateInvite returns the invite and its one-time URL. createdBy is empty
 // for invites minted offline from the server command line. With an email
-// address (and mail configured), the link is queued for delivery to it.
+// address (and mail configured), the invite is queued for delivery and the
+// result has no URL: the link is minted when the email is sent.
 func (a *Administration) CreateInvite(ctx context.Context, createdBy string, req InviteRequest) (CreatedInvite, error) {
 	if req.Role == "" {
 		req.Role = api.RoleUser
@@ -165,29 +166,28 @@ func (a *Administration) CreateInvite(ctx context.Context, createdBy string, req
 		if err != nil {
 			return CreatedInvite{}, apperr.Internal(err)
 		}
-		inviter = u.Username
-		if u.DisplayName != "" {
-			inviter = u.DisplayName + " (" + u.Username + ")"
-		}
+		inviter = inviterName(u.DisplayName, u.Username)
 	}
-	secret := ids.Secret()
-	url := a.s.inviteURLFrom(o, secret)
-	m, err := (mail.InviteEmail{Link: url, Note: o.Note, Inviter: inviter, Expires: o.ExpiresAt, Role: o.Role}).Render()
-	if err != nil {
-		return CreatedInvite{}, apperr.Internal(err)
-	}
-	m.To = email
-	row, err := a.s.mail.Prepare(m, "invite", "")
-	if err != nil {
-		return CreatedInvite{}, apperr.Internal(err)
-	}
-	if err = a.s.db.CreateMailedInvite(ctx, o, ids.Hash(secret), createdBy, row, a.s.now()); err != nil {
+	// The invite's hash is of a secret nobody keeps: an emailed invite has
+	// no working link until the mail worker mints one when it sends, and
+	// that token lives only in memory and in the email (DESIGN.md "Email").
+	// So the result carries no URL; the administrator shares nothing by hand.
+	row := &store.OutgoingMail{To: email, Inviter: inviter}
+	if err = a.s.db.CreateMailedInvite(ctx, o, ids.Hash(ids.Secret()), createdBy, row, a.s.now()); err != nil {
 		return CreatedInvite{}, mapMailError(err)
 	}
 	a.s.mail.Wake()
 	v := inviteView(o)
 	v.EmailStatus = store.MailQueued
-	return CreatedInvite{Invite: v, URL: url}, nil
+	return CreatedInvite{Invite: v}, nil
+}
+
+// inviterName is how an invite email names the administrator who sent it.
+func inviterName(display, username string) string {
+	if display == "" || display == username {
+		return username
+	}
+	return display + " (" + username + ")"
 }
 
 // inviteTTL parses an invite lifetime; invites always expire.
@@ -227,9 +227,9 @@ func (a *Administration) Invites(ctx context.Context) ([]Invite, error) {
 	return out, nil
 }
 
-// ResendInvite queues the invite's email again: a copy of the stored mail
-// row (the same one-time link, as first rendered), subject to the same
-// throttle and bounce list.
+// ResendInvite queues the invite's email again, subject to the same throttle
+// and bounce list. The new email carries a new link, and the previous
+// email's link stops working when it is sent.
 func (a *Administration) ResendInvite(ctx context.Context, admin *Principal, id string) (Invite, error) {
 	o, err := a.s.db.OneTimeByID(ctx, store.PurposeInvite, id)
 	if err != nil {

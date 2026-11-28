@@ -123,6 +123,11 @@ func NewSMTP(cfg SMTPConfig) (*SMTP, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Credentials never cross the network in the clear. Plain mode exists only
+	// for tests, so it may authenticate only to a relay on this host.
+	if cfg.TLS == Plain && cfg.Username != "" && !loopbackHost(host) {
+		return nil, errors.New("SMTP authentication without TLS is allowed only to a loopback relay")
+	}
 	root, err := x509.SystemCertPool()
 	if err != nil || root == nil {
 		root = x509.NewCertPool()
@@ -206,7 +211,9 @@ func (s *SMTP) Send(ctx context.Context, m Message) error {
 		return smtpFailure(ctx, StageGreeting, err)
 	}
 	defer c.Close()
-	if err := c.Hello("localhost"); err != nil {
+	// Name this client by the sender's domain: some relays refuse or penalise
+	// "localhost" in EHLO. parseSender has already refused domain literals.
+	if err := c.Hello(domainOf(s.sender)); err != nil {
 		return smtpFailure(ctx, StageHello, err)
 	}
 	if s.cfg.TLS == STARTTLS {
@@ -218,6 +225,9 @@ func (s *SMTP) Send(ctx context.Context, m Message) error {
 		}
 	}
 	if s.cfg.Username != "" {
+		if s.cfg.TLS == Plain && !loopbackHost(s.host) {
+			return &PermanentError{Stage: StageAuth}
+		}
 		ok, mechs := c.Extension("AUTH")
 		if !ok {
 			return &PermanentError{Stage: StageAuth}
@@ -281,29 +291,37 @@ func smtpFailure(ctx context.Context, stage SMTPStage, err error) error {
 	return e
 }
 
-// Generic command/authentication errors at RCPT are not mailbox failures.
-// Keep suppression conservative when the relay returns an ambiguous status.
+// mailboxRefused reports a permanent refusal of this mailbox, the only
+// failure that suppresses an address. It needs an RFC 3463 enhanced status
+// of 5.1.x (address) or 5.2.x (mailbox). A bare 550 is not enough: relays
+// also use it for "relaying denied" and for their own misconfiguration, and
+// suppressing every address tried during such a window would be permanent.
+// The reply is inspected here and never retained.
 func mailboxRefused(code int, reply string) bool {
-	// Enhanced statuses distinguish mailbox/address failures (5.1.x/5.2.x)
-	// from relay policy, authentication (5.7.x), or system/network failures.
-	// Inspect this field for classification but never retain the reply.
+	switch code {
+	case 550, 551, 552, 553, 556:
+	default:
+		return false // 554 and the rest are about the transaction, not the mailbox
+	}
 	status := strings.TrimSpace(reply)
 	if i := strings.IndexAny(status, " \t"); i >= 0 {
 		status = status[:i]
 	}
-	if strings.HasPrefix(status, "5.") && !strings.HasPrefix(status, "5.1.") && !strings.HasPrefix(status, "5.2.") {
-		return false
-	}
-	switch code {
-	case 550, 551, 552, 553, 556:
+	return strings.HasPrefix(status, "5.1.") || strings.HasPrefix(status, "5.2.")
+}
+
+// loopbackHost reports localhost or a loopback IP address.
+func loopbackHost(host string) bool {
+	if host == "localhost" {
 		return true
-	default:
-		return false
 	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Match whole advertised mechanism names. PLAIN verifies the actual relay
-// hostname and refuses cleartext credentials outside explicit localhost tests.
+// hostname and refuses cleartext credentials outside localhost. CRAM-MD5 has
+// no such check of its own; Send refuses AUTH without TLS before reaching it.
 func authFor(mechs, host, username, password string) smtp.Auth {
 	var cram bool
 	for _, mech := range strings.Fields(mechs) {

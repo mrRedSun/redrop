@@ -84,10 +84,11 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 		webhook = notify.New(cfg.NotifyURL, cfg.NotifyToken, log)
 		sh.SetNotifier(webhook)
 	}
+	acc := accounts.New(db, cfg, secret, log)
 	// Outbound mail (DESIGN.md "Email"): one queue, one worker, persisted
 	// send state. Report alerts batch on top of it; the webhook stays the
-	// instant channel.
-	var mailer mail.Mailer = mail.Discard{}
+	// instant channel. The worker mints invite links through the accounts
+	// service, which owns their path.
 	var mailQueue *mail.Queue
 	if cfg.MailEnabled() {
 		sm, err := mail.NewSMTP(mail.SMTPConfig{
@@ -95,10 +96,17 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 			CAFile: cfg.SMTPCAFile, From: cfg.MailFrom, InsecurePlain: cfg.MailInsecurePlain,
 		})
 		if err == nil {
-			mailer = sm
-			mailQueue, err = mail.NewQueue(db, mailer, cfg.MailFrom, secret, log, mail.DefaultQueueConfig())
+			mailQueue, err = mail.NewQueue(db, sm, cfg.MailFrom, log, mail.DefaultQueueConfig())
+		}
+		if err == nil {
+			mailQueue.SetInviteLink(acc.InviteURL)
+			mailQueue.SetAlerts(cfg.NotifyEmail, cfg.AlertInterval, cfg.PublicOrigin()+dashpaths.AdminReports)
+			if !opts.Offline {
+				err = mailQueue.Start()
+			}
 		}
 		if err != nil {
+			acc.Close()
 			sh.Close()
 			if webhook != nil {
 				webhook.Close()
@@ -106,22 +114,10 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 			db.Close()
 			return nil, err
 		}
-		mailQueue.SetAlerts(cfg.NotifyEmail, cfg.AlertInterval, cfg.PublicOrigin()+dashpaths.AdminReports)
-		if !opts.Offline {
-			if err = mailQueue.Start(); err != nil {
-				sh.Close()
-				if webhook != nil {
-					webhook.Close()
-				}
-				db.Close()
-				return nil, err
-			}
-		}
 		if len(cfg.NotifyEmail) > 0 {
 			sh.SetAlertNotifier(mailQueue)
 		}
 	}
-	acc := accounts.New(db, cfg, secret, log)
 	acc.SetMailer(mailQueue)
 	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader, TrustedHops: cfg.TrustedHops}
 	// Live tunnel connections: the sharing service reports access changes

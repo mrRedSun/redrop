@@ -8,8 +8,11 @@ import (
 	"mime"
 	"mime/multipart"
 	"net"
+	"net/http"
 	stdmail "net/mail"
 	"net/textproto"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,21 +184,16 @@ func TestInviteEmailRequestReturnsBeforeDelivery(t *testing.T) {
 		sink.unblock()
 		t.Fatal("HTTP request waited for SMTP")
 	}
-	body := sink.next(t)
-	text := smtpPlainText(t, body)
-	if !strings.Contains(text, inv.URL) || !strings.Contains(text, "Welcome <friend>") || !strings.Contains(text, "admin") {
-		t.Fatalf("invite template missing fields")
-	}
-	if inv.Email != "recipient@example.com" || inv.EmailStatus != "queued" {
+	// An emailed invite's link exists only in the email.
+	if inv.URL != "" || inv.Email != "recipient@example.com" || inv.EmailStatus != "queued" {
 		t.Fatalf("create response: %+v", inv)
 	}
-	row, err := h.app.db.MailByInvite(t.Context(), inv.ID)
-	if err != nil {
-		t.Fatal(err)
+	body := sink.next(t)
+	text := smtpPlainText(t, body)
+	if !strings.Contains(text, "Welcome <friend>") || !strings.Contains(text, "Invited by admin.") {
+		t.Fatalf("invite template missing fields (or repeats the inviter):\n%s", text)
 	}
-	if bytes.Contains(row.Body, []byte(inv.URL)) {
-		t.Fatal("one-time link plaintext in DB")
-	}
+	first := emailedToken(t, text)
 	expectStatus(t, h.do("POST", "/api/v1/admin/invites/"+inv.ID+"/resend", nil, false), 403, "resend needs CSRF")
 	expectStatus(t, h.do("POST", "/api/v1/admin/invites/"+inv.ID+"/resend", nil, true), 409, "already sending")
 	sink.unblock()
@@ -203,20 +201,79 @@ func TestInviteEmailRequestReturnsBeforeDelivery(t *testing.T) {
 	if sent.URL != "" || sent.EmailAt == nil {
 		t.Fatal("list leaked URL or lost send timestamp")
 	}
+	backupHoldsNoToken(t, h, first)
+
+	// Send again mints a new link and a new message; the first link dies.
 	expectStatus(t, h.do("POST", "/api/v1/admin/invites/"+inv.ID+"/resend", nil, true), 200, "resend")
 	again := sink.next(t)
-	if !bytes.Equal(body, again) {
-		t.Fatal("resend changed the link/message")
+	second := emailedToken(t, smtpPlainText(t, again))
+	if second == first || emailMessageID(t, again) == emailMessageID(t, body) {
+		t.Fatal("Send again resent the same link or Message-ID")
 	}
 	waitMailState(t, h, inv.ID, store.MailSent)
-	secret := inv.URL[strings.LastIndex(inv.URL, "/")+1:]
-	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "recipient@example.com") {
-		t.Fatal("link or recipient appeared in logs")
+	for _, secret := range []string{first, second} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatal("link appeared in logs")
+		}
 	}
-	// Redeeming the link closes resends and retains today's one-time semantics.
-	r := h.do("POST", "/api/v1/invites/"+secret+"/accept", api.AcceptInviteRequest{Username: "recipient", Password: "recipient-password-long"}, true)
-	expectStatus(t, r, 200, "redeem emailed invite")
+	if strings.Contains(logs.String(), "recipient@example.com") {
+		t.Fatal("recipient appeared in logs")
+	}
+	accept := func(token string) *http.Response {
+		return h.do("POST", "/api/v1/invites/"+token+"/accept", api.AcceptInviteRequest{Username: "recipient", Password: "recipient-password-long"}, true)
+	}
+	expectStatus(t, accept(first), 410, "the replaced link")
+	expectStatus(t, accept(second), 200, "redeem the emailed link")
 	expectStatus(t, h.do("POST", "/api/v1/admin/invites/"+inv.ID+"/resend", nil, true), 409, "used invite resend")
+}
+
+// emailedToken returns the invite token in an invite email's text.
+func emailedToken(t *testing.T, text string) string {
+	t.Helper()
+	const prefix = "http://app.test/invite/"
+	i := strings.Index(text, prefix)
+	if i < 0 {
+		t.Fatalf("no invite link in email:\n%s", text)
+	}
+	token, _, _ := strings.Cut(text[i+len(prefix):], "\n")
+	return strings.TrimSpace(token)
+}
+
+func emailMessageID(t *testing.T, raw []byte) string {
+	t.Helper()
+	m, err := stdmail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m.Header.Get("Message-ID")
+}
+
+// backupHoldsNoToken is the review's backup probe, inverted (H-1): a copy of
+// the database together with secret.key holds no invite token in any form,
+// so no invite email can be rebuilt from a backup.
+func backupHoldsNoToken(t *testing.T, h *harness, token string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := h.app.db.Backup(t.Context(), filepath.Join(dir, "redrop.db")); err != nil {
+		t.Fatal(err)
+	}
+	var files [][]byte
+	for _, p := range []string{filepath.Join(dir, "redrop.db"), filepath.Join(h.app.cfg.DataDir, "secret.key")} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, b)
+	}
+	for _, b := range files {
+		if bytes.Contains(b, []byte(token)) {
+			t.Fatal("the backup holds the emailed invite token")
+		}
+	}
+	var stored int
+	if err := h.app.db.DB.QueryRow(`SELECT count(*) FROM mail_out WHERE kind='invite' AND length(body)>0`).Scan(&stored); err != nil || stored != 0 {
+		t.Fatalf("%d invite emails stored: %v", stored, err)
+	}
 }
 
 func TestSMTPDeliveryRetriesTransientButNotPermanent(t *testing.T) {
@@ -230,6 +287,26 @@ func TestSMTPDeliveryRetriesTransientButNotPermanent(t *testing.T) {
 			inv := decode[api.Invite](t, r)
 			sink.next(t)
 			if code == 451 {
+				// The retry is a minute away; bring it forward once the
+				// failure is recorded rather than waiting.
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					row, err := h.app.db.MailByInvite(t.Context(), inv.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if row.Status == store.MailQueued && row.Attempts == 1 {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("451 not scheduled for retry: %+v", row)
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				if _, err := h.app.db.DB.Exec(`UPDATE mail_out SET next_at=0`); err != nil {
+					t.Fatal(err)
+				}
+				h.app.mail.Wake()
 				sink.next(t)
 				waitMailState(t, h, inv.ID, store.MailSent)
 				row, err := h.app.db.MailByInvite(t.Context(), inv.ID)

@@ -21,7 +21,10 @@ func TestValidAddress(t *testing.T) {
 	}{
 		{"person@example.com", "person@example.com"},
 		{" person+tag@example.com ", "person+tag@example.com"},
+		{"Person@Example.COM", "Person@example.com"},
 		{"", ""},
+		{"person@[192.0.2.1]", ""},
+		{"person@[IPv6:2001:db8::1]", ""},
 		{"Display Name <person@example.com>", ""},
 		{"person@example.com, other@example.com", ""},
 		{"not-an-address", ""},

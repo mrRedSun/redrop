@@ -364,8 +364,14 @@ All settings are `REDROP_*` environment variables, loaded in
 Mail is off unless `REDROP_SMTP_ADDR` is set. Manual invite links and the
 webhook keep working without it. With mail configured, **Administration →
 Invites** has an optional email field, delivery status, and **Send again**.
-The recipient sees the invite's note, inviter, and expiry. The emailed link
-is the same one-time link the administrator can copy.
+The recipient sees the invite's note, inviter, and expiry.
+
+An emailed invite's link is only in the email. The server mints it when it
+sends, and stores it only as a hash, like every other one-time link, so a
+backup of the data directory holds no working invite. The dashboard and
+`redrop-server invite --email` therefore show no link for an emailed invite.
+Every send replaces the link: after **Send again**, or an automatic retry, only
+the newest email works. To share a link by hand, leave the email field empty.
 
 | Variable | Default / meaning |
 |---|---|
@@ -412,11 +418,11 @@ recipient-specific failures. SMTP replies, credentials, recipient addresses,
 and one-time links do not appear in redrop's delivery logs.
 
 `redrop-server invite --email recipient@example.com --note 'Welcome'` works
-offline and queues the email. The serving process sends it on its next queue
-check, within one minute. It does not start another worker against the live
-database. Admin sends are limited to 10 per hour per administrator and 60 per
-hour globally, across restarts and resends. The queue accepts at most 128
-pending messages; refusals leave no orphan invite.
+offline, queues the email, and prints the invite ID. The serving process
+sends it on its next queue check, within one minute. It does not start another
+worker against the live database. Admin sends are limited to 10 per hour per
+administrator and 60 per hour globally, across restarts and resends. The queue
+accepts at most 128 pending messages; refusals leave no orphan invite.
 
 Report alerts batch new visitor reports and upload flags, listing report IDs,
 categories, and times with a link to the moderation queue. They never contain
@@ -426,27 +432,36 @@ an address are not mailed. Large backlogs drain in batches of 200 without
 skipping reports. The existing webhook still fires immediately.
 
 Delivery uses a 30-second timeout and at most four attempts. Transient failures
-retry after 1, 4, and 16 seconds. Alert retries wait at least the configured
-interval. Permanent SMTP failures are not retried automatically. A permanent
-recipient refusal also suppresses later sends to that address; authentication,
-sender, and relay policy failures do not. Suppression does not process later
-asynchronous delivery-status notifications. Fix the address and create a new
-invite, or investigate the relay before changing persisted suppression state.
+retry after 1, 5 and 30 minutes, but never past the invite's expiry. Alert
+retries wait at least the configured interval. Permanent SMTP failures are not
+retried automatically.
 
-Back up the full data directory, including `secret.key`, before upgrading.
-Migration 10 adds mail state and encrypts stored email bodies using a key derived
-from that secret. Keep it with database backups; losing it makes queued bodies
-unreadable. Used or expired invite bodies are cleared by the next worker
-cleanup, at most one hour later; revoking an invite removes its queued body.
-Finished alert bodies are cleared immediately. Send status survives restarts.
+A permanent mailbox refusal (a 5xx answer to RCPT with an enhanced status of
+`5.1.x` or `5.2.x`, such as `550 5.1.1`) also suppresses later sends to that
+address. A bare `550` without an enhanced status, and authentication, sender
+or relay-policy failures, fail the message without suppressing the address.
+Later asynchronous delivery-status notifications are not processed. While an
+address is suppressed, invites to it are refused and its report digests are
+held; the log says so once, naming the recipient's position in
+`REDROP_NOTIFY_EMAIL`. Once the mailbox or relay is fixed, clear it:
+
+```sh
+docker compose exec redrop redrop-server mail-unbounce person@example.com
+```
+
+Back up the full data directory before upgrading, as usual. Migration 10 adds
+mail state. Stored invite emails have no body and no token, so no backup holds
+a working invite link; digests hold no secret. Send status survives restarts.
 Delivery is at least once: a process crash after SMTP accepts a message but
-before SQLite records success can cause a duplicate. The one-time link still
-creates only one account.
+before SQLite records success sends the email again on restart, with a new
+link, and the first email's link stops working. A recipient who is already
+completing signup when an administrator clicks **Send again** can still
+finish; the old link is refused after that.
 
 Rollback the image through the existing Docker Compose workflow. Older binaries
-ignore the added column and mail tables, so links still work manually but queued
-emails stop sending. Preserve the database and signing secret for a later
-upgrade; do not reset volumes or downgrade the schema.
+ignore the added column and mail tables, so manual links and links in emails
+already sent keep working, but queued emails stop sending. Preserve the
+database for a later upgrade; do not reset volumes or downgrade the schema.
 
 ## Abuse handling
 

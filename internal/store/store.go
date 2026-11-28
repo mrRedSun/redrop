@@ -108,17 +108,19 @@ ALTER TABLE uploads ADD COLUMN artifact_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE uploads ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;`
 
 // schemaV10 adds outbound mail state (DESIGN.md "Email"): the email
-// address an invite's link is sent to, the persisted send queue for invite
-// emails (so a restart never loses one), the bounce list of permanently
-// refused addresses, and the per-address state of the batched report
-// alerts. An older server ignores the column and all three tables.
+// address an invite's link is sent to, the persisted send queue (so a
+// restart never loses a message), hourly invite-mail charges, the bounce
+// list of permanently refused addresses, and the per-address state of the
+// batched report alerts. Invite rows hold no body and no token: the worker
+// mints the link when it sends. An older server ignores all of it.
 const schemaV10 = `ALTER TABLE onetime ADD COLUMN email TEXT NOT NULL DEFAULT '';
 CREATE TABLE mail_out (
     id TEXT PRIMARY KEY,
     to_addr TEXT NOT NULL,
     kind TEXT NOT NULL,
     invite_id TEXT UNIQUE REFERENCES onetime(id) ON DELETE CASCADE,
-    body BLOB NOT NULL,
+    inviter TEXT NOT NULL DEFAULT '',
+    body BLOB NOT NULL DEFAULT X'',
     status TEXT NOT NULL DEFAULT 'queued',
     attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',

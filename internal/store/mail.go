@@ -10,6 +10,7 @@ import (
 	"github.com/mrRedSun/redrop/internal/ids"
 )
 
+// Mail send states (DESIGN.md "Email").
 const (
 	MailQueued  = "queued"
 	MailSending = "sending"
@@ -26,21 +27,31 @@ var (
 	ErrMailBounced = errors.New("address permanently refused mail")
 )
 
-// OutgoingMail holds delivery metadata and an encrypted RFC 5322 message.
-// Times in mail tables use nanoseconds, including retry schedules.
+// OutgoingMail is one queued message and its delivery state. Times in mail
+// tables are nanoseconds, retry schedules included.
+//
+// An invite row holds no body and no token in any form: ClaimMail rotates
+// the invite's token and fills Note, Role and Expires so the worker can
+// render the message, with the fresh link, in memory. Alert rows hold their
+// rendered digest, which carries no secret.
 type OutgoingMail struct {
 	ID, To, Kind, InviteID string
+	Inviter                string // invite mail: who invited, as rendered at creation
 	Body                   []byte
 	Status                 string
 	Attempts               int
 	Error                  string
 	CreatedAt, UpdatedAt   time.Time
+
+	// Filled by ClaimMail for invite rows only.
+	Note, Role string
+	Expires    time.Time
 }
 
 func scanMail(r scanner) (*OutgoingMail, error) {
 	var m OutgoingMail
 	var created, updated int64
-	err := r.Scan(&m.ID, &m.To, &m.Kind, &m.InviteID, &m.Body, &m.Status, &m.Attempts, &m.Error, &created, &updated)
+	err := r.Scan(&m.ID, &m.To, &m.Kind, &m.InviteID, &m.Inviter, &m.Body, &m.Status, &m.Attempts, &m.Error, &created, &updated)
 	if err != nil {
 		return nil, notFound(err)
 	}
@@ -48,18 +59,22 @@ func scanMail(r scanner) (*OutgoingMail, error) {
 	return &m, nil
 }
 
-const mailCols = `id,to_addr,kind,coalesce(invite_id,''),body,status,attempts,error,created_at,updated_at`
+const mailCols = `id,to_addr,kind,coalesce(invite_id,''),inviter,body,status,attempts,error,created_at,updated_at`
 
 func insertMail(ctx context.Context, tx *sql.Tx, m *OutgoingMail, at time.Time) error {
 	if m.ID == "" {
 		m.ID = ids.ID()
+	}
+	if m.Body == nil {
+		m.Body = []byte{}
 	}
 	m.CreatedAt, m.UpdatedAt, m.Status = at, at, MailQueued
 	var invite any
 	if m.InviteID != "" {
 		invite = m.InviteID
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO mail_out(id,to_addr,kind,invite_id,body,status,next_at,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?)`, m.ID, m.To, m.Kind, invite, m.Body, at.UnixNano(), at.UnixNano(), at.UnixNano())
+	_, err := tx.ExecContext(ctx, `INSERT INTO mail_out(id,to_addr,kind,invite_id,inviter,body,status,next_at,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?,?)`,
+		m.ID, m.To, m.Kind, invite, m.Inviter, m.Body, at.UnixNano(), at.UnixNano(), at.UnixNano())
 	return err
 }
 
@@ -94,14 +109,16 @@ func chargeInviteMail(ctx context.Context, tx *sql.Tx, actor string, at time.Tim
 	return err
 }
 
-// CreateMailedInvite stores the hash and encrypted email in one transaction.
-// A full queue, bounce, or throttle leaves no orphan invite.
+// CreateMailedInvite stores an emailed invite and its queue row in one
+// transaction. hash is the hash of a secret nobody holds: the invite has no
+// working link until the worker mints one at send time. A full queue, a
+// bounce, or the throttle leaves no orphan invite.
 func (s *Store) CreateMailedInvite(ctx context.Context, o *OneTime, hash, actor string, m *OutgoingMail, at time.Time) error {
 	if o.ID == "" {
 		o.ID = ids.ID()
 	}
 	o.CreatedAt = at.UTC().Truncate(time.Second)
-	m.InviteID = o.ID
+	m.InviteID, m.Kind, m.Body = o.ID, "invite", nil
 	return s.Tx(ctx, func(tx *sql.Tx) error {
 		if err := mailAdmission(ctx, tx, m.To); err != nil {
 			return err
@@ -124,7 +141,8 @@ func (s *Store) MailByInvite(ctx context.Context, id string) (*OutgoingMail, err
 	return scanMail(s.DB.QueryRowContext(ctx, `SELECT `+mailCols+` FROM mail_out WHERE invite_id=?`, id))
 }
 
-// ResendInviteMail reuses the original message and never rotates the link.
+// ResendInviteMail queues the invite's email again. The worker mints a new
+// token when it sends, so the previous email's link stops working.
 func (s *Store) ResendInviteMail(ctx context.Context, id, actor string, at time.Time) error {
 	return s.Tx(ctx, func(tx *sql.Tx) error {
 		m, err := scanMail(tx.QueryRowContext(ctx, `SELECT `+mailCols+` FROM mail_out WHERE invite_id=?`, id))
@@ -138,7 +156,7 @@ func (s *Store) ResendInviteMail(ctx context.Context, id, actor string, at time.
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM onetime WHERE id=? AND purpose='invite' AND used_at IS NULL AND expires_at>?`, id, at.Unix()).Scan(&active); err != nil {
 			return err
 		}
-		if active == 0 || len(m.Body) == 0 {
+		if active == 0 {
 			return ErrLinkUsed
 		}
 		if err := mailAdmission(ctx, tx, m.To); err != nil {
@@ -157,8 +175,7 @@ func (s *Store) MailStatusesForInvites(ctx context.Context, ids []string) (map[s
 	for len(ids) > 0 {
 		chunk := ids[:min(len(ids), 500)]
 		ids = ids[len(chunk):]
-		// List views never read ciphertext bodies.
-		rows, err := s.DB.QueryContext(ctx, `SELECT id,to_addr,kind,coalesce(invite_id,''),X'',status,attempts,error,created_at,updated_at FROM mail_out WHERE invite_id IN (?`+strings.Repeat(",?", len(chunk)-1)+`)`, anySlice(chunk)...)
+		rows, err := s.DB.QueryContext(ctx, `SELECT `+mailCols+` FROM mail_out WHERE invite_id IN (?`+strings.Repeat(",?", len(chunk)-1)+`)`, anySlice(chunk)...)
 		if err != nil {
 			return nil, err
 		}
@@ -180,26 +197,35 @@ func (s *Store) MailStatusesForInvites(ctx context.Context, ids []string) (map[s
 }
 
 // RecoverMail returns interrupted attempts to queued. Shutdown calls this
-// after its worker stops; startup also calls it after an unclean exit.
+// after its worker stops; startup also calls it after an unclean exit. A
+// recovered invite gets a new token when it is claimed again.
 func (s *Store) RecoverMail(ctx context.Context) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE mail_out SET status='queued' WHERE status='sending'`)
 	return err
 }
 
-// ClaimMail increments attempts before network I/O. Alert retries obey the
-// same minimum interval as new digests. There is only one serving process.
-func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.Duration) (*OutgoingMail, error) {
+// ClaimMail claims the next due row and counts the attempt before any
+// network I/O. Alert retries obey the same minimum interval as new digests.
+// There is only one serving process.
+//
+// For an invite row, rotate returns the hash of a freshly minted token, and
+// the invite's hash is replaced in the same transaction: every attempt
+// (first send, retry, Send again, or a retry after a restart) gets a new
+// link, and only the latest email's link works. The token itself stays in
+// the caller's memory. An invite that is used, expired or gone is cancelled.
+func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.Duration, rotate func() string) (*OutgoingMail, error) {
 	var m *OutgoingMail
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
-		// Cancel mail for links redeemed, expired, or removed before sending.
-		if _, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='failed',error='invite used or expired',body=X'' WHERE kind='invite' AND status IN ('queued','sending') AND invite_id IN (SELECT id FROM onetime WHERE used_at IS NOT NULL OR expires_at<=?)`, at.Unix()); err != nil {
+		// Cancel mail for links redeemed or expired before sending.
+		if _, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='failed',error='invite used or expired' WHERE kind='invite' AND status IN ('queued','sending') AND invite_id IN (SELECT id FROM onetime WHERE used_at IS NOT NULL OR expires_at<=?)`, at.Unix()); err != nil {
 			return err
 		}
 		m, err = scanMail(tx.QueryRowContext(ctx, `SELECT `+mailCols+` FROM mail_out WHERE status='queued' AND next_at<=? AND (kind!='alert' OR to_addr IN (SELECT address FROM mail_alerts WHERE last_attempt<=?)) ORDER BY next_at,created_at LIMIT 1`, at.UnixNano(), at.Add(-alertInterval).UnixNano()))
 		if errors.Is(err, ErrNotFound) {
-			return nil
-		} // commit cancellations even with an empty queue
+			m = nil
+			return nil // commit cancellations even with an empty queue
+		}
 		if err != nil {
 			return err
 		}
@@ -208,9 +234,25 @@ func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.
 			return err
 		}
 		if bounced > 0 {
-			_, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='failed',error='address permanently refused mail',body=CASE WHEN kind='alert' THEN X'' ELSE body END WHERE id=?`, m.ID)
+			_, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='failed',error='address permanently refused mail',body=X'' WHERE id=?`, m.ID)
 			m = nil
 			return err
+		}
+		if m.Kind == "invite" {
+			var exp int64
+			if err = tx.QueryRowContext(ctx, `SELECT note,role,expires_at FROM onetime WHERE id=? AND purpose='invite'`, m.InviteID).Scan(&m.Note, &m.Role, &exp); err != nil {
+				return err
+			}
+			m.Expires = ts(exp)
+			res, err := tx.ExecContext(ctx, `UPDATE onetime SET hash=? WHERE id=? AND purpose='invite' AND used_at IS NULL AND expires_at>?`, rotate(), m.InviteID, at.Unix())
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				_, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='failed',error='invite used or expired' WHERE id=?`, m.ID)
+				m = nil
+				return err
+			}
 		}
 		m.Attempts++
 		if _, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='sending',attempts=?,updated_at=? WHERE id=?`, m.Attempts, at.UnixNano(), m.ID); err != nil {
@@ -221,10 +263,13 @@ func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.
 		}
 		return err
 	})
-	if err == nil && m == nil {
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
 		return nil, ErrNotFound
 	}
-	return m, err
+	return m, nil
 }
 
 // CompleteMail persists an outcome or the next retry time. Only a recipient
@@ -239,6 +284,17 @@ func (s *Store) CompleteMail(ctx context.Context, m *OutgoingMail, status, reaso
 		_, err := tx.ExecContext(ctx, `UPDATE mail_out SET status=?,error=?,next_at=?,updated_at=?,body=CASE WHEN kind='alert' AND ?!='queued' THEN X'' ELSE body END WHERE id=?`, status, reason, next.UnixNano(), at.UnixNano(), status, m.ID)
 		return err
 	})
+}
+
+// UnbounceMail removes addr from the bounce list, so invites and alerts may
+// be sent to it again. It reports whether the address was listed.
+func (s *Store) UnbounceMail(ctx context.Context, addr string) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM mail_bounced WHERE address=?`, addr)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // MailDelay bounds idle polling but wakes at retry/digest deadlines.
@@ -257,16 +313,11 @@ func (s *Store) MailDelay(ctx context.Context, at time.Time, interval time.Durat
 	return d, err
 }
 
-// CleanupMail clears expired invite secrets but keeps their send status.
-// Finished alert rows and old throttle events have bounded retention.
+// CleanupMail bounds retention of finished alert rows. Invite rows carry no
+// body, so their status stays until the invite is deleted.
 func (s *Store) CleanupMail(ctx context.Context, at time.Time) error {
-	return s.Tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE mail_out SET body=X'' WHERE invite_id IN (SELECT id FROM onetime WHERE used_at IS NOT NULL OR expires_at<=?) AND length(body)>0`, at.Unix()); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM mail_out WHERE kind='alert' AND status IN ('sent','failed') AND updated_at<?`, at.Add(-7*24*time.Hour).UnixNano())
-		return err
-	})
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM mail_out WHERE kind='alert' AND status IN ('sent','failed') AND updated_at<?`, at.Add(-7*24*time.Hour).UnixNano())
+	return err
 }
 
 // InitMailAlerts starts new recipients at the current report high-water mark,
@@ -318,8 +369,12 @@ func (s *Store) InitMailAlerts(ctx context.Context, addresses []string, interval
 // QueueMailAlert snapshots up to 200 new reports, in insertion order. The
 // cursor advances atomically with enqueue, so ties in created_at cannot lose
 // reports. Remaining reports enter the next digest rather than being dropped.
-func (s *Store) QueueMailAlert(ctx context.Context, addr string, interval time.Duration, at time.Time, render func([]Report) (*OutgoingMail, error)) error {
-	return s.Tx(ctx, func(tx *sql.Tx) error {
+//
+// held is ErrMailBounced or ErrMailFull when a due digest was held back for
+// that reason (the deadline moves on; nothing is lost), and nil otherwise.
+func (s *Store) QueueMailAlert(ctx context.Context, addr string, interval time.Duration, at time.Time, render func([]Report) (*OutgoingMail, error)) (held error, err error) {
+	err = s.Tx(ctx, func(tx *sql.Tx) error {
+		held = nil
 		var cursor, next, last int64
 		if err := tx.QueryRowContext(ctx, `SELECT cursor,next_at,last_attempt FROM mail_alerts WHERE address=?`, addr).Scan(&cursor, &next, &last); err != nil {
 			return err
@@ -332,12 +387,21 @@ func (s *Store) QueueMailAlert(ctx context.Context, addr string, interval time.D
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mail_out WHERE kind='alert' AND to_addr=? AND status IN ('queued','sending')`, addr).Scan(&pending); err != nil {
 			return err
 		}
-		if pending > 0 || (last > 0 && at.Sub(time.Unix(0, last)) < interval) {
+		if pending > 0 {
 			_, err := tx.ExecContext(ctx, `UPDATE mail_alerts SET next_at=? WHERE address=?`, deferNext, addr)
+			return err
+		}
+		// The last attempt is stamped when the worker claims the digest,
+		// a moment after it was enqueued. Wait for exactly that interval to
+		// end, not a whole new one from now, or a steady report stream would
+		// get one digest every two intervals.
+		if last > 0 && at.Sub(time.Unix(0, last)) < interval {
+			_, err := tx.ExecContext(ctx, `UPDATE mail_alerts SET next_at=? WHERE address=?`, time.Unix(0, last).Add(interval).UnixNano(), addr)
 			return err
 		}
 		if err := mailAdmission(ctx, tx, addr); err != nil {
 			if errors.Is(err, ErrMailBounced) || errors.Is(err, ErrMailFull) {
+				held = err
 				_, err = tx.ExecContext(ctx, `UPDATE mail_alerts SET next_at=? WHERE address=?`, deferNext, addr)
 			}
 			return err
@@ -374,4 +438,8 @@ func (s *Store) QueueMailAlert(ctx context.Context, addr string, interval time.D
 		_, err = tx.ExecContext(ctx, `UPDATE mail_alerts SET cursor=?,next_at=? WHERE address=?`, cursor, deferNext, addr)
 		return err
 	})
+	if err != nil {
+		held = nil
+	}
+	return held, err
 }
