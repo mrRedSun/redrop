@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/ids"
+	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
 )
 
@@ -328,6 +329,94 @@ func TestRetriesAndRestartsRotateToken(t *testing.T) {
 	sent := r.messages()
 	if inviteToken(t, sent[len(sent)-1]) != minted[len(minted)-1] {
 		t.Fatal("the accepted email does not carry the working token")
+	}
+}
+
+// m-E: a redemption that has already looked the old token up, and then spends
+// its password-hashing time, must not consume the invite when a Send again
+// claim rotates the hash in between. Redeem matches the hash, not just the ID.
+func TestRedeemAfterRotationIsRefused(t *testing.T) {
+	r := &recorder{}
+	q, db := testQueue(t, r)
+	ctx := context.Background()
+	at := time.Now()
+	o := queuedInvite(t, db, "offline", at, time.Hour)
+	m, s1 := claim(t, q, at.Add(time.Second))
+	if err := q.deliver(ctx, m, s1); err != nil {
+		t.Fatal(err)
+	}
+	// The holder of the first email starts redeeming: the lookup succeeds.
+	looked, err := db.OneTimeByHash(ctx, store.PurposeInvite, ids.Hash(s1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph, err := security.HashPassword("probe-password-long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Meanwhile the admin's Send again is claimed: the hash rotates, s1 dies.
+	if err := db.ResendInviteMail(ctx, o.ID, "offline", at.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	m, s2, err := q.claim(ctx, at.Add(3*time.Second))
+	if err != nil || m == nil {
+		t.Fatalf("resend claim: %v", err)
+	}
+	if err := q.deliver(ctx, m, s2); err != nil {
+		t.Fatal(err)
+	}
+	if redeemable(t, db, s1) || !redeemable(t, db, s2) {
+		t.Fatal("rotation did not replace the link")
+	}
+	// The stale lookup must be refused instead of consuming the invite.
+	if _, err := db.RedeemAccountLink(ctx, looked, ids.Hash(s1), "oldlinkholder", "oldlinkholder", ph, 1<<30, "", "", ""); !errors.Is(err, store.ErrLinkUsed) {
+		t.Fatalf("redeem with the looked-up old link after rotation: %v", err)
+	}
+	if !redeemable(t, db, s2) {
+		t.Fatal("the refused redemption consumed the invite")
+	}
+}
+
+// m-F: a crash during the last allowed attempt, before the outcome is saved,
+// must not rotate the hash when the row is recovered: the email that did go
+// out keeps its working link, and the row says to use Send again.
+func TestCrashOnLastAttemptKeepsDeliveredLink(t *testing.T) {
+	r := &recorder{err: func(n int) error { return &SMTPError{Stage: StageRecipient, Code: 451} }}
+	cfg := QueueConfig{MaxAttempts: 4, Backoff: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}}
+	q, db := testQueueWith(t, r, cfg)
+	ctx := context.Background()
+	at := time.Now()
+	o := queuedInvite(t, db, "offline", at, time.Hour)
+	for range 3 {
+		m, s := claim(t, q, at.Add(time.Minute))
+		if err := q.deliver(ctx, m, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Attempt 4: the relay delivers, then the process dies before the
+	// outcome is written and recovery re-queues the row.
+	r.err = nil
+	_, s4 := claim(t, q, at.Add(time.Minute))
+	if !redeemable(t, db, s4) {
+		t.Fatal("the delivered email's link is not the working link")
+	}
+	before := len(r.messages())
+	if err := db.RecoverMail(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The next claim fails the row without rotating the hash.
+	if _, _, err := q.claim(ctx, at.Add(2*time.Minute)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the recovered row was claimed: %v", err)
+	}
+	row := mailRow(t, db, o.ID)
+	if row.Status != store.MailFailed || !strings.Contains(row.Error, "Send again") || row.Attempts != 4 {
+		t.Fatalf("recovered-at-limit row: %s %q attempts=%d", row.Status, row.Error, row.Attempts)
+	}
+	if !redeemable(t, db, s4) {
+		t.Fatal("recovery killed the delivered email's link")
+	}
+	if n := len(r.messages()) - before; n != 0 {
+		t.Fatalf("%d emails sent after the crash", n)
 	}
 }
 

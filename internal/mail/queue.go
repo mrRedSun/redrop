@@ -118,10 +118,12 @@ func (q *Queue) Close() {
 }
 
 // claim claims the next due row; for an invite, the minted token is returned
-// with it and exists nowhere else.
+// with it and exists nowhere else. Rows that already reached the retry limit
+// are failed by the store without rotating, so an email that went out on the
+// last attempt keeps a working link.
 func (q *Queue) claim(ctx context.Context, at time.Time) (*store.OutgoingMail, string, error) {
 	var secret string
-	m, err := q.db.ClaimMail(ctx, at, q.interval, func() string {
+	m, err := q.db.ClaimMail(ctx, at, q.interval, q.cfg.MaxAttempts, func() string {
 		secret = ids.Secret()
 		return ids.Hash(secret)
 	})
@@ -205,6 +207,8 @@ func (q *Queue) message(m *store.OutgoingMail, secret string) ([]byte, error) {
 // deliver makes one attempt, leaving any retry scheduled in SQLite rather
 // than holding the worker asleep while other messages wait.
 func (q *Queue) deliver(ctx context.Context, m *store.OutgoingMail, secret string) error {
+	// The store fails rows that already reached the limit before rotating;
+	// this guards a row claimed with a lower limit than this queue's.
 	if m.Attempts > q.cfg.MaxAttempts {
 		return q.complete(ctx, m, store.MailFailed, "retry limit reached", time.Time{}, false, time.Now())
 	}

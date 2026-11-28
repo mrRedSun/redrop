@@ -454,14 +454,20 @@ mail state. Stored invite emails have no body and no token, so no backup holds
 a working invite link; digests hold no secret. Send status survives restarts.
 Delivery is at least once: a process crash after SMTP accepts a message but
 before SQLite records success sends the email again on restart, with a new
-link, and the first email's link stops working. A recipient who is already
-completing signup when an administrator clicks **Send again** can still
-finish; the old link is refused after that.
+link, and the first email's link stops working. If that crash hits the last
+of the four attempts, the email is not sent again: the invite shows as failed
+("interrupted at the retry limit; use Send again"), and the email that went out
+keeps a working link. After **Send again**, the old link is refused, including
+for a recipient who was submitting the signup form at that moment.
 
 Rollback the image through the existing Docker Compose workflow. Older binaries
 ignore the added column and mail tables, so manual links and links in emails
-already sent keep working, but queued emails stop sending. Preserve the
-database for a later upgrade; do not reset volumes or downgrade the schema.
+already sent keep working, but queued emails stop sending. An invite whose
+email was still queued has no working link at all, because its link is only
+minted when the email is sent. The older binary still lists it as open until
+it expires. Revoke invites whose email was still queued and create link-only
+invites for them, or re-upgrade to send them. Preserve the database for a later
+upgrade; do not reset volumes or downgrade the schema.
 
 ## Abuse handling
 

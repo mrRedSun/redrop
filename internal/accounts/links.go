@@ -77,7 +77,7 @@ func (s *Service) Setup(ctx context.Context, network, token, username, password 
 	if err != nil {
 		return nil, err
 	}
-	sess, err := s.redeemWithPassword(ctx, o, username, password)
+	sess, err := s.redeemWithPassword(ctx, o, ids.Hash(token), username, password)
 	if err != nil {
 		return nil, err
 	}
@@ -103,16 +103,18 @@ func (s *Service) InviteInfo(ctx context.Context, network, token string) (Invite
 	return InviteInfo{Valid: true, Role: o.Role, ExpiresAt: o.ExpiresAt}, nil
 }
 
-// AcceptInvite creates a password account from an invite.
+// AcceptInvite creates a password account from an invite. The link's hash is
+// passed to the redeem, so an invite whose email was sent again (rotating its
+// hash) between lookup and redeem is refused as used.
 func (s *Service) AcceptInvite(ctx context.Context, network, token, username, password string) (*Session, error) {
 	o, err := s.lookupLink(ctx, network, store.PurposeInvite, token)
 	if err != nil {
 		return nil, err
 	}
-	return s.redeemWithPassword(ctx, o, username, password)
+	return s.redeemWithPassword(ctx, o, ids.Hash(token), username, password)
 }
 
-func (s *Service) redeemWithPassword(ctx context.Context, o *store.OneTime, username, password string) (*Session, error) {
+func (s *Service) redeemWithPassword(ctx context.Context, o *store.OneTime, linkHash, username, password string) (*Session, error) {
 	username, err := normalizeUsername(username)
 	if err != nil {
 		return nil, err
@@ -123,11 +125,11 @@ func (s *Service) redeemWithPassword(ctx context.Context, o *store.OneTime, user
 	if taken, _ := s.db.UsernameTaken(ctx, username); taken {
 		return nil, apperr.Conflict("that username is taken")
 	}
-	hash, err := security.HashPassword(password)
+	passwordHash, err := security.HashPassword(password)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
-	u, err := s.db.RedeemAccountLink(ctx, o, username, username, hash, s.cfg.DefaultQuotaBytes, "", "", "")
+	u, err := s.db.RedeemAccountLink(ctx, o, linkHash, username, username, passwordHash, s.cfg.DefaultQuotaBytes, "", "", "")
 	if err != nil {
 		return nil, mapStore(err)
 	}
@@ -169,7 +171,7 @@ func (s *Service) ResetPassword(ctx context.Context, network, token, password st
 	if err != nil {
 		return apperr.Internal(err)
 	}
-	return mapStore(s.db.RedeemReset(ctx, o, hash))
+	return mapStore(s.db.RedeemReset(ctx, o, ids.Hash(token), hash))
 }
 
 func truncate(s string, n int) string {

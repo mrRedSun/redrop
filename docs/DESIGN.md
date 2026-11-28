@@ -2412,10 +2412,11 @@ in. Emailed invites keep that property:
   restart) gets its own link, and only the latest email's link works. Send
   again therefore also revokes the previous email's link, which is what an
   administrator wants when the reason is "wrong inbox" or "it leaked".
-* Redemption checks the token when the request arrives and then consumes
-  the invite by its ID. A signup request that already passed that check when
-  Send again rotates the token still completes; one that arrives later with
-  the old link is refused as used or expired.
+* Redemption looks the token up when the request arrives and consumes the
+  invite only if its hash still matches that token. A signup request that
+  passed the lookup just before Send again rotated the token is refused as
+  used or expired (410) when it commits, so a revoked link cannot finish a
+  signup it started. The new email's link still works.
 * An administrator who wants to share a link by hand creates a link-only
   invite, which works exactly as before this feature.
 
@@ -2456,7 +2457,10 @@ the database commit without repeating SMTP. After an unclean exit, interrupted
 rows are recovered, and a recovered invite gets a fresh token when it is sent.
 A crash between SMTP acceptance and the commit sends the email again on
 restart; there is no exactly-once guarantee. The first email's link is dead by
-then, which is safer than two live copies.
+then, which is safer than two live copies. The exception is the last allowed
+attempt: a recovered row that already used every attempt is failed ("interrupted
+at the retry limit; use Send again") before any rotation, so an email that did
+go out on that attempt keeps a working link.
 
 ### Report digests
 

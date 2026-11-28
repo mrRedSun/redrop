@@ -86,7 +86,7 @@ func TestConcurrentMailAdmissionAndClaim(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, mintTestHash)
+			m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, 4, mintTestHash)
 			if err != nil {
 				t.Errorf("claim: %v", err)
 				return
@@ -106,13 +106,13 @@ func TestConcurrentMailAdmissionAndClaim(t *testing.T) {
 	if len(seen) != 10 {
 		t.Fatal("missing claim")
 	}
-	if _, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, mintTestHash); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, 4, mintTestHash); !errors.Is(err, ErrNotFound) {
 		t.Fatal("claimed sending row")
 	}
 	if err := s.RecoverMail(ctx); err != nil {
 		t.Fatal(err)
 	}
-	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, mintTestHash)
+	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, 4, mintTestHash)
 	if err != nil || m.Attempts != 2 {
 		t.Fatalf("recovery lost attempt count: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestClaimRotatesInviteHash(t *testing.T) {
 		t.Fatalf("invite row: %+v %v", row, err)
 	}
 	secret := ids.Secret()
-	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, func() string { return ids.Hash(secret) })
+	m, err := s.ClaimMail(ctx, at.Add(time.Second), time.Minute, 4, func() string { return ids.Hash(secret) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestExpiredInviteMailIsCancelled(t *testing.T) {
 	if err := s.CleanupMail(ctx, at.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimMail(ctx, at.Add(2*time.Minute), time.Minute, func() string { t.Fatal("rotated an expired invite"); return "" }); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ClaimMail(ctx, at.Add(2*time.Minute), time.Minute, 4, func() string { t.Fatal("rotated an expired invite"); return "" }); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired invite sent: %v", err)
 	}
 	row, err := s.MailByInvite(ctx, o.ID)

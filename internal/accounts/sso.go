@@ -285,12 +285,13 @@ func (s *Service) CompleteSSO(ctx context.Context, providerID, signedState strin
 		if lookupErr == nil {
 			return nil, failPath, apperr.Conflict("that %s account already has a redrop user; sign in instead", label)
 		}
-		o, err := s.db.OneTimeByHash(ctx, store.PurposeInvite, ids.Hash(st.Invite))
+		inviteHash := ids.Hash(st.Invite)
+		o, err := s.db.OneTimeByHash(ctx, store.PurposeInvite, inviteHash)
 		if err != nil {
 			return nil, failPath, apperr.Gone("this invite link was already used or has expired")
 		}
 		username := s.uniqueUsername(ctx, c)
-		u, err := s.db.RedeemAccountLink(ctx, o, username, firstNonEmpty(c.Name, username), "", s.cfg.DefaultQuotaBytes, st.Provider, idt.Subject, c.Email)
+		u, err := s.db.RedeemAccountLink(ctx, o, inviteHash, username, firstNonEmpty(c.Name, username), "", s.cfg.DefaultQuotaBytes, st.Provider, idt.Subject, c.Email)
 		if err != nil {
 			return nil, failPath, mapStore(err)
 		}

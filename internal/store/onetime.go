@@ -102,9 +102,12 @@ func (s *Store) DeleteOneTime(ctx context.Context, purpose, id string) error {
 	return nil
 }
 
-// consume atomically marks the link used inside tx.
-func consume(ctx context.Context, tx *sql.Tx, id, userID string) error {
-	res, err := tx.ExecContext(ctx, `UPDATE onetime SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`, now(), userID, id, now())
+// consume atomically marks the link used inside tx. It matches the hash that
+// was looked up, not just the ID: an emailed invite's hash is rotated when its
+// email is sent again, so a redemption that looked the old token up before
+// that rotation must be refused here (ErrLinkUsed), not consume the invite.
+func consume(ctx context.Context, tx *sql.Tx, id, hash, userID string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE onetime SET used_at = ?, used_by = ? WHERE id = ? AND hash = ? AND used_at IS NULL AND expires_at > ?`, now(), userID, id, hash, now())
 	if err != nil {
 		return err
 	}
@@ -115,8 +118,10 @@ func consume(ctx context.Context, tx *sql.Tx, id, userID string) error {
 }
 
 // RedeemAccountLink consumes an invite/setup link and creates the user,
-// optionally linking an OIDC identity, in one transaction.
-func (s *Store) RedeemAccountLink(ctx context.Context, o *OneTime, username, displayName, passwordHash string, defaultQuota int64, provider, subject, email string) (*User, error) {
+// optionally linking an OIDC identity, in one transaction. hash is the link's
+// hash that was looked up: consume matches it, so a rotated invite link is
+// refused here instead of being redeemed by a stale lookup.
+func (s *Store) RedeemAccountLink(ctx context.Context, o *OneTime, hash, username, displayName, passwordHash string, defaultQuota int64, provider, subject, email string) (*User, error) {
 	var u *User
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		quota := o.QuotaBytes
@@ -136,15 +141,16 @@ func (s *Store) RedeemAccountLink(ctx context.Context, o *OneTime, username, dis
 				return err
 			}
 		}
-		return consume(ctx, tx, o.ID, u.ID)
+		return consume(ctx, tx, o.ID, hash, u.ID)
 	})
 	return u, err
 }
 
-// RedeemReset consumes a reset link and sets the new password.
-func (s *Store) RedeemReset(ctx context.Context, o *OneTime, passwordHash string) error {
+// RedeemReset consumes a reset link and sets the new password. hash is the
+// link's hash that was looked up; consume matches it.
+func (s *Store) RedeemReset(ctx context.Context, o *OneTime, hash, passwordHash string) error {
 	return s.Tx(ctx, func(tx *sql.Tx) error {
-		if err := consume(ctx, tx, o.ID, o.UserID); err != nil {
+		if err := consume(ctx, tx, o.ID, hash, o.UserID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, o.UserID); err != nil {

@@ -208,12 +208,18 @@ func (s *Store) RecoverMail(ctx context.Context) error {
 // network I/O. Alert retries obey the same minimum interval as new digests.
 // There is only one serving process.
 //
+// maxAttempts is the send limit from the queue configuration. A queued row
+// that already reached it is failed here, before an invite's hash is rotated:
+// an email that did go out on its last attempt (a crash before the outcome
+// was saved, then recovery) keeps a working link, and the row says to use
+// Send again.
+//
 // For an invite row, rotate returns the hash of a freshly minted token, and
 // the invite's hash is replaced in the same transaction: every attempt
 // (first send, retry, Send again, or a retry after a restart) gets a new
 // link, and only the latest email's link works. The token itself stays in
 // the caller's memory. An invite that is used, expired or gone is cancelled.
-func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.Duration, rotate func() string) (*OutgoingMail, error) {
+func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.Duration, maxAttempts int, rotate func() string) (*OutgoingMail, error) {
 	var m *OutgoingMail
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
@@ -227,6 +233,13 @@ func (s *Store) ClaimMail(ctx context.Context, at time.Time, alertInterval time.
 			return nil // commit cancellations even with an empty queue
 		}
 		if err != nil {
+			return err
+		}
+		// Interrupted at the retry limit: fail the row without rotating the
+		// invite's hash, so a link that was already emailed still works.
+		if m.Attempts >= maxAttempts {
+			_, err = tx.ExecContext(ctx, `UPDATE mail_out SET status='failed',error='interrupted at the retry limit; use Send again',updated_at=? WHERE id=?`, at.UnixNano(), m.ID)
+			m = nil
 			return err
 		}
 		var bounced int
