@@ -9,6 +9,7 @@ import {
   AdminUpdateUserRequest,
   CreateInviteRequest,
   CreatedInvite,
+  Invite,
   InviteList,
   Report,
   ReportList,
@@ -39,6 +40,9 @@ export const createInvite = (req: typeof CreateInviteRequest.Type) =>
   RedropApi.use((api) => api.call({ method: 'POST', path: ['admin', 'invites'], body: json(CreateInviteRequest, req), response: CreatedInvite }))
 
 export const deleteInvite = (id: string) => RedropApi.use((api) => api.call({ method: 'DELETE', path: ['admin', 'invites', id] }))
+
+/** Queues the invite's email again: the same one-time link, as first rendered. */
+export const resendInvite = (id: string) => RedropApi.use((api) => api.call({ method: 'POST', path: ['admin', 'invites', id, 'resend'], response: Invite }))
 
 export const artifacts = (q: string, status: string) =>
   RedropApi.use((api) => api.call({ method: 'GET', path: ['admin', 'artifacts'], query: { q, status }, response: AdminArtifactList })).pipe(

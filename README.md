@@ -359,6 +359,116 @@ All settings are `REDROP_*` environment variables, loaded in
 | `REDROP_TUNNEL_BYTES_PER_HOUR` | `2GB`: traffic per user, over all their tunnels, both ways, per hour |
 | `REDROP_TUNNEL_RESPONSE_TIMEOUT`, `REDROP_TUNNEL_IDLE_TIMEOUT` | `90s`, `100s`: how long a request waits for a free slot, and then for the app to start answering; a request or WebSocket that moves no bytes is closed after the idle time |
 
+## Email
+
+Mail is off unless `REDROP_SMTP_ADDR` is set. Manual invite links and the
+webhook keep working without it. With mail configured, **Administration →
+Invites** has an optional email field, delivery status, and **Send again**.
+The recipient sees the invite's note, inviter, and expiry.
+
+An emailed invite's link is only in the email. The server mints it when it
+sends, and stores it only as a hash, like every other one-time link, so a
+backup of the data directory holds no working invite. The dashboard and
+`redrop-server invite --email` therefore show no link for an emailed invite.
+Every send replaces the link: after **Send again**, or an automatic retry, only
+the newest email works. To share a link by hand, leave the email field empty.
+
+| Variable | Default / meaning |
+|---|---|
+| `REDROP_SMTP_ADDR` | Unset, mail off. Relay `host:port`, for example `smtp.example.com:587` |
+| `REDROP_SMTP_TLS` | `starttls`, required and never downgraded. `implicit` uses TLS from connection start, typically on port 465 |
+| `REDROP_SMTP_USERNAME` | Optional relay login; needs a password file |
+| `REDROP_SMTP_PASSWORD_FILE` | Path to a non-empty single-line password file. No direct password environment variable |
+| `REDROP_SMTP_CA_FILE` | Optional PEM file containing a private CA. Extends system trust; hostname and certificate verification remain enabled |
+| `REDROP_MAIL_FROM` | Required with SMTP. Bare address or display name, such as `Redrop <share@example.com>` |
+| `REDROP_NOTIFY_EMAIL` | Comma-separated report-alert recipients, up to 16 distinct bare addresses. Ignored while mail is off |
+| `REDROP_NOTIFY_EMAIL_INTERVAL` | `10m`, between `1s` and `24h`. Minimum interval per alert recipient, including delivery retries |
+| `REDROP_SMTP_INSECURE_ALLOW_PLAIN` | `false`. Allows `REDROP_SMTP_TLS=plain` only for disposable test relays; never use in production |
+
+Mount a private CA and password file read-only in your Docker Compose service.
+For example, add these settings and mounts to the existing service:
+
+```yaml
+environment:
+  REDROP_SMTP_ADDR: smtp.example.com:587
+  REDROP_SMTP_TLS: starttls
+  REDROP_SMTP_CA_FILE: /run/secrets/smtp-ca.pem
+  REDROP_SMTP_USERNAME: redrop
+  REDROP_SMTP_PASSWORD_FILE: /run/secrets/smtp-password
+  REDROP_MAIL_FROM: 'Redrop <share@example.com>'
+  REDROP_NOTIFY_EMAIL: ops@example.com
+volumes:
+  - ./smtp-ca.pem:/run/secrets/smtp-ca.pem:ro
+  - ./smtp-password:/run/secrets/smtp-password:ro
+```
+
+Make the password readable only by the service identity. Do not commit it or
+bake it into an image. Restart with `docker compose up -d`, then test the relay
+without touching the application database:
+
+```sh
+docker compose exec redrop redrop-server mail-test --to ops@example.com
+```
+
+The command reports SMTP acceptance or a safe stage/status failure. Acceptance
+is not proof of final inbox delivery. The operator owns relay reachability,
+certificate renewal, sender-domain authentication, and relay-side delivery logs.
+Use `docker compose logs redrop` for queue outcomes and the Invites page for
+recipient-specific failures. SMTP replies, credentials, recipient addresses,
+and one-time links do not appear in redrop's delivery logs.
+
+`redrop-server invite --email recipient@example.com --note 'Welcome'` works
+offline, queues the email, and prints the invite ID. The serving process
+sends it on its next queue check, within one minute. It does not start another
+worker against the live database. Admin sends are limited to 10 per hour per
+administrator and 60 per hour globally, across restarts and resends. The queue
+accepts at most 128 pending messages; refusals leave no orphan invite.
+
+Report alerts batch new visitor reports and upload flags, listing report IDs,
+categories, and times with a link to the moderation queue. They never contain
+artifact content, reporter text, contact information, or reported URLs. The
+first digest waits one interval; reports predating the first configuration of
+an address are not mailed. Large backlogs drain in batches of 200 without
+skipping reports. The existing webhook still fires immediately.
+
+Delivery uses a 30-second timeout and at most four attempts. Transient failures
+retry after 1, 5 and 30 minutes, but never past the invite's expiry. Alert
+retries wait at least the configured interval. Permanent SMTP failures are not
+retried automatically.
+
+A permanent mailbox refusal (a 5xx answer to RCPT with an enhanced status of
+`5.1.x` or `5.2.x`, such as `550 5.1.1`) also suppresses later sends to that
+address. A bare `550` without an enhanced status, and authentication, sender
+or relay-policy failures, fail the message without suppressing the address.
+Later asynchronous delivery-status notifications are not processed. While an
+address is suppressed, invites to it are refused and its report digests are
+held; the log says so once, naming the recipient's position in
+`REDROP_NOTIFY_EMAIL`. Once the mailbox or relay is fixed, clear it:
+
+```sh
+docker compose exec redrop redrop-server mail-unbounce person@example.com
+```
+
+Back up the full data directory before upgrading, as usual. Migration 10 adds
+mail state. Stored invite emails have no body and no token, so no backup holds
+a working invite link; digests hold no secret. Send status survives restarts.
+Delivery is at least once: a process crash after SMTP accepts a message but
+before SQLite records success sends the email again on restart, with a new
+link, and the first email's link stops working. If that crash hits the last
+of the four attempts, the email is not sent again: the invite shows as failed
+("interrupted at the retry limit; use Send again"), and the email that went out
+keeps a working link. After **Send again**, the old link is refused, including
+for a recipient who was submitting the signup form at that moment.
+
+Rollback the image through the existing Docker Compose workflow. Older binaries
+ignore the added column and mail tables, so manual links and links in emails
+already sent keep working, but queued emails stop sending. An invite whose
+email was still queued has no working link at all, because its link is only
+minted when the email is sent. The older binary still lists it as open until
+it expires. Revoke invites whose email was still queued and create link-only
+invites for them, or re-upgrade to send them. Preserve the database for a later
+upgrade; do not reset volumes or downgrade the schema.
+
 ## Abuse handling
 
 One phishing page can get the whole content domain flagged by Safe Browsing,

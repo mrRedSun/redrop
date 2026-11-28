@@ -103,7 +103,7 @@ const program = Effect.gen(function* () {
     check('admin stats decode', (yield* admin.stats).users >= 1)
     check('admin users decode', (yield* admin.users).length >= 1)
     const inv = yield* admin.createInvite({ note: 'contract-check', role: 'user', ttl: '1d' })
-    check('created invite URL is Redacted', Redacted.value(inv.url).includes('/invite/'))
+    check('created invite URL is Redacted', inv.url !== undefined && Redacted.value(inv.url).includes('/invite/'))
     check('invite list decodes', (yield* admin.invites).some((i) => i.id === inv.id))
     yield* admin.deleteInvite(inv.id)
     // Abuse reports (DESIGN.md "Abuse handling"): file one as the report page

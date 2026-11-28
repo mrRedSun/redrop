@@ -65,7 +65,7 @@ func addUser(t *testing.T, s *Service, username, password, role string) *store.U
 	if err := s.db.CreateOneTime(ctx, o, "hash-"+username); err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.db.RedeemAccountLink(ctx, o, username, username, hash, 1<<30, "", "", "")
+	u, err := s.db.RedeemAccountLink(ctx, o, "hash-"+username, username, username, hash, 1<<30, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

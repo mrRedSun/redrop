@@ -2353,6 +2353,162 @@ Rolling back the binary leaves tunnel artifacts in the database. An older
 server reads their kind as an unknown one and shows an empty file listing
 on the link; an older dashboard fails to decode them. Delete tunnels, or
 revoke them, before rolling back.
+## Email
+
+Issue #40 adds provider-neutral outbound mail for invite links and batched
+operator alerts. Mail is off when `REDROP_SMTP_ADDR` is unset. Invite links
+still work by copying them, and the existing report webhook is independent.
+There are no password-reset emails or email verification in this feature.
+
+### Transport and configuration
+
+`internal/mail.Mailer` accepts a message and a context. `SMTP` implements it
+using `net/smtp`; `Discard` does nothing. SMTP supports mandatory STARTTLS,
+implicit TLS, optional AUTH, and a private CA file extending system trust.
+Certificate and hostname checks never turn off. Plain SMTP requires the explicit
+`REDROP_SMTP_INSECURE_ALLOW_PLAIN=true` test setting. Credentials come from a
+password file. The [README](../README.md#email) lists all settings and the
+Docker Compose mounts and test command.
+
+Messages have plain-text and escaped HTML alternatives, base64 transfer
+encoding, a random Message-ID, Date, and `Auto-Submitted: auto-generated`.
+Every rendering gets a new Message-ID and Date, so a resent invite is a new
+message that mailbox providers do not drop as a duplicate. Templates contain
+no tracking. EHLO names the `REDROP_MAIL_FROM` domain, not `localhost`. AUTH
+is refused without TLS unless the relay is on a loopback address, so test-only
+plain mode can never send credentials across a network. Recipient addresses
+must name a domain; literals such as `a@[192.0.2.1]` are refused. The domain
+part is stored in lower case, so the bounce list and alert state match however
+an address was typed. An SMTP error retains only its protocol stage and
+numeric status. Remote text can echo a one-time link or credentials, so it is
+never retained or logged. Recipient addresses are absent from delivery logs
+too. `redrop-server mail-test --to ADDR` sends one test message without
+opening the application database and reports SMTP acceptance or stage/status.
+
+### Invites and durable delivery
+
+Administrators can add an optional email address to a new invite. The field
+appears only when `/auth/config` reports `mail: true`. The recipient sees the
+note, inviter, and expiry, and the invite's one-time link. The invite list
+shows recipient, queued/sending/sent/failed status, time, and safe failure
+reason. Send again is available only for unused, unexpired emailed invites;
+already queued or sending invites refuse duplicate resend requests.
+
+**No invite token is stored, in any form.** Before this feature every live
+credential (sessions, API tokens, invite, setup and reset links) was stored
+only as a hash, so a copy of the data directory gave a thief data but no way
+in. Emailed invites keep that property:
+
+* Creating an emailed invite stores the invite with the hash of a secret
+  nobody keeps, plus a queue row that holds the recipient and the inviter's
+  name, and no body. The create response and `redrop-server invite --email`
+  therefore carry **no link**: one shown there would stop working when the
+  email is sent. The dialog says the link is only in the email.
+* When the worker claims an invite row, it mints a new token and, in the
+  same transaction, replaces the invite's hash with the token's hash. It
+  renders the email in memory with that link, sends it, and drops it. The
+  token exists only in process memory and in the sent email.
+* Each attempt (first send, automatic retry, Send again, or a retry after a
+  restart) gets its own link, and only the latest email's link works. Send
+  again therefore also revokes the previous email's link, which is what an
+  administrator wants when the reason is "wrong inbox" or "it leaked".
+* Redemption looks the token up when the request arrives and consumes the
+  invite only if its hash still matches that token. A signup request that
+  passed the lookup just before Send again rotated the token is refused as
+  used or expired (410) when it commits, so a revoked link cannot finish a
+  signup it started. The new email's link still works.
+* An administrator who wants to share a link by hand creates a link-only
+  invite, which works exactly as before this feature.
+
+Issue #40 asks that "the link in the email is the same one-time link as
+today". This design reads that as the same kind of link: one-time, stored
+only as a hash, the same redemption flow. It cannot be the string the
+dashboard showed at creation, because that string would have to be stored
+for the worker to send it. The owner should confirm this reading.
+
+Creating an emailed invite atomically stores the invite, the queue row, and
+the throttle charge. Rejection leaves no invite behind. Sends and manual
+resends share persistent limits of 10 per administrator per hour and 60 globally.
+The offline CLI uses the same rules with one shared offline-administrator
+budget. `redrop-server invite --email ADDR` queues without starting a worker
+and prints the invite ID; the serving process discovers its rows within a
+minute.
+
+One background worker handles a maximum backlog of 128 messages. HTTP requests
+only commit queue state and wake that worker. Attempts have a 30-second
+timeout. Transient failures schedule at most three retries, after 1, 5 and
+30 minutes, without holding up other messages, so a relay restart or a short
+rate limit does not fail invites for good. An invite is not retried past its
+expiry: that attempt fails and says so. Permanent SMTP errors stop retries.
+
+Only a permanent mailbox refusal suppresses an address: a 5xx at RCPT with an
+RFC 3463 enhanced status of `5.1.x` (address) or `5.2.x` (mailbox). A bare
+`550` without an enhanced status fails the message but does not suppress the
+address, because relays also answer "relaying denied" and their own
+misconfiguration that way. Authentication, sender and policy refusals never
+suppress. Later asynchronous bounce messages are not processed. A suppressed
+address is refused for new invites and Send again (409), and its report
+digests are held, with one log line naming its position in
+`REDROP_NOTIFY_EMAIL`. `redrop-server mail-unbounce ADDR` clears it.
+
+Attempt counts, deadlines, and outcomes survive restart. Shutdown cancels an
+in-flight attempt and returns its row to queued. A failed outcome write retries
+the database commit without repeating SMTP. After an unclean exit, interrupted
+rows are recovered, and a recovered invite gets a fresh token when it is sent.
+A crash between SMTP acceptance and the commit sends the email again on
+restart; there is no exactly-once guarantee. The first email's link is dead by
+then, which is safer than two live copies. The exception is the last allowed
+attempt: a recovered row that already used every attempt is failed ("interrupted
+at the retry limit; use Send again") before any rotation, so an email that did
+go out on that attempt keeps a working link.
+
+### Report digests
+
+The existing report announcement hook wakes the email worker in addition to
+notifying the webhook. It does no SMTP or database work on the request path.
+`REDROP_NOTIFY_EMAIL` accepts up to 16 deduplicated addresses. Each receives at
+most one SMTP attempt per `REDROP_NOTIFY_EMAIL_INTERVAL`, including retries.
+The default is ten minutes. The first digest waits one interval, while the
+webhook remains immediate. Under a steady report stream a digest goes out
+every interval: the next one waits for the interval after the previous
+digest's attempt, not a whole interval from the moment it was due. A
+recipient whose digest is held (a suppressed address, a full queue) does not
+hold up the others.
+
+Digests contain report IDs, category, source, time, and the moderation-queue
+link. They exclude artifact content and links, reporter text and contacts,
+owner names, and file names. A persistent report insertion cursor advances in
+the same transaction as enqueue. Reports sharing a timestamp cannot be lost.
+Up to 200 reports fit in a digest; any remainder enters later digests. Existing
+historical reports are skipped when an address is first enabled. Removing an
+address cancels its pending digests on the next server start. Queued or retrying
+digests cannot multiply during a report flood.
+
+### Storage and rollback
+
+Migration 10 follows encryption migration 9. It adds `onetime.email`, the
+`mail_out` queue with a unique cascading invite reference, `mail_sends` for
+hourly throttle charges, `mail_bounced`, and `mail_alerts` for digest cursors and
+deadlines.
+
+Invite rows hold the recipient, the inviter's name and the send state, never a
+body or a token, so a copy of the database (with or without `secret.key`)
+yields no working invite link. Digest rows hold their rendered message, which
+carries report IDs, categories and times and no secret; a finished digest's
+body is cleared at once and its send metadata kept for seven days. An invite's
+row goes with the invite when it is revoked. Recipient addresses are stored
+in the clear.
+
+An older server ignores the mail tables and new invite column. Rolling back
+the image stops email delivery but keeps manual links working, and the link in
+an email already sent keeps working too: it is an ordinary hashed invite.
+Queued invite emails stay queued until the new binary returns. Preserve the
+whole data directory. This feature's tests cover the fake relay, token
+rotation, queue failure/restart paths, the HTTP boundary, and dashboard
+schemas and rendering. Real relay delivery, sender-domain authentication,
+certificate renewal, and production deployment remain operator
+responsibilities.
+
 ## Abuse handling
 
 The content domain serves arbitrary HTML from invited users. One phishing

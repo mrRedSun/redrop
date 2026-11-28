@@ -104,7 +104,8 @@ func identityDTO(i accounts.Identity) api.Identity {
 }
 
 func inviteDTO(o accounts.Invite) api.Invite {
-	return api.Invite{ID: o.ID, Note: o.Note, Role: o.Role, QuotaBytes: o.QuotaBytes, CreatedAt: o.CreatedAt, ExpiresAt: o.ExpiresAt, UsedAt: o.UsedAt, UsedBy: o.UsedBy}
+	return api.Invite{ID: o.ID, Note: o.Note, Role: o.Role, QuotaBytes: o.QuotaBytes, CreatedAt: o.CreatedAt, ExpiresAt: o.ExpiresAt, UsedAt: o.UsedAt, UsedBy: o.UsedBy,
+		Email: o.Email, EmailStatus: o.EmailStatus, EmailError: o.EmailError, EmailAt: o.EmailSentAt}
 }
 
 func providersDTO(ps []accounts.Provider) []api.AuthProvider {
@@ -138,7 +139,7 @@ func userPatchFromRequest(r api.AdminUpdateUserRequest) accounts.UserPatch {
 }
 
 func inviteFromRequest(r api.CreateInviteRequest) accounts.InviteRequest {
-	return accounts.InviteRequest{Note: r.Note, Role: r.Role, QuotaBytes: r.QuotaBytes, TTL: r.TTL}
+	return accounts.InviteRequest{Note: r.Note, Role: r.Role, QuotaBytes: r.QuotaBytes, TTL: r.TTL, Email: r.Email}
 }
 
 func reportDTO(r sharing.AdminReport) api.Report {

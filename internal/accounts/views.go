@@ -67,6 +67,16 @@ type Invite struct {
 	ExpiresAt  time.Time
 	UsedAt     *time.Time
 	UsedBy     string
+	// Email is where this invite's link is sent ("" = nowhere). It is the
+	// one a recipient gave or an admin typed, so it is unverified, but it
+	// goes only to admins (this view) and the mail queue.
+	Email string
+	// EmailStatus is the latest send state ("" when no email was ever
+	// queued): queued, sending, sent, failed. EmailError holds the failure
+	// reason then. EmailSentAt is the row's last change.
+	EmailStatus string
+	EmailError  string
+	EmailSentAt *time.Time
 }
 
 // CreatedInvite is a new invite; URL carries the one-time secret and is only
@@ -95,5 +105,5 @@ func tokenView(t *store.Token) Token {
 }
 
 func inviteView(o *store.OneTime) Invite {
-	return Invite{ID: o.ID, Note: o.Note, Role: o.Role, QuotaBytes: o.QuotaBytes, CreatedAt: o.CreatedAt, ExpiresAt: o.ExpiresAt, UsedAt: o.UsedAt, UsedBy: o.UsedByName}
+	return Invite{ID: o.ID, Note: o.Note, Role: o.Role, QuotaBytes: o.QuotaBytes, CreatedAt: o.CreatedAt, ExpiresAt: o.ExpiresAt, UsedAt: o.UsedAt, UsedBy: o.UsedByName, Email: o.Email}
 }

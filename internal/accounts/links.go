@@ -2,10 +2,10 @@ package accounts
 
 import (
 	"context"
-	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"github.com/mrRedSun/redrop/internal/ids"
 	"github.com/mrRedSun/redrop/internal/security"
 	"github.com/mrRedSun/redrop/internal/store"
@@ -24,10 +24,21 @@ func (s *Service) createLink(ctx context.Context, o *store.OneTime) (string, err
 	if err := s.db.CreateOneTime(ctx, o, ids.Hash(secret)); err != nil {
 		return "", apperr.Internal(err)
 	}
-	return s.cfg.PublicOrigin() + linkPaths[o.Purpose] + secret, nil
+	return s.inviteURLFrom(o, secret), nil
 }
 
-// lookupLink finds an unused, unexpired one-time link (rate limited per IP).
+// inviteURLFrom returns the absolute URL for a link with its secret.
+func (s *Service) inviteURLFrom(o *store.OneTime, secret string) string {
+	return s.cfg.PublicOrigin() + linkPaths[o.Purpose] + secret
+}
+
+// InviteURL is the absolute invite link for a token. The mail worker uses it
+// to render an invite email with the token it has just minted.
+func (s *Service) InviteURL(secret string) string {
+	return s.cfg.PublicOrigin() + linkPaths[store.PurposeInvite] + secret
+}
+
+// lookupLink finds an unused, unexpired one-time link, rate limited per IP.
 func (s *Service) lookupLink(ctx context.Context, network, purpose, token string) (*store.OneTime, error) {
 	if !s.linkLimiter.Allow(network) {
 		return nil, apperr.RateLimited("too many requests").WithRetryAfter(s.linkLimiter.Wait(network))
@@ -66,7 +77,7 @@ func (s *Service) Setup(ctx context.Context, network, token, username, password 
 	if err != nil {
 		return nil, err
 	}
-	sess, err := s.redeemWithPassword(ctx, o, username, password)
+	sess, err := s.redeemWithPassword(ctx, o, ids.Hash(token), username, password)
 	if err != nil {
 		return nil, err
 	}
@@ -92,16 +103,18 @@ func (s *Service) InviteInfo(ctx context.Context, network, token string) (Invite
 	return InviteInfo{Valid: true, Role: o.Role, ExpiresAt: o.ExpiresAt}, nil
 }
 
-// AcceptInvite creates a password account from an invite.
+// AcceptInvite creates a password account from an invite. The link's hash is
+// passed to the redeem, so an invite whose email was sent again (rotating its
+// hash) between lookup and redeem is refused as used.
 func (s *Service) AcceptInvite(ctx context.Context, network, token, username, password string) (*Session, error) {
 	o, err := s.lookupLink(ctx, network, store.PurposeInvite, token)
 	if err != nil {
 		return nil, err
 	}
-	return s.redeemWithPassword(ctx, o, username, password)
+	return s.redeemWithPassword(ctx, o, ids.Hash(token), username, password)
 }
 
-func (s *Service) redeemWithPassword(ctx context.Context, o *store.OneTime, username, password string) (*Session, error) {
+func (s *Service) redeemWithPassword(ctx context.Context, o *store.OneTime, linkHash, username, password string) (*Session, error) {
 	username, err := normalizeUsername(username)
 	if err != nil {
 		return nil, err
@@ -112,11 +125,11 @@ func (s *Service) redeemWithPassword(ctx context.Context, o *store.OneTime, user
 	if taken, _ := s.db.UsernameTaken(ctx, username); taken {
 		return nil, apperr.Conflict("that username is taken")
 	}
-	hash, err := security.HashPassword(password)
+	passwordHash, err := security.HashPassword(password)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
-	u, err := s.db.RedeemAccountLink(ctx, o, username, username, hash, s.cfg.DefaultQuotaBytes, "", "", "")
+	u, err := s.db.RedeemAccountLink(ctx, o, linkHash, username, username, passwordHash, s.cfg.DefaultQuotaBytes, "", "", "")
 	if err != nil {
 		return nil, mapStore(err)
 	}
@@ -158,7 +171,7 @@ func (s *Service) ResetPassword(ctx context.Context, network, token, password st
 	if err != nil {
 		return apperr.Internal(err)
 	}
-	return mapStore(s.db.RedeemReset(ctx, o, hash))
+	return mapStore(s.db.RedeemReset(ctx, o, ids.Hash(token), hash))
 }
 
 func truncate(s string, n int) string {

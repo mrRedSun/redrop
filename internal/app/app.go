@@ -22,8 +22,10 @@ import (
 	"github.com/mrRedSun/redrop/internal/brand"
 	"github.com/mrRedSun/redrop/internal/config"
 	"github.com/mrRedSun/redrop/internal/content"
+	"github.com/mrRedSun/redrop/internal/dashpaths"
 	"github.com/mrRedSun/redrop/internal/httpapi"
 	"github.com/mrRedSun/redrop/internal/janitor"
+	"github.com/mrRedSun/redrop/internal/mail"
 	"github.com/mrRedSun/redrop/internal/netutil"
 	"github.com/mrRedSun/redrop/internal/notify"
 	"github.com/mrRedSun/redrop/internal/sharing"
@@ -37,6 +39,7 @@ import (
 type Options struct {
 	Dashboard fs.FS  // built SPA (index.html at root); nil disables it
 	CLIDir    string // prebuilt CLI binaries for /install.sh
+	Offline   bool   // CLI administration and OpenAPI must not start mail delivery
 }
 
 type App struct {
@@ -49,6 +52,7 @@ type App struct {
 	Tunnels  *tunnel.Registry
 	janitor  *janitor.Janitor
 	notifier *notify.Webhook // nil without REDROP_NOTIFY_URL
+	mail     *mail.Queue     // nil without REDROP_SMTP_ADDR
 	handler  http.Handler
 }
 
@@ -81,6 +85,40 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 		sh.SetNotifier(webhook)
 	}
 	acc := accounts.New(db, cfg, secret, log)
+	// Outbound mail (DESIGN.md "Email"): one queue, one worker, persisted
+	// send state. Report alerts batch on top of it; the webhook stays the
+	// instant channel. The worker mints invite links through the accounts
+	// service, which owns their path.
+	var mailQueue *mail.Queue
+	if cfg.MailEnabled() {
+		sm, err := mail.NewSMTP(mail.SMTPConfig{
+			Addr: cfg.SMTPAddr, TLS: mail.TLSMode(cfg.SMTPTLS), Username: cfg.SMTPUsername, Password: cfg.SMTPPassword,
+			CAFile: cfg.SMTPCAFile, From: cfg.MailFrom, InsecurePlain: cfg.MailInsecurePlain,
+		})
+		if err == nil {
+			mailQueue, err = mail.NewQueue(db, sm, cfg.MailFrom, log, mail.DefaultQueueConfig())
+		}
+		if err == nil {
+			mailQueue.SetInviteLink(acc.InviteURL)
+			mailQueue.SetAlerts(cfg.NotifyEmail, cfg.AlertInterval, cfg.PublicOrigin()+dashpaths.AdminReports)
+			if !opts.Offline {
+				err = mailQueue.Start()
+			}
+		}
+		if err != nil {
+			acc.Close()
+			sh.Close()
+			if webhook != nil {
+				webhook.Close()
+			}
+			db.Close()
+			return nil, err
+		}
+		if len(cfg.NotifyEmail) > 0 {
+			sh.SetAlertNotifier(mailQueue)
+		}
+	}
+	acc.SetMailer(mailQueue)
 	clients := &netutil.ClientResolver{TrustedProxies: cfg.TrustedProxies, IPHeader: cfg.ClientIPHeader, CountryHeader: cfg.CountryHeader, TrustedHops: cfg.TrustedHops}
 	// Live tunnel connections: the sharing service reports access changes
 	// to them, accounts report disabled users and deleted tokens.
@@ -108,15 +146,15 @@ func New(cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
 
 	a := &App{
 		cfg: cfg, log: log, db: db, Accounts: acc, Sharing: sh, API: api, Tunnels: tunnels,
-		janitor: janitor.New(sh, db, cfg.DataDir, log), notifier: webhook,
+		janitor: janitor.New(sh, db, cfg.DataDir, log), notifier: webhook, mail: mailQueue,
 	}
 	a.handler = hostRouter(cfg.ContentHost(), content.New(sh, cfg, clients, log, installers).WithTunnels(tunnels), api.Handler())
 	return a, nil
 }
 
 // Close releases what New built: the services' background goroutines and
-// the notification worker, then the database. Call it after Run has
-// returned.
+// the notification and mail workers, then the database. Call it after Run
+// has returned.
 func (a *App) Close() error {
 	a.Tunnels.Shutdown(tunnelShutdownWait)
 	a.Tunnels.Close()
@@ -124,6 +162,9 @@ func (a *App) Close() error {
 	a.Sharing.Close()
 	if a.notifier != nil {
 		a.notifier.Close()
+	}
+	if a.mail != nil {
+		a.mail.Close()
 	}
 	return a.db.Close()
 }

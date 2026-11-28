@@ -14,6 +14,13 @@ pull requests.
 
 ### Added
 
+- SMTP invite emails and batched abuse-report alerts, off by default. Supports
+  required STARTTLS, implicit TLS, authentication and private relay CAs, with a
+  durable bounded queue, send status, resend, throttling,
+  `redrop-server mail-test --to ADDR` and `redrop-server mail-unbounce ADDR`.
+  An emailed invite's link is minted when the email is sent and stored only as
+  a hash; every send replaces it. (#40)
+
 - Release process: after the CI checks pass, a `vX.Y.Z` tag builds CLI
   binaries for Linux, macOS and Windows (amd64/arm64) with `SHA256SUMS` and
   GitHub build-provenance attestations, and publishes them to a GitHub

@@ -41,7 +41,7 @@ func newStoreService(t *testing.T) (*Service, *store.Artifact) {
 	if err := db.CreateOneTime(ctx, o, "invite-hash"); err != nil {
 		t.Fatal(err)
 	}
-	u, err := db.RedeemAccountLink(ctx, o, "owner", "owner", "", 1<<30, "", "", "")
+	u, err := db.RedeemAccountLink(ctx, o, "invite-hash", "owner", "owner", "", 1<<30, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

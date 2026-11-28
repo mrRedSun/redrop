@@ -24,6 +24,7 @@ type OneTime struct {
 	QuotaBytes int64
 	ClearTOTP  bool
 	Note       string
+	Email      string // invite mail: where the link is sent ("" = nowhere)
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	UsedAt     *time.Time
@@ -45,18 +46,18 @@ func (s *Store) CreateOneTime(ctx context.Context, o *OneTime, hash string) erro
 	if o.CreatedBy != "" {
 		by = sql.NullString{String: o.CreatedBy, Valid: true}
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO onetime (id, hash, purpose, user_id, created_by, role, quota_bytes, clear_totp, note, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		o.ID, hash, o.Purpose, uid, by, o.Role, o.QuotaBytes, o.ClearTOTP, o.Note, o.CreatedAt.Unix(), o.ExpiresAt.Unix())
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO onetime (id, hash, purpose, user_id, created_by, role, quota_bytes, clear_totp, note, email, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		o.ID, hash, o.Purpose, uid, by, o.Role, o.QuotaBytes, o.ClearTOTP, o.Note, o.Email, o.CreatedAt.Unix(), o.ExpiresAt.Unix())
 	return err
 }
 
-const oneTimeCols = `o.id, o.purpose, coalesce(o.user_id,''), coalesce(o.created_by,''), o.role, o.quota_bytes, o.clear_totp, o.note, o.created_at, o.expires_at, o.used_at, coalesce(o.used_by,''), coalesce(u.username,'')`
+const oneTimeCols = `o.id, o.purpose, coalesce(o.user_id,''), coalesce(o.created_by,''), o.role, o.quota_bytes, o.clear_totp, o.note, coalesce(o.email,''), o.created_at, o.expires_at, o.used_at, coalesce(o.used_by,''), coalesce(u.username,'')`
 
 func scanOneTime(r scanner) (*OneTime, error) {
 	var o OneTime
 	var created, exp int64
 	var used sql.NullInt64
-	if err := r.Scan(&o.ID, &o.Purpose, &o.UserID, &o.CreatedBy, &o.Role, &o.QuotaBytes, &o.ClearTOTP, &o.Note, &created, &exp, &used, &o.UsedBy, &o.UsedByName); err != nil {
+	if err := r.Scan(&o.ID, &o.Purpose, &o.UserID, &o.CreatedBy, &o.Role, &o.QuotaBytes, &o.ClearTOTP, &o.Note, &o.Email, &created, &exp, &used, &o.UsedBy, &o.UsedByName); err != nil {
 		return nil, notFound(err)
 	}
 	o.CreatedAt, o.ExpiresAt, o.UsedAt = ts(created), ts(exp), tsp(used)
@@ -67,6 +68,10 @@ func scanOneTime(r scanner) (*OneTime, error) {
 func (s *Store) OneTimeByHash(ctx context.Context, purpose, hash string) (*OneTime, error) {
 	return scanOneTime(s.DB.QueryRowContext(ctx, `SELECT `+oneTimeCols+` FROM onetime o LEFT JOIN users u ON u.id = o.used_by
 		WHERE o.hash = ? AND o.purpose = ? AND o.used_at IS NULL AND o.expires_at > ?`, hash, purpose, now()))
+}
+
+func (s *Store) OneTimeByID(ctx context.Context, purpose, id string) (*OneTime, error) {
+	return scanOneTime(s.DB.QueryRowContext(ctx, `SELECT `+oneTimeCols+` FROM onetime o LEFT JOIN users u ON u.id=o.used_by WHERE o.purpose=? AND o.id=?`, purpose, id))
 }
 
 func (s *Store) ListOneTime(ctx context.Context, purpose string) ([]*OneTime, error) {
@@ -97,9 +102,12 @@ func (s *Store) DeleteOneTime(ctx context.Context, purpose, id string) error {
 	return nil
 }
 
-// consume atomically marks the link used inside tx.
-func consume(ctx context.Context, tx *sql.Tx, id, userID string) error {
-	res, err := tx.ExecContext(ctx, `UPDATE onetime SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?`, now(), userID, id, now())
+// consume atomically marks the link used inside tx. It matches the hash that
+// was looked up, not just the ID: an emailed invite's hash is rotated when its
+// email is sent again, so a redemption that looked the old token up before
+// that rotation must be refused here (ErrLinkUsed), not consume the invite.
+func consume(ctx context.Context, tx *sql.Tx, id, hash, userID string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE onetime SET used_at = ?, used_by = ? WHERE id = ? AND hash = ? AND used_at IS NULL AND expires_at > ?`, now(), userID, id, hash, now())
 	if err != nil {
 		return err
 	}
@@ -110,8 +118,10 @@ func consume(ctx context.Context, tx *sql.Tx, id, userID string) error {
 }
 
 // RedeemAccountLink consumes an invite/setup link and creates the user,
-// optionally linking an OIDC identity, in one transaction.
-func (s *Store) RedeemAccountLink(ctx context.Context, o *OneTime, username, displayName, passwordHash string, defaultQuota int64, provider, subject, email string) (*User, error) {
+// optionally linking an OIDC identity, in one transaction. hash is the link's
+// hash that was looked up: consume matches it, so a rotated invite link is
+// refused here instead of being redeemed by a stale lookup.
+func (s *Store) RedeemAccountLink(ctx context.Context, o *OneTime, hash, username, displayName, passwordHash string, defaultQuota int64, provider, subject, email string) (*User, error) {
 	var u *User
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
 		quota := o.QuotaBytes
@@ -131,15 +141,16 @@ func (s *Store) RedeemAccountLink(ctx context.Context, o *OneTime, username, dis
 				return err
 			}
 		}
-		return consume(ctx, tx, o.ID, u.ID)
+		return consume(ctx, tx, o.ID, hash, u.ID)
 	})
 	return u, err
 }
 
-// RedeemReset consumes a reset link and sets the new password.
-func (s *Store) RedeemReset(ctx context.Context, o *OneTime, passwordHash string) error {
+// RedeemReset consumes a reset link and sets the new password. hash is the
+// link's hash that was looked up; consume matches it.
+func (s *Store) RedeemReset(ctx context.Context, o *OneTime, hash, passwordHash string) error {
 	return s.Tx(ctx, func(tx *sql.Tx) error {
-		if err := consume(ctx, tx, o.ID, o.UserID); err != nil {
+		if err := consume(ctx, tx, o.ID, hash, o.UserID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, passwordHash, o.UserID); err != nil {

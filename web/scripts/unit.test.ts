@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { createJiti } from 'jiti'
+import { createElement, type ReactNode } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { RegistryContext } from '@effect/atom-react'
 import { Effect, Exit, Layer, Option, Redacted, Schema } from 'effect'
 import { HttpClient, HttpClientError, HttpClientResponse } from 'effect/http'
 import { AsyncResult, Atom, AtomRegistry, Reactivity } from 'effect/reactivity'
@@ -8,9 +13,13 @@ import { fromProblem } from '@/api/errors'
 import { safeNext } from '@/app/paths'
 import * as account from '@/features/account/endpoints'
 import * as auth from '@/features/auth/endpoints'
+import * as authAtoms from '@/features/auth/atoms'
+import { AuthConfig } from '@/features/auth/schemas'
+import * as adminAtoms from '@/features/admin/atoms'
+import type {} from '@/features/artifacts/atoms'
 import * as artifactEndpoints from '@/features/artifacts/endpoints'
 import { Artifact, ArtifactSettingsForm, Comment, CommentList, filterFromSearch, groupByVersion, settingsDefaults, shareLink, statusLabel, toUpdateRequest, tunnelState } from '@/features/artifacts/schemas'
-import { Stats, AdminArtifact, CreateInviteForm, Report, ReportList, reportFilterFromSearch, reportSearch, reportedLink, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
+import { Stats, AdminArtifact, CreatedInvite, CreateInviteForm, createInviteDefaults, Invite, Report, ReportList, reportFilterFromSearch, reportSearch, reportedLink, toCreateInviteRequest, toUpdateUserRequest } from '@/features/admin/schemas'
 import * as adminEndpoints from '@/features/admin/endpoints'
 import * as reportEndpoints from '@/features/reports/endpoints'
 import { ReportForm, reportDefaults, toReportRequest } from '@/features/reports/schemas'
@@ -19,6 +28,15 @@ import { CreatedToken, TokenList } from '@/features/tokens/schemas'
 import { psQuote, setupCommand, setupOsFromPlatform, shQuote } from '@/features/tokens/setup-command'
 
 Object.defineProperty(globalThis, 'location', { configurable: true, value: { origin: 'https://app.example', pathname: '/artifacts/deep/link' } })
+
+// The shared script runner handles TypeScript; component checks also need JSX.
+const jsx = createJiti(import.meta.url, {
+  alias: { '@': fileURLToPath(new URL('../src', import.meta.url)) },
+  jsx: { runtime: 'automatic' },
+})
+const { CreatedInviteResult, InviteForm } = await jsx.import<typeof import('@/features/admin/components/create-invite-dialog')>('../src/features/admin/components/create-invite-dialog.tsx')
+const { Component: InvitesPage } = await jsx.import<typeof import('@/features/admin/pages/invites-page')>('../src/features/admin/pages/invites-page.tsx')
+const { TooltipProvider } = await jsx.import<typeof import('@/components/ui/tooltip')>('../src/components/ui/tooltip.tsx')
 
 function harness(respond: (path: string) => Response | 'offline') {
   const requests: Array<{ path: string; method: string; csrf: string | undefined; body: string | undefined }> = []
@@ -97,9 +115,131 @@ await test('forms validate numbers and cross-field confirmation, and keep passwo
   for (const maxViews of ['-1', '1.5', '1000001', 'not a number']) assert(Option.isNone(Schema.decodeUnknownOption(ArtifactSettingsForm)({ ...input, maxViews })))
   assert(Option.isNone(Schema.decodeUnknownOption(NewPasswordForm)({ password: 'example-test-only', confirm: 'different' })))
   assert(Option.isNone(Schema.decodeUnknownOption(NewAccountForm)({ username: '../', password: 'example-test-only', confirm: 'example-test-only' })))
-  const invite = Schema.decodeUnknownSync(CreateInviteForm)({ note: 'test', role: 'user', quotaGB: '', ttl: '7d' })
+  const invite = Schema.decodeUnknownSync(CreateInviteForm)({ ...createInviteDefaults, note: 'test' })
   assert(!('quota_bytes' in toCreateInviteRequest(invite)))
   assert.equal(toUpdateUserRequest({ displayName: 'name', role: 'user', quotaGB: 1.5, disabled: false }).quota_bytes, 1_500_000_000)
+})
+
+await test('invite email form accepts empty or one bare address and omits empty email', () => {
+  for (const email of ['', '   ']) {
+    const values = Schema.decodeUnknownSync(CreateInviteForm)({ ...createInviteDefaults, email })
+    assert.deepEqual(toCreateInviteRequest(values), { note: '', role: 'user', ttl: '7d' })
+  }
+  for (const email of ['recipient@example.com', 'first.last+invites@sub.example.com', 'recipient@localhost']) {
+    const values = Schema.decodeUnknownSync(CreateInviteForm)({ ...createInviteDefaults, note: ' Welcome ', email: ` ${email} ` })
+    assert.deepEqual(toCreateInviteRequest(values), { note: 'Welcome', role: 'user', ttl: '7d', email })
+  }
+  for (const email of ['not-an-email', '@example.com', 'recipient@', 'a@@example.com', 'a b@example.com', 'Name <a@example.com>', 'a@example.com,b@example.com', 'a@example.com\r\nBcc: b@example.com', '.a@example.com', 'a..b@example.com', 'a@example..com', 'a@-example.com', 'a'.repeat(243) + '@example.com']) {
+    assert(Option.isNone(Schema.decodeUnknownOption(CreateInviteForm)({ ...createInviteDefaults, email })), email)
+  }
+  assert(Option.isSome(Schema.decodeUnknownOption(CreateInviteForm)({ ...createInviteDefaults, email: 'a'.repeat(242) + '@example.com' })))
+})
+
+const inviteWire = (over: Record<string, unknown> = {}) => ({
+  id: 'i1', note: 'Welcome', role: 'user', quota_bytes: 0,
+  created_at: '2026-11-20T10:00:00Z', expires_at: '2026-12-20T10:00:00Z', used_at: null, ...over,
+})
+const authConfigWire = { version: 'fixture', setup_required: false, password_login: true, providers: null, admin_requires_sso: false, mail: true, public_url: 'https://app.example', content_url: 'https://usercontent.example' }
+
+await test('mail capability is a required boolean and invite delivery metadata is optional', () => {
+  for (const mail of [true, false]) assert.equal(Schema.decodeUnknownSync(AuthConfig)({ ...authConfigWire, mail }).mail, mail)
+  for (const mail of [undefined, 'true', null]) assert(Option.isNone(Schema.decodeUnknownOption(AuthConfig)({ ...authConfigWire, mail })))
+  const plain = Schema.decodeUnknownSync(Invite)(inviteWire())
+  assert.equal(plain.email, undefined)
+  assert.equal(plain.email_status, undefined)
+  for (const email_status of ['queued', 'sending', 'sent', 'failed']) {
+    const invite = Schema.decodeUnknownSync(Invite)(inviteWire({ email: 'recipient@example.com', email_status, email_error: 'Delivery rejected', email_at: '2026-11-20T10:01:00Z' }))
+    assert.equal(invite.email_status, email_status)
+    assert.equal(invite.email_error, 'Delivery rejected')
+    assert.equal(invite.email_at?.toISOString(), '2026-11-20T10:01:00.000Z')
+  }
+  assert.equal(Schema.decodeUnknownSync(Invite)(inviteWire({ email_at: null })).email_at, null)
+  for (const over of [{ email_status: 'unknown' }, { email_at: 'not a date' }, { email_error: 42 }, { email: 42 }]) {
+    assert(Option.isNone(Schema.decodeUnknownOption(Invite)(inviteWire(over))))
+  }
+})
+
+await test('invite endpoints encode email on creation and decode the resend Invite response', async () => {
+  const wire = inviteWire({ email: 'recipient@example.com', email_status: 'queued' })
+  // An emailed invite comes back without a URL: the link is only in the email.
+  const h = harness(() => response(wire))
+  const req = toCreateInviteRequest(Schema.decodeUnknownSync(CreateInviteForm)({ ...createInviteDefaults, email: 'recipient@example.com' }))
+  const created = await h.run(adminEndpoints.createInvite(req))
+  assert.equal(created.url, undefined)
+  assert.equal(created.email, 'recipient@example.com')
+  const linkOnly = await harness(() => response({ ...inviteWire(), url: 'https://app.example/invite/test-only' })).run(adminEndpoints.createInvite({ note: '' }))
+  assert.equal(linkOnly.url && Redacted.value(linkOnly.url), 'https://app.example/invite/test-only')
+  const resent = await h.run(adminEndpoints.resendInvite('i/1'))
+  assert.equal(resent.email_status, 'queued')
+  assert(resent.expires_at instanceof Date)
+  assert(!('url' in resent), 'resending does not expose the one-time secret')
+  assert.deepEqual(h.requests, [
+    { method: 'POST', path: '/api/v1/admin/invites', csrf: '1', body: JSON.stringify(req) },
+    { method: 'POST', path: '/api/v1/admin/invites/i%2F1/resend', csrf: '1', body: undefined },
+  ])
+})
+
+await test('created invite: an emailed one says the link is in the email and Send again replaces it; a link-only one shows its link', () => {
+  const emailed = Schema.decodeUnknownSync(CreatedInvite)(inviteWire({ email: 'recipient@example.com', email_status: 'queued' }))
+  const html = renderInvites(createElement(CreatedInviteResult, { created: emailed }), true)
+  assert.match(html, /Emailed to recipient@example.com/)
+  assert.match(html, /sending again replaces it/)
+  assert.doesNotMatch(html, /Copy it now|\/invite\//)
+  const linkOnly = Schema.decodeUnknownSync(CreatedInvite)({ ...inviteWire(), url: 'https://app.example/invite/test-only' })
+  const shown = renderInvites(createElement(CreatedInviteResult, { created: linkOnly }), true)
+  assert.match(shown, /https:\/\/app\.example\/invite\/test-only/)
+  assert.doesNotMatch(shown, /Emailed to/)
+})
+
+function renderInvites(node: ReactNode, mail: boolean, invites: ReadonlyArray<Invite> = [], waiting = false) {
+  const registry = AtomRegistry.make({ initialValues: [
+    [authAtoms.config, AsyncResult.success(Schema.decodeUnknownSync(AuthConfig)({ ...authConfigWire, mail }))],
+    [adminAtoms.invites, AsyncResult.success(invites, { waiting })],
+  ] })
+  // The app mounts everything under a TooltipProvider (src/app/providers);
+  // CopyField's copy button needs it.
+  const under = createElement(TooltipProvider, null, node)
+  try { return renderToStaticMarkup(createElement(RegistryContext.Provider, { value: registry }, under)) }
+  finally { registry.dispose() }
+}
+
+await test('invite form shows email only when mail is enabled and explains who sees the note', () => {
+  const form = createElement(InviteForm, { onCreated: () => {} })
+  const enabled = renderInvites(form, true)
+  assert.match(enabled, /name="email"/)
+  assert.match(enabled, /type="email"/)
+  assert.match(enabled, /Email \(optional\)/)
+  assert.match(enabled, /Included in the email if you enter a recipient/)
+  const disabled = renderInvites(form, false)
+  assert.doesNotMatch(disabled, /name="email"/)
+  assert.match(disabled, /Only admins see it/)
+})
+
+await test('invite list renders delivery states and failure reasons as text', (t) => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-11-27T12:00:00Z'))
+  for (const email_status of ['queued', 'sending', 'sent', 'failed']) {
+    const invite = Schema.decodeUnknownSync(Invite)(inviteWire({ email: 'recipient@example.com', email_status, email_error: '<img src=x onerror=alert(1)>', email_at: '2026-11-20T10:01:00Z' }))
+    const html = renderInvites(createElement(InvitesPage), true, [invite])
+    assert.match(html, /Email status/)
+    assert.match(html, /recipient@example.com/)
+    assert(html.includes(`>${email_status}</span>`))
+    if (email_status === 'failed') assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/)
+    else assert.doesNotMatch(html, /onerror/)
+    assert.doesNotMatch(html, /<img/)
+  }
+})
+
+await test('Send again is limited to unused, unexpired emailed invites while mail is enabled', (t) => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-11-27T12:00:00Z'))
+  const active = Schema.decodeUnknownSync(Invite)(inviteWire({ email: 'recipient@example.com', email_status: 'sent' }))
+  const page = createElement(InvitesPage)
+  assert.match(renderInvites(page, true, [active]), />Send again</)
+  assert.doesNotMatch(renderInvites(page, false, [active]), />Send again</)
+  for (const over of [{ email: undefined }, { email: '' }, { used_at: new Date('2026-11-26T12:00:00Z') }, { expires_at: new Date('2026-11-26T12:00:00Z') }]) {
+    assert.doesNotMatch(renderInvites(page, true, [{ ...active, ...over }]), />Send again</)
+  }
+  assert.match(renderInvites(page, true, [active], true), /disabled=""[^>]*>Send again</)
+  assert.match(renderInvites(page, true, [Schema.decodeUnknownSync(Invite)(inviteWire())]), /No email/)
 })
 
 await test('viewer settings: defaults from the artifact and both are always sent explicitly', () => {

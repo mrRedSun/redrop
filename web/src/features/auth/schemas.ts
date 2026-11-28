@@ -65,6 +65,7 @@ export const AuthConfig = Schema.Struct({
   password_login: Schema.Boolean,
   providers: Schema.NullOr(Schema.Array(AuthProvider)),
   admin_requires_sso: Schema.Boolean,
+  mail: Schema.Boolean,
   public_url: Schema.String,
   content_url: Schema.String,
 })

@@ -107,7 +107,39 @@ ALTER TABLE versions ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE uploads ADD COLUMN artifact_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE uploads ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0;`
 
-var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9}
+// schemaV10 adds outbound mail state (DESIGN.md "Email"): the email
+// address an invite's link is sent to, the persisted send queue (so a
+// restart never loses a message), hourly invite-mail charges, the bounce
+// list of permanently refused addresses, and the per-address state of the
+// batched report alerts. Invite rows hold no body and no token: the worker
+// mints the link when it sends. An older server ignores all of it.
+const schemaV10 = `ALTER TABLE onetime ADD COLUMN email TEXT NOT NULL DEFAULT '';
+CREATE TABLE mail_out (
+    id TEXT PRIMARY KEY,
+    to_addr TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    invite_id TEXT UNIQUE REFERENCES onetime(id) ON DELETE CASCADE,
+    inviter TEXT NOT NULL DEFAULT '',
+    body BLOB NOT NULL DEFAULT X'',
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    next_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX mail_out_due ON mail_out(status, next_at);
+CREATE TABLE mail_bounced (address TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE mail_sends (actor TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX mail_sends_at ON mail_sends(at);
+CREATE TABLE mail_alerts (
+    address TEXT PRIMARY KEY,
+    cursor INTEGER NOT NULL,
+    next_at INTEGER NOT NULL,
+    last_attempt INTEGER NOT NULL DEFAULT 0
+);`
+
+var migrations = []string{schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7, schemaV8, schemaV9, schemaV10}
 
 var ErrNotFound = errors.New("not found")
 

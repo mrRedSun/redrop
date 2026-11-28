@@ -119,6 +119,7 @@ func (a *API) routes() {
 	fuego.Get(adm, "/invites", a.admin.listInvites, with(adminOpts, op("adminListInvites", "List invites")...)...)
 	fuego.Post(adm, "/invites", a.admin.createInvite, with(adminJSON, append(op("adminCreateInvite", "Create an invite link"), option.DefaultStatusCode(http.StatusCreated))...)...)
 	fuego.Delete(adm, "/invites/{id}", a.admin.deleteInvite, with(adminOpts, op("adminDeleteInvite", "Revoke an invite")...)...)
+	fuego.Post(adm, "/invites/{id}/resend", a.admin.resendInvite, with(adminOpts, op("adminResendInvite", "Send the invite email again")...)...)
 	fuego.Get(adm, "/artifacts", a.admin.listArtifacts, with(adminOpts, append(op("adminListArtifacts", "All artifacts (metadata only)"),
 		option.Query("q", "Search"), option.Query("status", "active, expired, exhausted, revoked, or all"))...)...)
 	fuego.Patch(adm, "/artifacts/{id}", a.admin.updateArtifact, with(adminJSON, op("adminUpdateArtifact", "Revoke or restore any artifact")...)...)

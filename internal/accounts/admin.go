@@ -2,10 +2,13 @@ package accounts
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/mrRedSun/redrop/internal/apperr"
+	"github.com/mrRedSun/redrop/internal/ids"
+	"github.com/mrRedSun/redrop/internal/mail"
 	"github.com/mrRedSun/redrop/internal/store"
 	"github.com/mrRedSun/redrop/pkg/api"
 )
@@ -110,16 +113,20 @@ func (a *Administration) UpdateUser(ctx context.Context, admin *Principal, userI
 }
 
 // InviteRequest describes a new invite. TTL is untrusted text like "7d";
-// empty means the default (7 days); "never" is rejected.
+// empty means the default (7 days); "never" is rejected. Email, when not
+// empty, is where the invite link is sent; it must be a bare address.
 type InviteRequest struct {
 	Note       string
 	Role       string
 	QuotaBytes int64
 	TTL        string
+	Email      string
 }
 
 // CreateInvite returns the invite and its one-time URL. createdBy is empty
-// for invites minted offline from the server command line.
+// for invites minted offline from the server command line. With an email
+// address (and mail configured), the invite is queued for delivery and the
+// result has no URL: the link is minted when the email is sent.
 func (a *Administration) CreateInvite(ctx context.Context, createdBy string, req InviteRequest) (CreatedInvite, error) {
 	if req.Role == "" {
 		req.Role = api.RoleUser
@@ -137,13 +144,50 @@ func (a *Administration) CreateInvite(ctx context.Context, createdBy string, req
 	if err != nil {
 		return CreatedInvite{}, err
 	}
-	o := &store.OneTime{Purpose: store.PurposeInvite, CreatedBy: createdBy, Role: req.Role, QuotaBytes: req.QuotaBytes,
-		Note: truncate(strings.TrimSpace(req.Note), 200), ExpiresAt: time.Now().Add(ttl).UTC().Truncate(time.Second)}
-	url, err := a.s.createLink(ctx, o)
-	if err != nil {
-		return CreatedInvite{}, err
+	var email string
+	if req.Email != "" {
+		if a.s.mail == nil {
+			return CreatedInvite{}, apperr.Invalid("mail is not configured on this server; create the invite without an email")
+		}
+		email, err = mail.ValidAddress(req.Email)
+		if err != nil {
+			return CreatedInvite{}, apperr.Invalid("email must be %v", err)
+		}
 	}
-	return CreatedInvite{Invite: inviteView(o), URL: url}, nil
+	o := &store.OneTime{Purpose: store.PurposeInvite, CreatedBy: createdBy, Role: req.Role, QuotaBytes: req.QuotaBytes,
+		Note: truncate(strings.TrimSpace(req.Note), 200), Email: email, ExpiresAt: a.s.now().Add(ttl).UTC().Truncate(time.Second)}
+	if email == "" {
+		url, err := a.s.createLink(ctx, o)
+		return CreatedInvite{Invite: inviteView(o), URL: url}, err
+	}
+	inviter := "the server administrator"
+	if createdBy != "" {
+		u, err := a.s.db.UserByID(ctx, createdBy)
+		if err != nil {
+			return CreatedInvite{}, apperr.Internal(err)
+		}
+		inviter = inviterName(u.DisplayName, u.Username)
+	}
+	// The invite's hash is of a secret nobody keeps: an emailed invite has
+	// no working link until the mail worker mints one when it sends, and
+	// that token lives only in memory and in the email (DESIGN.md "Email").
+	// So the result carries no URL; the administrator shares nothing by hand.
+	row := &store.OutgoingMail{To: email, Inviter: inviter}
+	if err = a.s.db.CreateMailedInvite(ctx, o, ids.Hash(ids.Secret()), createdBy, row, a.s.now()); err != nil {
+		return CreatedInvite{}, mapMailError(err)
+	}
+	a.s.mail.Wake()
+	v := inviteView(o)
+	v.EmailStatus = store.MailQueued
+	return CreatedInvite{Invite: v}, nil
+}
+
+// inviterName is how an invite email names the administrator who sent it.
+func inviterName(display, username string) string {
+	if display == "" || display == username {
+		return username
+	}
+	return display + " (" + username + ")"
 }
 
 // inviteTTL parses an invite lifetime; invites always expire.
@@ -164,11 +208,93 @@ func (a *Administration) Invites(ctx context.Context) ([]Invite, error) {
 	if err != nil {
 		return nil, mapStore(err)
 	}
+	statuses, err := a.s.inviteMailStatuses(ctx, list)
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
 	out := make([]Invite, 0, len(list))
 	for _, o := range list {
-		out = append(out, inviteView(o))
+		v := inviteView(o)
+		if st, ok := statuses[o.ID]; ok {
+			v.EmailStatus, v.EmailError = st.Status, st.Error
+			if st.To != "" {
+				v.Email = st.To
+			}
+			v.EmailSentAt = &st.UpdatedAt
+		}
+		out = append(out, v)
 	}
 	return out, nil
+}
+
+// ResendInvite queues the invite's email again, subject to the same throttle
+// and bounce list. The new email carries a new link, and the previous
+// email's link stops working when it is sent.
+func (a *Administration) ResendInvite(ctx context.Context, admin *Principal, id string) (Invite, error) {
+	o, err := a.s.db.OneTimeByID(ctx, store.PurposeInvite, id)
+	if err != nil {
+		return Invite{}, mapStore(err)
+	}
+	if o.Email == "" {
+		return Invite{}, apperr.Invalid("this invite has no email address")
+	}
+	if o.UsedAt != nil {
+		return Invite{}, apperr.Conflict("this invite was already used")
+	}
+	if a.s.mail == nil {
+		return Invite{}, apperr.Invalid("mail is not configured on this server")
+	}
+	if err := a.s.db.ResendInviteMail(ctx, id, admin.UserID(), a.s.now()); err != nil {
+		return Invite{}, mapMailError(err)
+	}
+	a.s.mail.Wake()
+	return a.invite(ctx, o)
+}
+
+// invite returns one invite's view with its mail status.
+func (a *Administration) invite(ctx context.Context, o *store.OneTime) (Invite, error) {
+	v := inviteView(o)
+	statuses, err := a.s.inviteMailStatuses(ctx, []*store.OneTime{o})
+	if err != nil {
+		return Invite{}, apperr.Internal(err)
+	}
+	if st, ok := statuses[o.ID]; ok {
+		v.EmailStatus, v.EmailError = st.Status, st.Error
+		if st.To != "" {
+			v.Email = st.To
+		}
+		v.EmailSentAt = &st.UpdatedAt
+	}
+	return v, nil
+}
+
+// inviteMailStatuses looks up the latest send state of the given invites.
+func (s *Service) inviteMailStatuses(ctx context.Context, list []*store.OneTime) (map[string]store.OutgoingMail, error) {
+	ids := make([]string, 0, len(list))
+	for _, o := range list {
+		if o.Email != "" {
+			ids = append(ids, o.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return map[string]store.OutgoingMail{}, nil
+	}
+	return s.db.MailStatusesForInvites(ctx, ids)
+}
+
+func mapMailError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrMailRate):
+		return apperr.RateLimited("invite email limit reached; at most 10 per administrator and 60 globally per hour").WithRetryAfter(time.Hour)
+	case errors.Is(err, store.ErrMailFull):
+		return apperr.RateLimited("mail queue is full; try again later").WithRetryAfter(time.Minute)
+	case errors.Is(err, store.ErrMailBounced):
+		return apperr.Conflict("this address permanently refused mail from this server")
+	case errors.Is(err, store.ErrMailBusy):
+		return apperr.Conflict("this invite email is already queued")
+	default:
+		return mapStore(err)
+	}
 }
 
 func (a *Administration) DeleteInvite(ctx context.Context, id string) error {

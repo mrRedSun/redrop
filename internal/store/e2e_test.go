@@ -15,8 +15,8 @@ import (
 func TestE2EMigrationFromPreviousVersion(t *testing.T) {
 	const version = 9
 	prev := version - 1
-	if len(migrations) != version {
-		t.Fatalf("end-to-end migration must be last: got %d, want %d", len(migrations), version)
+	if len(migrations) < version || migrations[version-1] != schemaV9 {
+		t.Fatal("end-to-end migration must stay at version 9")
 	}
 	path := filepath.Join(t.TempDir(), "migration.db")
 	old, err := sql.Open("sqlite", "file:"+path)
@@ -39,8 +39,8 @@ func TestE2EMigrationFromPreviousVersion(t *testing.T) {
 	}
 	defer db.Close()
 	var gotVersion, reports, audit int
-	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil || gotVersion != version {
-		t.Fatalf("schema %d, want %d: %v", gotVersion, version, err)
+	if err := db.DB.QueryRow(`PRAGMA user_version`).Scan(&gotVersion); err != nil || gotVersion != len(migrations) {
+		t.Fatalf("schema %d, want %d: %v", gotVersion, len(migrations), err)
 	}
 	if err := db.DB.QueryRow(`SELECT (SELECT count(*) FROM reports), (SELECT count(*) FROM audit)`).Scan(&reports, &audit); err != nil || reports != 1 || audit != 1 {
 		t.Fatalf("schema 8 reports/audit changed: %d/%d: %v", reports, audit, err)
